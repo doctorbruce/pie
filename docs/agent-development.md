@@ -51,7 +51,7 @@ Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以�
 5. 已有 Agent 保留创建时的模型调用配置。Assistant/runtime 变化或服务重启导致重建时，使用会话保存的 `provider/model` 从当前 `models.json` 重新解析端点、凭据和模型参数。
 6. 模型被移除或配置失效时，历史仍可查看；继续执行明确报错，不悄悄切换到其他模型。修好配置后可以再次提交。
 
-助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `load_skill`。启用命令工具或 `task` 时，`job_output/job_kill` 自动随之启用。当前提供 server 层确认型交互和工作区边界检查，尚无进程沙箱或 MCP。
+助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `load_skill`。命令执行不内置：宿主自带命令工具，`job_output/job_kill` 也不再提供。当前提供 server 层确认型交互和工作区边界检查，尚无进程沙箱或 MCP。
 
 ## Plugin 与 Skill
 
@@ -66,7 +66,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
   → plugins.runtime() → 解析为带来源的 RuntimeConfig，写入 Session
   → Agent systemPrompt 只包含 Skill ID、description 和来源名称
   → 模型调用 load_skill → 读取完整 SKILL.md 和实际目录
-  → read / bash / powershell
+  → read / write / edit / grep / find / ls
   → 原版 loop 把工具结果交回模型
 ```
 
@@ -80,13 +80,13 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 本地助手挂载变更在已有会话下一次 Turn 前生效。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
 
-`load_skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。
+`load_skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册六个独立工具：`read`、`edit`、`write`、`grep`、`find`、`ls`。命令执行由宿主提供：`loadExternalTools` 拒绝外部工具复用保留 ID，因此 Pie 不再注册自己的 `bash`/`powershell`。
 
-这十个工具、按绑定出现的 `load_skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
+这六个工具、按绑定出现的 `load_skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
 
 内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 支持文本、目录、图片和 PDF 文本分页，PDF 一次最多 20 页；`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
 
-`bash/powershell` 支持 `workdir`、秒级 timeout、声明产物和命令分析。工作区外目录、命令参数中的外部路径以及高风险命令通过 `context.ask()` 请求确认。命令超过 `yieldMs`（默认 15 秒，可用 `PI_SHELL_YIELD_MS` 修改）后转为后台作业；`job_output` 只返回上次读取后的新增输出，`job_kill` 终止进程树。默认命令超时为 120 秒，可用 `PI_SHELL_TIMEOUT_MS` 修改。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_BASH`、`PI_POWERSHELL`、`PI_RG` 指定可执行文件。服务关闭会取消仍在运行的后台作业；进程崩溃或主动脱离进程树的进程仍不保证清理。
+`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。命令工具的参数、确认语义、超时与进程树清理由宿主命令工具自己负责，Pie 不再定义这套契约。
 
 挂载控制模型的 Skill 目录和加载入口，不是系统访问权限隔离。Session 的 `workspacePath` 是审批边界；访问边界外的路径会请求确认，但批准后仍由 Core 系统账户直接访问。当前没有进程沙箱或凭据代理。Skill 中依赖 Astron Engine HTTP 服务、凭据请求、桌面环境的流程仍需相应宿主能力，不因导入成功而自动可运行。
 

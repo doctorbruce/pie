@@ -3,15 +3,15 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { setTimeout } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "../src/agent.ts";
 import { createPlugins } from "../src/plugins.ts";
 import type { Assistant, Plugin, RuntimeConfig, SessionEvent, SessionSnapshot, ToolActivity } from "../src/protocol.ts";
 import { createCoreServer } from "../src/server.ts";
 import { systemTools } from "../src/tools.ts";
+import { hostCommandToolName, installHostCommandTool } from "./host-tools.ts";
 
-const shellName = process.platform === "win32" ? "powershell" : "bash";
+const shellName = hostCommandToolName;
 
 test("Astron manifest paths flatten to skills; assistant mounting survives restart and executes through the original loop", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-plugin-test-"));
@@ -52,7 +52,8 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 		join(source, "custom", "nested", "run.mjs"),
 		'import { writeFileSync } from "node:fs"; writeFileSync("result.txt", "SCRIPT_OK"); console.log("SCRIPT_OK");',
 	);
-	const env = { PI_DATA_DIR: join(directory, "data") };
+	const toolsDirectory = await installHostCommandTool(join(directory, "tools"));
+	const env = { PI_DATA_DIR: join(directory, "data"), PI_TOOLS_DIR: toolsDirectory };
 	async function start() {
 		const core = createCoreServer(env);
 		cores.push(core);
@@ -374,25 +375,11 @@ test("plugin import rejects escapes and duplicate runtime names without publishi
 	assert.deepEqual(plugins.list(), []);
 });
 
-test("shell reports nonzero exit, output limits, timeout and cancellation of descendants", async (t) => {
+test("host command tools stay outside Pie's own tool set", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-shell-test-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
-	const shell = systemTools({}, directory).find((tool) => tool.name === shellName);
-	assert(shell);
-	await assert.rejects(shell.execute("exit", { command: "exit 7" }), /code 7/);
-	const node = `${process.platform === "win32" ? "& " : ""}'${process.execPath.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
-	await writeFile(join(directory, "flood.mjs"), 'console.log("x".repeat(70000));');
-	const flooded = await shell.execute("limit", { command: `${node} flood.mjs` });
-	assert.match(JSON.stringify(flooded.details), /fullOutputPath/);
-	await writeFile(
-		join(directory, "wait.mjs"),
-		'import { writeFileSync } from "node:fs"; console.log("ready"); setTimeout(() => writeFileSync("leaked.txt", "leak"), 2000);',
+	assert.equal(
+		systemTools({}, directory).find((tool) => tool.name === shellName),
+		undefined,
 	);
-	await assert.rejects(shell.execute("timeout", { command: `${node} wait.mjs`, timeout: 0.5 }), /timed out/);
-	const controller = new AbortController();
-	const pending = shell.execute("cancel", { command: `${node} wait.mjs` }, controller.signal);
-	setTimeout(800).then(() => controller.abort());
-	await assert.rejects(pending, /aborted/);
-	await setTimeout(2200);
-	await assert.rejects(readFile(join(directory, "leaked.txt")), { code: "ENOENT" });
 });

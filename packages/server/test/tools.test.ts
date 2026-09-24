@@ -3,8 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { BackgroundJobs } from "../src/tools/jobs.ts";
-import { applyPermissionPolicy, type ToolRuntime } from "../src/tools/runtime.ts";
+import { applyPermissionPolicy } from "../src/tools/runtime.ts";
 import { systemTools } from "../src/tools.ts";
 
 test("host permission policy allows configured operations but preserves explicit confirmations", async () => {
@@ -52,10 +51,7 @@ test("upstream tool set performs file, listing and search operations", async (t)
 	const directory = await mkdtemp(join(tmpdir(), "pie-tools-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
 	const tools = new Map(systemTools({}, directory).map((tool) => [tool.name, tool]));
-	assert.deepEqual(
-		[...tools.keys()],
-		["read", "bash", "powershell", "edit", "write", "grep", "find", "ls", "job_output", "job_kill"],
-	);
+	assert.deepEqual([...tools.keys()], ["read", "edit", "write", "grep", "find", "ls"]);
 
 	const write = tools.get("write");
 	const read = tools.get("read");
@@ -95,54 +91,4 @@ test("upstream tool set performs file, listing and search operations", async (t)
 	const document = await read.execute("read-pdf", { path: pdfPath, pages: "1" });
 	assert.match(JSON.stringify(document), /Hello PDF/);
 	assert.match(JSON.stringify(document.details), /"pageCount":1/);
-});
-
-test("shell moves long commands to background and job_output reads incremental completion", async (t) => {
-	const directory = await mkdtemp(join(tmpdir(), "pie-shell-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
-	const tools = new Map(systemTools({}, directory).map((tool) => [tool.name, tool]));
-	const name = process.platform === "win32" ? "powershell" : "bash";
-	const command =
-		process.platform === "win32"
-			? "Write-Output first; Start-Sleep -Milliseconds 150; Write-Output second"
-			: "printf 'first\\n'; sleep 0.15; printf 'second\\n'";
-	const shell = tools.get(name);
-	const output = tools.get("job_output");
-	assert(shell && output);
-	const started = await shell.execute("shell", { command, yieldMs: 1, timeout: 5 });
-	const jobId = (started.details as { jobId?: string }).jobId;
-	assert(jobId);
-	const completed = await output.execute("output", { job_id: jobId, wait_ms: 5_000 });
-	assert.match(JSON.stringify(completed), /second/);
-	assert.match(JSON.stringify(completed.details), /"status":"completed"/);
-});
-
-test("shell permission analysis blocks risky commands before spawning and job_kill settles cancellation", async (t) => {
-	const directory = await mkdtemp(join(tmpdir(), "pie-shell-permission-"));
-	t.after(() => rm(directory, { recursive: true, force: true }));
-	const jobs = new BackgroundJobs();
-	t.after(() => jobs.close());
-	const requested: Record<string, unknown>[] = [];
-	const runtime: ToolRuntime = {
-		sessionId: "permission-test",
-		directory,
-		jobs,
-		async ask(request) {
-			requested.push(request.metadata ?? {});
-			throw new Error("denied");
-		},
-	};
-	const guarded = new Map(systemTools({}, directory, runtime).map((tool) => [tool.name, tool]));
-	const shellName = process.platform === "win32" ? "powershell" : "bash";
-	const risky = process.platform === "win32" ? "Remove-Item victim.txt" : "rm victim.txt";
-	await assert.rejects(guarded.get(shellName)!.execute("risk", { command: risky }), /denied/);
-	assert.equal(requested[0].permission, "shell");
-
-	const normal = new Map(systemTools({}, directory).map((tool) => [tool.name, tool]));
-	const sleep = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
-	const started = await normal.get(shellName)!.execute("sleep", { command: sleep, background: true, timeout: 30 });
-	const jobId = (started.details as { jobId?: string }).jobId;
-	assert(jobId);
-	const stopped = await normal.get("job_kill")!.execute("kill", { job_id: jobId });
-	assert.match(JSON.stringify(stopped.details), /"status":"cancelled"/);
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,15 +18,14 @@ import type {
 	SessionSummary,
 } from "../src/protocol.ts";
 import { createCoreServer } from "../src/server.ts";
+import { failCommand, hostCommandToolName, installHostCommandTool, waitCommand } from "./host-tools.ts";
 
-const shellTool = process.platform === "win32" ? "powershell" : "bash";
-const waitCommand = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
-const failCommand =
-	process.platform === "win32" ? "Write-Error 'test failure'; exit 7" : "printf 'test failure\\n' >&2; exit 7";
+const shellTool = hostCommandToolName;
 
 async function start(env: NodeJS.ProcessEnv = {}) {
 	const directory = env.PI_DATA_DIR ?? (await mkdtemp(join(tmpdir(), "pie-server-test-")));
-	const core = createCoreServer({ ...env, PI_DATA_DIR: directory });
+	const toolsDirectory = env.PI_TOOLS_DIR ?? (await installHostCommandTool(join(directory, "tools")));
+	const core = createCoreServer({ ...env, PI_DATA_DIR: directory, PI_TOOLS_DIR: toolsDirectory });
 	await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
 	const address = core.server.address();
 	assert(address && typeof address !== "string");
@@ -87,7 +86,7 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	const catalog = (await (await fetch(`${core.base}/tools`)).json()) as { tools: { id: string }[] };
 	assert.deepEqual(
 		catalog.tools.map((tool) => tool.id),
-		["read", "bash", "powershell", "edit", "write", "grep", "find", "ls", "job_output", "job_kill"],
+		["read", "edit", "write", "grep", "find", "ls", shellTool],
 	);
 	const assistants = (await (await fetch(`${core.base}/assistants`)).json()) as { assistants: Assistant[] };
 	assert.deepEqual(assistants.assistants[0].toolIds, []);
@@ -141,6 +140,44 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	assert.deepEqual((await reconnected.next()).value?.snapshot, final);
 	await reconnected.return(undefined);
 	assert(received.every((p, i) => i === 0 || p.snapshot.revision > received[i - 1].snapshot.revision));
+});
+
+test("a persisted host runtime that no longer parses is dropped instead of blocking boot", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-stale-runtimes-"));
+	t.after(() => rm(directory, { recursive: true, force: true }));
+	const dataDirectory = join(directory, "data");
+	await mkdir(dataDirectory, { recursive: true });
+	const database = new DatabaseSync(join(dataDirectory, "agent.sqlite"));
+	database.exec(
+		"CREATE TABLE IF NOT EXISTS host_runtimes (id TEXT PRIMARY KEY, payload TEXT NOT NULL);" +
+			"CREATE TABLE IF NOT EXISTS assistants (id TEXT PRIMARY KEY, payload TEXT NOT NULL);" +
+			"CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL, payload TEXT NOT NULL);",
+	);
+	database.prepare("INSERT OR REPLACE INTO host_runtimes VALUES (?, ?)").run(
+		"stale-host",
+		JSON.stringify({
+			assistantId: "stale-host",
+			assistantRevision: "1",
+			runtime: { systemPrompt: "", toolIds: ["tool-that-was-removed"], skills: [], subagents: [] },
+		}),
+	);
+	database.close();
+
+	const toolsDirectory = await installHostCommandTool(join(directory, "tools"));
+	const core = createCoreServer({ PI_DATA_DIR: dataDirectory, PI_TOOLS_DIR: toolsDirectory });
+	t.after(() => core.close());
+	await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+	const address = core.server.address();
+	assert(address && typeof address !== "string");
+	const base = `http://127.0.0.1:${address.port}`;
+
+	const health = await fetch(`${base}/health`);
+	assert.equal(health.status, 200);
+	// The host re-registers on connect; the stale row is gone from storage.
+	const persisted = new DatabaseSync(join(dataDirectory, "agent.sqlite"));
+	const rows = persisted.prepare("SELECT COUNT(*) AS count FROM host_runtimes").get() as { count: number };
+	persisted.close();
+	assert.equal(rows.count, 0);
 });
 
 test("global SSE stays incremental when the session snapshot exceeds the client backlog limit", async (t) => {
@@ -903,11 +940,12 @@ test("local assistants expose selected assistants as dynamically refreshed subag
 
 test("process crash keeps accepted input and closes unknown tool outcomes without replay", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-crash-"));
+	const toolsDirectory = await installHostCommandTool(join(directory, "tools"));
 	const cores: { close: () => Promise<void> }[] = [];
 	const child = spawn(
 		process.execPath,
 		["--conditions=source", fileURLToPath(new URL("../src/cli.ts", import.meta.url)), "--port", "0"],
-		{ env: { PI_DATA_DIR: directory }, stdio: ["ignore", "pipe", "pipe"] },
+		{ env: { PI_DATA_DIR: directory, PI_TOOLS_DIR: toolsDirectory }, stdio: ["ignore", "pipe", "pipe"] },
 	);
 	t.after(async () => {
 		if (child.exitCode === null && child.signalCode === null) {

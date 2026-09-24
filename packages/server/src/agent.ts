@@ -178,10 +178,6 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 					? resolveConfiguredModelHeaders(realModel, config.providers[realModel.provider], modelEnv)
 					: undefined;
 			const selectedNativeTools = new Set(runtime.toolIds);
-			if (taskTool || runtime.toolIds.some((id) => id === "bash" || id === "powershell")) {
-				selectedNativeTools.add("job_output");
-				selectedNativeTools.add("job_kill");
-			}
 			return new Agent({
 				sessionId,
 				afterToolCall: skillTools.afterToolCall,

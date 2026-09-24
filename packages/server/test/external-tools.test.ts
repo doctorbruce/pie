@@ -364,7 +364,7 @@ test("tool loading rejects duplicate IDs and invalid modules while ignoring help
 	await writeFile(join(env.PI_TOOLS_DIR, "_helper.ts"), 'throw new Error("helper is not an entry");');
 	await writeFile(join(env.PI_TOOLS_DIR, "declaration.d.ts"), "export type Ignored = string;");
 	const empty = createAgentFactory(env);
-	assert.equal(empty.toolCatalog.length, 8);
+	assert.equal(empty.toolCatalog.length, 6);
 	const duplicate = join(env.PI_TOOLS_DIR, "read.ts");
 	await writeFile(duplicate, "export default () => ({});");
 	assert.throws(() => createAgentFactory(env), /工具 ID 重复/);

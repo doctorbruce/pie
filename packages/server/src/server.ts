@@ -74,7 +74,22 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					throw new SkillConfigError(`Subagent Assistant 不存在：${binding.assistantId}`);
 		return registry;
 	}
-	const hostRuntimes = parseHostRuntimeRegistry(store.hostRuntimes);
+	// Persisted host runtimes are validated against the tool catalog. A registry that no
+	// longer parses (for example a tool id the host has since replaced) must not stop the
+	// process: the host re-registers authoritative definitions on connect, so stale
+	// entries are dropped instead of crashing at boot.
+	let hostRuntimes: Map<string, HostRuntimeDefinition>;
+	try {
+		hostRuntimes = parseHostRuntimeRegistry(store.hostRuntimes);
+	} catch (error) {
+		hostRuntimes = new Map();
+		store.replaceHostRuntimes([]);
+		console.warn(
+			`Discarded ${store.hostRuntimes.length} persisted host runtime(s) that no longer parse; the host will re-register: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
 	function localRuntime(assistant: Assistant) {
 		return {
 			...plugins.runtime(assistant),

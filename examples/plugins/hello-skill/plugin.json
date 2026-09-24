@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "hello-skill",
+  "name": "本地插件示例",
+  "summary": "验证 Skill 加载、参考文件读取和系统脚本执行。",
+  "skills": {
+    "hello": { "path": "skills/hello", "enabled": true }
+  }
+}

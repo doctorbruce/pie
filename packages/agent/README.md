@@ -8,9 +8,8 @@ Stateful agent with tool execution and event streaming. Built on `@earendil-work
 npm install @earendil-works/pi-agent-core
 ```
 
-### SQLite session backends
-
-The SQLite session backend and the `node:sqlite` adapter live in a separate package, `@earendil-works/pi-session-backend-sqlite-node`, so the core package does not pull in runtime builtins or native SQLite dependencies by default. The backend accepts a runtime-specific SQLite factory, allowing other session backends to ship as their own packages in the future.
+This checkout retains the original `Agent` and low-level loop. Harness, persistence,
+the proxy transport, and application services are intentionally outside this package.
 
 ## Quick Start
 
@@ -41,10 +40,6 @@ agent.subscribe((event) => {
 
 await agent.prompt("Hello!");
 ```
-
-## Experimental facet services
-
-Transport-neutral facet-service primitives live in `@earendil-works/chord`. The agent core does not export the service runtime.
 
 ## Core Concepts
 
@@ -458,23 +453,6 @@ execute: async (toolCallId, params, signal, onUpdate) => {
 Thrown errors are caught by the agent and reported to the LLM as tool errors with `isError: true`.
 
 Return `terminate: true` from `execute()`, a blocked `beforeToolCall`, or `afterToolCall` to hint that the agent should stop after the current tool batch. This only takes effect when every finalized tool result in the batch is terminating. The hint is runtime-only; emitted `toolResult` transcript messages remain standard LLM tool results.
-
-## Proxy Usage
-
-For browser apps that proxy through a backend:
-
-```typescript
-import { Agent, streamProxy } from "@earendil-works/pi-agent-core";
-
-const agent = new Agent({
-  streamFn: (model, context, options) =>
-    streamProxy(model, context, {
-      ...options,
-      authToken: "...",
-      proxyUrl: "https://your-server.com",
-    }),
-});
-```
 
 ## Low-Level API
 

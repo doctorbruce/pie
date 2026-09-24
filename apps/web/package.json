@@ -1,0 +1,18 @@
+{
+	"name": "@pie/web",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@assistant-ui/react": "0.15.19",
+		"@assistant-ui/react-markdown": "0.14.15",
+		"@pie/server": "0.0.1",
+		"react": "19.3.0",
+		"react-dom": "19.3.0"
+	},
+	"devDependencies": {
+		"@types/react": "19.3.0",
+		"@types/react-dom": "19.3.0",
+		"vite": "8.3.0"
+	}
+}

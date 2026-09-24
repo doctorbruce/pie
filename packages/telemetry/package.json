@@ -7,10 +7,12 @@
 	"types": "./dist/index.d.ts",
 	"exports": {
 		".": {
+			"source": "./src/index.ts",
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
 		"./testing": {
+			"source": "./src/testing/index.ts",
 			"types": "./dist/testing/index.d.ts",
 			"import": "./dist/testing/index.js"
 		}
@@ -21,7 +23,7 @@
 	],
 	"scripts": {
 		"clean": "shx rm -rf dist",
-		"build": "tsgo -p tsconfig.build.json",
+		"build": "tsc -p tsconfig.build.json",
 		"test": "vitest --run",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
@@ -42,6 +44,6 @@
 	},
 	"devDependencies": {
 		"@types/node": "22.19.19",
-		"vitest": "4.1.9"
+		"vitest": "4.1.11"
 	}
 }

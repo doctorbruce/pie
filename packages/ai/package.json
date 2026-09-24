@@ -12,34 +12,42 @@
 	],
 	"exports": {
 		".": {
+			"source": "./src/index.ts",
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
 		"./compat": {
+			"source": "./src/compat.ts",
 			"types": "./dist/compat.d.ts",
 			"import": "./dist/compat.js"
 		},
 		"./providers/*": {
+			"source": "./src/providers/*.ts",
 			"types": "./dist/providers/*.d.ts",
 			"import": "./dist/providers/*.js"
 		},
 		"./api/*": {
+			"source": "./src/api/*.ts",
 			"types": "./dist/api/*.d.ts",
 			"import": "./dist/api/*.js"
 		},
 		"./utils/*": {
+			"source": "./src/utils/*.ts",
 			"types": "./dist/utils/*.d.ts",
 			"import": "./dist/utils/*.js"
 		},
 		"./oauth": {
+			"source": "./src/oauth.ts",
 			"types": "./dist/oauth.d.ts",
 			"import": "./dist/oauth.js"
 		},
 		"./bedrock-provider": {
+			"source": "./src/bedrock-provider.ts",
 			"types": "./dist/bedrock-provider.d.ts",
 			"import": "./dist/bedrock-provider.js"
 		},
 		"./bun-oauth": {
+			"source": "./src/bun-oauth.ts",
 			"types": "./dist/bun-oauth.d.ts",
 			"import": "./dist/bun-oauth.js"
 		}
@@ -59,14 +67,14 @@
 		"generate-image-models": "node scripts/generate-image-models.ts --strict",
 		"check:model-data": "node scripts/check-model-data.ts",
 		"build": "npm run generate-models && npm run build:offline",
-		"build:offline": "npm run check:model-data && tsgo -p tsconfig.build.json && shx rm -rf dist/providers/data && shx cp -r src/providers/data dist/providers/data",
+		"build:offline": "npm run check:model-data && tsc -p tsconfig.build.json && shx rm -rf dist/providers/data && shx cp -r src/providers/data dist/providers/data",
 		"test": "vitest --run",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "0.123.0",
 		"@aws-sdk/client-bedrock-runtime": "3.1048.0",
-		"@earendil-works/pi-telemetry": "^0.85.1",
+		"@earendil-works/pi-telemetry": "0.85.1",
 		"@google/genai": "1.52.0",
 		"@smithy/node-http-handler": "4.7.3",
 		"http-proxy-agent": "7.0.2",
@@ -98,6 +106,6 @@
 	"devDependencies": {
 		"@types/node": "22.19.19",
 		"canvas": "3.2.3",
-		"vitest": "4.1.9"
+		"vitest": "4.1.11"
 	}
 }

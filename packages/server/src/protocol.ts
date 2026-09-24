@@ -46,7 +46,14 @@ export type SkillBinding = {
 	resourceRoot?: string;
 	source?: SkillSource;
 };
-export type AgentRuntimeConfig = { systemPrompt: string; toolIds: ToolId[]; skills: SkillBinding[] };
+export type PermissionDecision = "allow" | "ask";
+export type PermissionPolicy = Record<string, PermissionDecision>;
+export type AgentRuntimeConfig = {
+	systemPrompt: string;
+	toolIds: ToolId[];
+	skills: SkillBinding[];
+	permissions?: PermissionPolicy;
+};
 export type HostSubagentBinding = {
 	id: string;
 	name: string;

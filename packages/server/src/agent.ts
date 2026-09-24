@@ -23,7 +23,7 @@ import type {
 } from "./protocol.ts";
 import { createSkillTools } from "./skills.ts";
 import { BackgroundJobs } from "./tools/jobs.ts";
-import type { ToolRuntime } from "./tools/runtime.ts";
+import { applyPermissionPolicy, type ToolRuntime } from "./tools/runtime.ts";
 import { systemTools } from "./tools.ts";
 
 export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
@@ -89,12 +89,13 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 		) {
 			const runtime = structuredClone(configInput);
 			parseToolIds(runtime.toolIds, toolIds);
+			const requestInteraction = applyPermissionPolicy(runtime.permissions, ask);
 			const context = Object.freeze({
 				sessionId,
 				directory: native?.directory ?? process.cwd(),
 				env,
 				Type,
-				ask,
+				ask: requestInteraction,
 				jobs: native?.jobs ?? new BackgroundJobs(),
 				notifyBackground: native?.notifyBackground,
 			});
@@ -103,7 +104,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				const create = external.get(id);
 				return create ? [create(context)] : [];
 			});
-			const skillTools = createSkillTools(runtime, record, context);
+			const skillTools = createSkillTools(runtime, record);
 			const taskParameters = Type.Object(
 				{
 					description: Type.String({ description: "Short description of the delegated task" }),
@@ -140,7 +141,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 							async execute(toolCallId, args, signal) {
 								const binding = runtime.subagents.find((candidate) => candidate.id === args.subagent_type);
 								if (!binding) throw new Error(`不可调用的 Subagent：${args.subagent_type}`);
-								await ask(
+								await requestInteraction(
 									{
 										type: "confirmation",
 										title: "调用助手",

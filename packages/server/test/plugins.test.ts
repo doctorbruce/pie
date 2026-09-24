@@ -109,6 +109,7 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 	const factory = createAgentFactory(env);
 	assert(restored.runtime);
 	const activityLog: ToolActivity[] = [];
+	const permissionRequests: string[] = [];
 	const agent = factory.create(
 		"faux",
 		"plugin-loop",
@@ -116,7 +117,9 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 		undefined,
 		[],
 		(activity) => activityLog.push(activity),
-		async () => {},
+		async (request) => {
+			permissionRequests.push(String(request.metadata?.permission ?? ""));
+		},
 	);
 	assert.match(agent.state.systemPrompt, /sample\/nested/);
 	assert.doesNotMatch(agent.state.systemPrompt, /NESTED_BODY_ONLY_AFTER_LOAD/);
@@ -149,6 +152,7 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 	agent.streamFunction = models.streamSimple.bind(models);
 	await agent.prompt("测试插件脚本");
 	assert.equal(agent.state.errorMessage, undefined);
+	assert.equal(permissionRequests.includes("skill"), false);
 	const results = agent.state.messages.filter((message) => message.role === "toolResult");
 	assert.deepEqual(
 		results.map((message) => [message.toolName, message.isError]),
@@ -183,7 +187,7 @@ async function api(base: string, path: string, body?: unknown) {
 	});
 }
 
-async function registerRuntime(base: string, assistantRevision: string, runtime: RuntimeConfig) {
+async function registerRuntime(base: string, assistantRevision: string, runtime: unknown) {
 	return fetch(`${base}/host-runtimes`, {
 		method: "PUT",
 		headers: { "Content-Type": "application/json" },
@@ -250,6 +254,7 @@ test("shared host bindings preserve distinct provenance through SSE, load failur
 		systemPrompt: "Use the selected binding.",
 		toolIds: [],
 		subagents: [],
+		permissions: { "*": "allow", "credential.request": "ask" },
 		skills: ["A", "B"].map((id) => ({
 			id: `${id}/pdf`,
 			name: "pdf",
@@ -276,12 +281,14 @@ test("shared host bindings preserve distinct provenance through SSE, load failur
 		{ ...runtime, skills: [runtime.skills[0], runtime.skills[0]] },
 		{ ...runtime, toolIds: ["invented"] },
 		{ ...runtime, skills: [{ ...runtime.skills[0], directory: "relative/path" }] },
+		{ ...runtime, permissions: { "*": "deny" } },
 	])
 		assert.equal((await registerRuntime(first.base, "invalid", invalid)).status, 400);
 	assert.equal((await registerRuntime(first.base, "1", runtime)).status, 200);
 	const created = await api(first.base, "/sessions", { assistantId: "host-provenance" });
 	assert.equal(created.status, 201, await created.clone().text());
 	const session = (await created.json()) as SessionSnapshot;
+	assert.deepEqual(session.runtime?.permissions, runtime.permissions);
 	const updates: SessionEvent[] = [];
 	const loadedB = await submit(first.base, session.id, "加载技能 B/pdf", async (packet) => {
 		if (packet.activity) updates.push(packet);

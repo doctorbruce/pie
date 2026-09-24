@@ -4,8 +4,24 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { BackgroundJobs } from "../src/tools/jobs.ts";
-import type { ToolRuntime } from "../src/tools/runtime.ts";
+import { applyPermissionPolicy, type ToolRuntime } from "../src/tools/runtime.ts";
 import { systemTools } from "../src/tools.ts";
+
+test("host permission policy allows configured operations but preserves explicit confirmations", async () => {
+	const requested: string[] = [];
+	const ask = applyPermissionPolicy({ "*": "allow", "credential.request": "ask" }, async (request) => {
+		requested.push(request.title);
+	});
+	await ask({ type: "confirmation", title: "shell", message: "run", metadata: { permission: "shell" } });
+	await ask({
+		type: "confirmation",
+		title: "credential",
+		message: "input",
+		metadata: { permission: "credential.request" },
+	});
+	await ask({ type: "confirmation", title: "question", message: "choose" });
+	assert.deepEqual(requested, ["credential", "question"]);
+});
 
 function pdf(text: string): Buffer {
 	const stream = `BT /F1 12 Tf 72 720 Td (${text}) Tj ET`;

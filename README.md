@@ -83,7 +83,7 @@ Astron 已注册官方 `pie` provider，并通过独立 HTTP/SSE adapter 连接 
 
 本次服务提供创建/加载会话、提交/取消的基本操作。HTTP `202` 只表示受理；SSE `turn.settled` 才表示 Agent 已空闲。完整接口和限制见 [服务协议](packages/server/README.md)。
 
-助手和会话保存在 `.pie/agent.sqlite`，使用 Node 内置 SQLite；每个数据目录由单个服务独占。一个助手可有多个会话，每个会话使用独立 Agent 和创建时的助手配置快照；同会话忙时返回 `409`，不同会话可以同时运行。每次提交最多 8 轮模型响应，达到上限且仍需继续工具循环时以失败状态结束。崩溃后恢复完整消息，遗留执行标记为失败，不自动重跑工具。重启后继续真实会话，会按保存的模型 ID 读取当前模型端点和凭据。
+助手和会话保存在 `.pie/agent.sqlite`，使用 Node 内置 SQLite；每个数据目录由单个服务独占。一个助手可有多个会话，每个会话使用独立 Agent 和创建时的助手配置快照；同会话忙时返回 `409`，不同会话可以同时运行。只受模型是否继续发起工具调用约束，不设轮数上限。崩溃后恢复完整消息，遗留执行标记为失败，不自动重跑工具。重启后继续真实会话，会按保存的模型 ID 读取当前模型端点和凭据。
 
 Core 切换使用统一会话转储：源 Core 导出 canonical transcript，目标 Core 导入并校验后，Astron 才原子更新活动绑定；切回时执行相同流程。两个 Core 保留各自数据库，Astron 会话 ID 不变，原生会话 ID 保存在各自 `coreBindings` 中。Astron 会在首次使用 Pie 时懒启动 sidecar，启动前同步工具和模型提供商，停止、重启和异常拉起也由 adapter 管理；Assistant 的 Skill/Subagent runtime 已按产品配置投影。当前还缺会话工作区隔离和完整产品权限策略。Pie 注册了上游 `read/bash/powershell/edit/write/grep/find/ls` 八个工具，以及挂载 Plugin 后的 `load_skill`；默认助手暂不启用任何工具。
 

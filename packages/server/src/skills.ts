@@ -8,11 +8,11 @@ import type {
 	AgentRuntimeConfig,
 	HostRuntimeDefinition,
 	HostSubagentBinding,
+	PermissionPolicy,
 	RuntimeConfig,
 	SkillBinding,
 	ToolActivity,
 } from "./protocol.ts";
-import type { ToolRuntime } from "./tools/runtime.ts";
 import { readText } from "./tools.ts";
 
 export class SkillConfigError extends Error {}
@@ -32,6 +32,21 @@ function absolutePath(value: unknown, label: string): string {
 	const path = text(value, label, 4096);
 	if (!isAbsolute(path)) throw new SkillConfigError(`${label} 需要绝对路径`);
 	return resolve(path);
+}
+
+function parsePermissionPolicy(value: unknown): PermissionPolicy {
+	if (value === undefined) return {};
+	const entries = Object.entries(object(value));
+	if (
+		entries.length > 128 ||
+		entries.some(
+			([permission, decision]) =>
+				(permission !== "*" && !/^[a-zA-Z][a-zA-Z0-9._-]{0,127}$/.test(permission)) ||
+				(decision !== "allow" && decision !== "ask"),
+		)
+	)
+		throw new SkillConfigError("permissions 必须是最多 128 项的 allow/ask 映射");
+	return Object.fromEntries(entries) as PermissionPolicy;
 }
 
 function parseAgentRuntimeConfig(
@@ -64,7 +79,7 @@ function parseAgentRuntimeConfig(
 		return binding;
 	});
 	if (new Set(skills.map((skill) => skill.id)).size !== skills.length) throw new SkillConfigError("绑定 ID 不可重复");
-	return { systemPrompt: input.systemPrompt, toolIds, skills };
+	return { systemPrompt: input.systemPrompt, toolIds, skills, permissions: parsePermissionPolicy(input.permissions) };
 }
 
 // Host configuration only. Model tool arguments cannot register or modify bindings.
@@ -115,6 +130,7 @@ export function hydrateHostRuntime(
 					systemPrompt: target.runtime.systemPrompt,
 					toolIds: structuredClone(target.runtime.toolIds),
 					skills: structuredClone(target.runtime.skills),
+					permissions: structuredClone(target.runtime.permissions),
 				},
 			};
 		}),
@@ -140,11 +156,7 @@ async function sampleSkillFiles(directory: string, signal?: AbortSignal): Promis
 	return files;
 }
 
-export function createSkillTools(
-	runtime: RuntimeConfig,
-	record: (activity: ToolActivity) => void,
-	context: ToolRuntime,
-) {
+export function createSkillTools(runtime: RuntimeConfig, record: (activity: ToolActivity) => void) {
 	type SkillDetails = { activity: ToolActivity; files: string[]; directory: string };
 	const completed = new Map<string, SkillDetails>();
 	const loadParameters = Type.Object(
@@ -160,15 +172,6 @@ export function createSkillTools(
 		async execute(toolCallId, { id }, signal) {
 			const binding = runtime.skills.find((skill) => skill.id === id);
 			if (!binding) throw new Error("此 Skill 未挂载到当前会话");
-			await context.ask(
-				{
-					type: "confirmation",
-					title: "加载技能",
-					message: `加载 Skill：${binding.name}`,
-					metadata: { permission: "skill", id: binding.id, directory: binding.directory, source: binding.source },
-				},
-				signal,
-			);
 			let activity: ToolActivity = {
 				id: randomUUID(),
 				toolCallId,

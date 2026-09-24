@@ -1,5 +1,5 @@
 import { resolve, sep } from "node:path";
-import type { InteractionRequest } from "../protocol.ts";
+import type { InteractionRequest, PermissionPolicy } from "../protocol.ts";
 import type { BackgroundJobs } from "./jobs.ts";
 
 export type ArtifactRole = "final" | "intermediate" | "temporary";
@@ -18,6 +18,14 @@ export type ToolRuntime = {
 	jobs: BackgroundJobs;
 	notifyBackground?: (message: string) => Promise<void>;
 };
+
+export function applyPermissionPolicy(policy: PermissionPolicy | undefined, ask: ToolAsk): ToolAsk {
+	return async (request, signal) => {
+		const permission = request.metadata?.permission;
+		if (typeof permission === "string" && (policy?.[permission] ?? policy?.["*"]) === "allow") return;
+		await ask(request, signal);
+	};
+}
 
 export function containsPath(root: string, target: string): boolean {
 	const base = resolve(root);

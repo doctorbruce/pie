@@ -620,17 +620,11 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		const turn = session.turn;
 		const agent = session.agent;
 		if (!turn || !agent) return;
-		let steps = 0;
-		let limitReached = false;
-		agent.shouldStopAfterTurn = ({ toolResults }) => {
-			limitReached = ++steps >= 8 && toolResults.length > 0;
-			return limitReached;
-		};
 		try {
 			do {
 				await agent.continue();
-			} while (agent.hasQueuedMessages() && !session.cancelRequested && !limitReached);
-			turn.error = limitReached ? "已达到每次提交最多 8 轮模型响应的限制" : agent.state.errorMessage;
+			} while (agent.hasQueuedMessages() && !session.cancelRequested);
+			turn.error = agent.state.errorMessage;
 			turn.status = session.cancelRequested ? "cancelled" : turn.error ? "failed" : "completed";
 		} catch (error) {
 			turn.status = session.cancelRequested ? "cancelled" : "failed";

@@ -80,7 +80,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 本地助手挂载变更在已有会话下一次 Turn 前生效。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
 
-`load_skill` 仅接受当前会话已挂载的 Skill ID。加载前通过 `context.ask()` 请求确认，结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。
+`load_skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`powershell`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。
 
 这十个工具、按绑定出现的 `load_skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
 
@@ -117,7 +117,7 @@ POST /sessions/:id/turns { text, assistantId?, systemPrompt? }
   → 等 Agent 空闲 → 保存最终状态 → SSE turn.settled
 ```
 
-这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。当前每次提交最多 8 轮模型响应；达到上限仍有工具结果待继续时以失败结束。
+这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
 
 Web 客户端订阅 `GET /sessions/:id/events`，新连接立即收到全量快照，后续事件也带快照供页面直接替换。Astron adapter 订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射为 `CoreEvent`；这个流不传完整 Session 快照。`agent.event` 只带 Astron 使用的 Pi 原生增量及会话标识，`snapshot` 和 `turn.settled` 只带最小 `turn` 状态，避免历史大小放大 token 流和终态事件。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，防止重启后较小的计数使恢复快照被忽略。
 
@@ -314,7 +314,7 @@ Astron 提供适配后的工具文件
 | 参数 | 当前 OpenCode 工具使用 Zod `args`；适配为 Pie 接受的参数 schema | 继续使用 AgentTool 参数校验，不引入 OpenCode SDK 到 loop |
 | 调用上下文 | 负责产品会话与 Core 会话映射、工作区及 Astron 服务地址 | 已注入 Pie sessionId、会话工作区和环境；执行时提供 toolCallId、取消信号和更新回调 |
 | 结果与事件 | 将 output 转为 content，metadata 转为 details；向 Astron 转换事件 | 保存结构化结果，通过现有工具事件和会话消息回传 |
-| 用户交互 | 凭据、邮件确认工具依赖 `context.ask()` 的等待与答复 | server 提供确认型 `context.ask()`、SSE 请求和 HTTP 答复；表单与权限策略仍由后续 adapter 扩展 |
+| 用户交互 | 凭据、邮件确认工具依赖 `context.ask()` 的等待与答复 | server 提供确认型 `context.ask()`、SSE 请求和 HTTP 答复；宿主 runtime 可用 `permissions` 的 `allow/ask` 映射统一处理带权限标识的请求，未标识请求始终交给用户 |
 
 `examples/tools/memory-manage.ts` 是首个 Astron 工具适配示例，保留 list/add/delete 及 Engine 路由，使用 TypeBox 参数与原生 content/details。工具内连接取消信号，HTTP 请求超时 30 秒。源码测试把示例复制到仓库外的带空格目录，用本地模拟 Astron 服务验证调用、隔离、错误、取消和重启恢复。启动方式和工具示例见 [服务协议](../packages/server/README.md#外部工具文件)。
 

@@ -167,7 +167,7 @@ export function createSkillTools(runtime: RuntimeConfig, record: (activity: Tool
 		name: "load_skill",
 		label: "加载技能",
 		description:
-			"Load a mounted skill by its exact binding ID and record its plugin source. Use read for references and bash or powershell for commands described in the loaded skill.",
+			"Load a mounted skill by its exact binding ID and record its plugin source. Use read for references and bash for commands described in the loaded skill.",
 		parameters: loadParameters,
 		async execute(toolCallId, { id }, signal) {
 			const binding = runtime.skills.find((skill) => skill.id === id);

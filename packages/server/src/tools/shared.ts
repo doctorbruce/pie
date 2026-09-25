@@ -2,7 +2,7 @@ import { execFile, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { basename, delimiter, isAbsolute, join, resolve } from "node:path";
 
 export const MAX_LINES = 2000;
 export const MAX_BYTES = 50 * 1024;
@@ -98,27 +98,54 @@ export async function withFileMutationQueue<T>(path: string, mutate: () => Promi
 	}
 }
 
-export function findBash(env: NodeJS.ProcessEnv): { executable: string; args: string[] } {
-	if (env.PI_BASH) return { executable: env.PI_BASH, args: ["-c"] };
-	if (process.platform !== "win32")
-		return existsSync("/bin/bash") ? { executable: "/bin/bash", args: ["-c"] } : { executable: "sh", args: ["-c"] };
-	for (const path of [
-		env.ProgramFiles ? join(env.ProgramFiles, "Git", "bin", "bash.exe") : "",
-		env["ProgramFiles(x86)"] ? join(env["ProgramFiles(x86)"]!, "Git", "bin", "bash.exe") : "",
-	])
-		if (path && existsSync(path)) return { executable: path, args: ["-c"] };
-	return { executable: "bash.exe", args: ["-c"] };
+export type ShellConfig = {
+	executable: string;
+	name: string;
+	args: (command: string) => string[];
+};
+
+function shellName(executable: string): string {
+	return basename(executable)
+		.replace(/\.exe$/i, "")
+		.toLowerCase();
 }
 
-export function findPowerShell(env: NodeJS.ProcessEnv): { executable: string; args: string[] } {
-	const executable = env.PI_POWERSHELL || (process.platform === "win32" ? "powershell.exe" : "pwsh");
-	return {
-		executable,
-		args:
-			process.platform === "win32" || /powershell/i.test(executable)
-				? ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
-				: ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command"],
-	};
+function findOnPath(name: string, env: NodeJS.ProcessEnv): string | undefined {
+	const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path");
+	const pathValue = pathKey ? env[pathKey] : undefined;
+	if (!pathValue) return undefined;
+	const extensions = process.platform === "win32" ? [".exe", ".cmd", ".bat", ""] : [""];
+	for (const directory of pathValue.split(delimiter))
+		for (const extension of extensions) {
+			const candidate = join(directory.replace(/^"|"$/g, ""), `${name}${extension}`);
+			if (existsSync(candidate)) return candidate;
+		}
+	return undefined;
+}
+
+/** Resolve the platform shell behind the single public `bash` tool id. */
+export function findShell(env: NodeJS.ProcessEnv): ShellConfig {
+	const executable =
+		env.PI_SHELL ||
+		(process.platform === "win32"
+			? env.PI_POWERSHELL || findOnPath("pwsh", env) || findOnPath("powershell", env) || "powershell.exe"
+			: env.PI_BASH || env.SHELL || (existsSync("/bin/bash") ? "/bin/bash" : "sh"));
+	const name = shellName(executable);
+	if (name === "powershell" || name === "pwsh") {
+		const prefix = ["-NoLogo", "-NoProfile", "-NonInteractive"];
+		if (name === "powershell") prefix.push("-ExecutionPolicy", "Bypass");
+		return {
+			executable,
+			name,
+			args: (command) => [
+				...prefix,
+				"-Command",
+				`try { [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding } catch {}\n${command}`,
+			],
+		};
+	}
+	if (name === "cmd") return { executable, name, args: (command) => ["/d", "/s", "/c", command] };
+	return { executable, name, args: (command) => ["-c", command] };
 }
 
 export function killProcessTree(pid: number): void {
@@ -143,6 +170,8 @@ export function runProcess(
 		env: NodeJS.ProcessEnv;
 		signal?: AbortSignal;
 		timeoutMs?: number;
+		isDetached?: () => boolean;
+		captureOutput?: boolean;
 		onData?: (chunk: Buffer) => void;
 	},
 ): Promise<{ code: number | null; output: string }> {
@@ -164,10 +193,14 @@ export function runProcess(
 		};
 		const onAbort = () => stop("Operation aborted");
 		const timer =
-			options.timeoutMs === undefined ? undefined : setTimeout(() => stop("Command timed out"), options.timeoutMs);
+			options.timeoutMs === undefined
+				? undefined
+				: setTimeout(() => {
+						if (!options.isDetached?.()) stop(`Command timed out after ${options.timeoutMs}ms`);
+					}, options.timeoutMs);
 		options.signal?.addEventListener("abort", onAbort, { once: true });
 		const collect = (chunk: Buffer) => {
-			chunks.push(chunk);
+			if (options.captureOutput !== false) chunks.push(chunk);
 			options.onData?.(chunk);
 		};
 		child.stdout.on("data", collect);

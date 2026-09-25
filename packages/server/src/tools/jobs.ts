@@ -32,6 +32,7 @@ export class BackgroundJobs {
 		ownerSessionId: string;
 		type: BackgroundJobInfo["type"];
 		title: string;
+		details?: Record<string, unknown>;
 		run: (
 			signal: AbortSignal,
 			append: (text: string) => void,
@@ -41,6 +42,10 @@ export class BackgroundJobs {
 		}>;
 		onSettled?: (job: BackgroundJobInfo) => Promise<void> | void;
 	}): BackgroundJobInfo {
+		const settledJobs = [...this.#jobs.values()]
+			.filter((job) => job.status !== "running")
+			.sort((left, right) => (left.finishedAt ?? left.startedAt) - (right.finishedAt ?? right.startedAt));
+		for (const job of settledJobs.slice(0, Math.max(0, settledJobs.length - 64))) this.#jobs.delete(job.id);
 		const id = input.id ?? randomUUID();
 		const previous = this.#jobs.get(id);
 		if (previous?.status === "running") throw new Error(`后台任务正在运行：${id}`);
@@ -57,6 +62,7 @@ export class BackgroundJobs {
 			status: "running",
 			startedAt: Date.now(),
 			output: "",
+			details: input.details,
 			controller,
 			readOffset: 0,
 			settled,
@@ -75,7 +81,7 @@ export class BackgroundJobs {
 			.run(controller.signal, append)
 			.then((result) => {
 				if (result.output && !job.output.endsWith(result.output)) append(result.output);
-				job.details = result.details;
+				job.details = { ...input.details, ...result.details };
 				job.status = controller.signal.aborted ? "cancelled" : "completed";
 			})
 			.catch((error: unknown) => {

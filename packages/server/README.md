@@ -44,13 +44,13 @@
 
 `400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或助手/会话达到各自 32 的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明" }`。
 
-助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`edit`、`write`、`grep`、`find`、`ls`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `load_skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
+助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `load_skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
-这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令执行不在其中：宿主的命令工具通过 `PI_TOOLS_DIR` 加载，`loadExternalTools` 会拒绝复用保留 ID 的资产，因此 Pie 不再自带 `bash`/`powershell`，也不再提供 `job_output`/`job_kill`。`load_skill` 和 `task` 也由 Pie 提供，但分别只在当前 runtime 有 Skill 或 Subagent 绑定时加入 Agent。
+这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或 `task` 时自动向 Agent 加入 `job_output/job_kill`。`load_skill` 和 `task` 也由 Pie 提供，但分别只在当前 runtime 有 Skill 或 Subagent 绑定时加入 Agent。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
 
 会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。配置变化发生在 Turn 准入前：已有消息保留，空闲 Agent 按最新注册版本重建；正在运行的 Turn 不被切换，下一次提交才应用新配置。
 
-宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。父会话取消会取消前台子会话；子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
+宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知；`job_output` 可增量读取，`job_kill` 可停止任务。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。父会话取消会取消前台子会话；子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
 
 独立 Web 模式在 Assistant 设置中选择“可调用助手”，Core 将 subagentIds 转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
 
@@ -132,7 +132,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 `load_skill({id})` 加载已允许的绑定，记录 source 和实际正文的 contentHash；超过 64 KiB 拒绝加载。初始模型目录只有绑定 ID、说明和来源名称，不含路径或正文。未挂载的 ID 返回工具错误，不伪造来源。
 
-`activities` 每项包含 id、sessionId、turnId、toolCallId、kind、binding 快照、status 和时间。kind 为 skill_load；status 为 running/succeeded/failed/cancelled/unknown。succeeded 表示 Skill 文件加载成功。绑定快照冻结来源配置，不冻结文件内容。普通 `read`、`write`、`grep` 等不产生 Plugin 使用记录，不继承“最近加载的技能”。APA 实际执行溯源后续单独设计。
+`activities` 每项包含 id、sessionId、turnId、toolCallId、kind、binding 快照、status 和时间。kind 为 skill_load；status 为 running/succeeded/failed/cancelled/unknown。succeeded 表示 Skill 文件加载成功。绑定快照冻结来源配置，不冻结文件内容。普通 `read`、`bash` 等不产生 Plugin 使用记录，不继承“最近加载的技能”。APA 实际执行溯源后续单独设计。
 
 受理和完成时记录均落盘；SSE 的 activity.updated 携带完整 activity，工具结果 details.activity 携带同一技能记录（sessionId/turnId 位于外层 SSE 和 activities）。刷新/重启通过 activities 恢复历史。崩溃遗留 running 改为 unknown，保留来源且不重跑。未改动原版 loop，使用工具 details 和 afterToolCall 保留成功/错误结果的来源。
 
@@ -167,7 +167,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 这是便于二次开发的首版服务。Astron adapter 已映射当前所需的 Core contract 子集；未声明的能力仍应明确失败。
 
 - 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、确认型工具交互和前台单层 Subagent；不实现 MCP、后台 Subagent 或递归派发。
-- Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash/powershell` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_BASH`、`PI_POWERSHELL` 和 `PI_RG` 指定可执行文件。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
+- Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_SHELL`（或平台默认的 `PI_BASH`/`PI_POWERSHELL`）、`PI_BASH_TIMEOUT_MS`、`PI_BASH_YIELD_MS` 和 `PI_RG` 配置可执行文件与超时。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
 - 事件的 `event` 字段保留 Pi 原始格式。Astron adapter 将其转换为 `CoreEvent`；其他宿主也应在 adapter 边界转换，不要将 Pi 原始结构传入产品服务。
 - 自动压缩只改变送给模型的上下文：达到模型上下文窗口减去保留预算后，Core 用同一模型生成结构化摘要，保留最近消息，并在后续压缩中合并旧摘要。完整历史仍用于存储和页面展示。摘要失败时本轮继续使用压缩前上下文，不删除消息。当前 SSE 仍推送完整快照；长历史还需要增量事件和分页。
 - 最多 32 个助手、32 个会话（含子会话）；全量加载到内存。页面保存 session ID 于 sessionStorage；服务重启后恢复历史，执行按需恢复。独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。

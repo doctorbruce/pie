@@ -51,7 +51,7 @@ Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以�
 5. 已有 Agent 保留创建时的模型调用配置。Assistant/runtime 变化或服务重启导致重建时，使用会话保存的 `provider/model` 从当前 `models.json` 重新解析端点、凭据和模型参数。
 6. 模型被移除或配置失效时，历史仍可查看；继续执行明确报错，不悄悄切换到其他模型。修好配置后可以再次提交。
 
-助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `load_skill`。命令执行不内置：宿主自带命令工具，`job_output/job_kill` 也不再提供。当前提供 server 层确认型交互和工作区边界检查，尚无进程沙箱或 MCP。
+助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `load_skill`。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供 server 层确认型交互和工作区边界检查，尚无进程沙箱或 MCP。
 
 ## Plugin 与 Skill
 
@@ -66,7 +66,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
   → plugins.runtime() → 解析为带来源的 RuntimeConfig，写入 Session
   → Agent systemPrompt 只包含 Skill ID、description 和来源名称
   → 模型调用 load_skill → 读取完整 SKILL.md 和实际目录
-  → read / write / edit / grep / find / ls
+  → read / bash / write / edit / grep / find / ls
   → 原版 loop 把工具结果交回模型
 ```
 
@@ -80,17 +80,17 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 本地助手挂载变更在已有会话下一次 Turn 前生效。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
 
-`load_skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册六个独立工具：`read`、`edit`、`write`、`grep`、`find`、`ls`。命令执行由宿主提供：`loadExternalTools` 拒绝外部工具复用保留 ID，因此 Pie 不再注册自己的 `bash`/`powershell`。
+`load_skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册九个独立工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。命令只暴露一个 `bash` ID，实际 Shell 由平台和配置决定。
 
-这六个工具、按绑定出现的 `load_skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
+这九个工具、按绑定出现的 `load_skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
 
 内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 支持文本、目录、图片和 PDF 文本分页，PDF 一次最多 20 页；`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
 
-`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。命令工具的参数、确认语义、超时与进程树清理由宿主命令工具自己负责，Pie 不再定义这套契约。
+`bash` 对齐 Amio v1 契约：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 和 Turn 取消影响，只由 `job_kill` 停止；`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
 
 挂载控制模型的 Skill 目录和加载入口，不是系统访问权限隔离。Session 的 `workspacePath` 是审批边界；访问边界外的路径会请求确认，但批准后仍由 Core 系统账户直接访问。当前没有进程沙箱或凭据代理。Skill 中依赖 Astron Engine HTTP 服务、凭据请求、桌面环境的流程仍需相应宿主能力，不因导入成功而自动可运行。
 
-手工验证：在 Web 客户端「插件」中导入仓库的 `examples/plugins/hello-skill` 绝对路径；编辑助手挂载它，并启用 `read` 及当前平台的 `bash` 或 `powershell`；新建真实模型会话，发送“测试本地插件 hello 示例”。预期依次看到 `load_skill`、`read`、命令工具结果。Web 客户端不提供 faux 会话。
+手工验证：在 Web 客户端「插件」中导入仓库的 `examples/plugins/hello-skill` 绝对路径；编辑助手挂载它，并启用 `read` 和 `bash`；新建真实模型会话，发送“测试本地插件 hello 示例”。预期依次看到 `load_skill`、`read`、命令工具结果。Web 客户端不提供 faux 会话。
 
 无需真实模型的来源验证：启动服务后运行 `node examples/skill-provenance.ts`，会创建“Skill 加载来源演示”faux 会话。两条 Plugin 来源绑定共用 `examples/plugins/hello-skill/skills/hello`，各加载一次。该模式只供 Core 测试和独立脚本使用，不会出现在 Web 客户端的会话列表中；支持精确指令 `加载技能 <绑定ID>` 和 `调用工具 <ID> <JSON对象>`，不会自主规划或选择工具。
 
@@ -227,7 +227,7 @@ Astron 的 Assistant 是产品资产；其 OpenCode adapter 把助手配置转�
 | Session / Turn | 产品归属、标题、入口、展示、`coreBinding` 和可调用 Assistant 集合 | 消息上下文、父子 Session、Agent 实例、循环、运行状态、恢复和事件 |
 | 配置变更 | 生成权威 runtime 注册表、发起刷新，协调资产文件的更新时间 | 事务性替换注册表；下一 Turn 准入时应用，不中断在途 Turn |
 
-来源绑定、Skill 加载记录、确认型交互和 Turn 边界的配置刷新已在 Pie 实现。Astron adapter 已接入提示词、工具、Skill/Subagent runtime、会话和交互字段。限制 `load_skill` 的可用 ID 不能代替系统文件或命令工具的访问控制。APA、App、RPA 的业务含义和服务仍留在 Astron。通过 `bash/powershell` 执行的命令不自动关联到某个 Skill 或 APA。
+来源绑定、Skill 加载记录、确认型交互和 Turn 边界的配置刷新已在 Pie 实现。Astron adapter 已接入提示词、工具、Skill/Subagent runtime、会话和交互字段。限制 `load_skill` 的可用 ID 不能代替系统文件或命令工具的访问控制。APA、App、RPA 的业务含义和服务仍留在 Astron。通过 `bash` 执行的命令不自动关联到某个 Skill 或 APA。
 
 Pie adapter 位于 Astron 一侧，负责把产品配置转换为 Pie 接受的运行配置、启动/连接服务、映射会话和转换事件。产品服务继续使用 `core_contract`，不直接消费 Pi 原始事件或依赖 OpenCode 的角色命名和消息格式。
 
@@ -243,7 +243,7 @@ Astron 安装 / 复用决策
   → Pie 提示词展示可选择的 ID、说明，必要时展示来源名称
   → 模型调用 load_skill({ id: "B/pdf" })
   → 返回正文和实际目录；结构化记录本次经由 B 加载 pdf
-  → 后续 read / bash / powershell 独立执行，不自动归因给最近加载的 Skill
+  → 后续 read / bash 独立执行，不自动归因给最近加载的 Skill
 ```
 
 Pie 通过 `PUT /host-runtimes` 接收宿主运行配置；绑定 ID 的字符串格式不是协议要求。注册表中的 runtime 完整定义提示词、工具和技能配置，不与本地助手挂载隐式合并。Skill 来源可以直接指向 `.agents/skills` 或插件嵌套目录。独立模式由本地插件管理层生成配置；Astron adapter 从产品态组装全部 Skill/Subagent 引用，在启动和产品配置刷新时同步一次。
@@ -258,7 +258,7 @@ Pie 不必创建或维护 `.agents/skills`，但应能消费 Astron 已整理的
 
 Pie 根据模型选择的允许绑定查找来源，技能记录包含独立 id，并关联 `sessionId/turnId/toolCallId`。来源不由模型自由填写，也不靠解析工具返回文本。实现复用 Pi 的工具 `details` 和 `afterToolCall`，错误结果也保留来源；agent loop 源码未改动。
 
-成功加载只证明这次读取了哪条绑定的 SKILL.md，不能证明模型遵循了技能或执行了 APA。后续 `read`、`bash`、`powershell` 独立执行，不继承最近加载的 Skill 来源。APA 执行溯源后续单独设计。
+成功加载只证明这次读取了哪条绑定的 SKILL.md，不能证明模型遵循了技能或执行了 APA。后续 `read`、`bash` 独立执行，不继承最近加载的 Skill 来源。APA 执行溯源后续单独设计。
 
 对照当前 Amio OpenCode 的 `packages/opencode/src/tool/skill.ts`，其工具 metadata 只有 name/dir。Pie 在这里增加的是来源绑定及持久化的 Skill 加载记录。
 
@@ -339,7 +339,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `packages/server/src/compaction.ts` | 上下文预算、切分点、摘要生成输入和压缩后模型上下文 |
 | `packages/server/src/plugins.ts` | Astron manifest 的 Skill 索引、本地导入与卸载 |
 | `packages/server/src/skills.ts` | 运行配置校验、load_skill、来源与加载结果 |
-| `packages/server/src/tools.ts`、`tools/` | 十个内置工具的 Core 适配、文件操作、搜索、系统命令和后台作业管理 |
+| `packages/server/src/tools.ts`、`tools/` | 九个内置工具的 Core 适配、文件操作、搜索、系统命令和后台作业管理 |
 | `packages/server/src/external-tools.ts` | 工具文件加载、ToolContext、工具 ID 和定义校验 |
 | `examples/tools/memory-manage.ts` | Astron 记忆工具适配示例，可复制到外部目录 |
 | `packages/server/src/models/` | 上游模型配置抽取和提供商管理 |
@@ -347,7 +347,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `apps/web/client/assistant-settings.tsx` | 助手配置表单 |
 | `packages/agent/src/agent.ts`、`agent-loop.ts` | 原版执行内核，当前保持 `b2602be` 基线 |
 
-运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖十个内置工具的注册、文件读写改查、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Shell 失败、限额、取消、后台执行和超时。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
+运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖九个内置工具的注册、文件读写改查、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Bash 失败、限额、取消、后台执行和超时。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
 
 自动压缩位于服务层，不修改 `agent-loop.ts`。真实模型每次调用前，`transformContext` 根据最后一次有效模型 usage 加尾部消息估算 token；超过模型窗口减去保留预算时，用同一模型生成结构化摘要，并把“摘要 + 最近消息”作为本次模型上下文。切分点不会落在 `toolResult`，后续压缩会把新历史合并进旧摘要。摘要记录随会话持久化，完整消息数组保持不变，因此页面和恢复仍能看到原始历史。摘要请求失败时回退到原上下文。
 

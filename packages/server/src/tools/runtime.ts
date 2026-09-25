@@ -102,13 +102,12 @@ export async function authorizeCommand(
 		/(^|[;&|]\s*)(rm|rmdir|del|erase|remove-item|format|mkfs|shutdown|reboot)\b|git\s+(reset\s+--hard|clean\s+-[a-z]*f)|\b(sudo|runas)\b/i.exec(
 			command,
 		);
-	if (!risk) return;
 	await runtime.ask(
 		{
 			type: "confirmation",
-			title: "执行高风险命令",
-			message: `检测到高风险命令片段 ${risk[0].trim()}：\n\n${command}`,
-			metadata: { permission: "shell", command, workdir, risk: risk[0].trim() },
+			title: risk ? "执行高风险命令" : "执行命令",
+			message: risk ? `检测到高风险命令片段 ${risk[0].trim()}：\n\n${command}` : command,
+			metadata: { permission: "bash", command, workdir, ...(risk ? { risk: risk[0].trim() } : {}) },
 		},
 		signal,
 	);

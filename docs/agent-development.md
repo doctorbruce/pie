@@ -84,7 +84,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 这九个工具、按绑定出现的 `skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
 
-内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 支持文本、目录、图片和 PDF 文本分页，PDF 一次最多 20 页；`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
+内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 对齐 Amio v1 的文件读取边界：文本按行流式读取，默认最多 2000 行/50 KiB，单行最多 2000 字符并返回正确的续读 offset；前 4 KiB 用于图片/PDF/二进制识别，缺失路径会返回同目录候选。它也支持目录、图片和 PDF 文本分页，PDF 一次最多 20 页；PDF.js worker 随单文件 sidecar 打包。`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
 
 `bash` 对齐 Amio v1 契约：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 和 Turn 取消影响，只由 `job_kill` 停止；`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。完成通知作为 synthetic 用户内容进入模型和 follow-up 队列，但从产品快照和会话导出中隐藏，不表示用户主动发送。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
 
@@ -115,6 +115,10 @@ POST /sessions/:id/turns { text, assistantId?, systemPrompt? }
   → Agent.continue() → runAgentLoopContinue()
   → 模型流式输出 / 工具执行 / 下一轮模型响应
   → 等 Agent 空闲 → 保存最终状态 → SSE turn.settled
+
+POST /sessions/:id/steer { turnId, text, displayText? }
+  → 仅接受当前 running Turn 的精确 turnId
+  → Agent.steer() 在当前工具结束后注入用户消息并继续同一 Turn
 ```
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
@@ -125,7 +129,7 @@ Pie 保留 Pi 原生的内容分段：`thinking_start/delta/end` 是思考，`te
 
 切换会话会关闭旧 SSE 并订阅新会话，不会停止旧任务。浏览器里尚未发送的草稿按会话暂存在内存；刷新会丢失草稿。会话列表每 3 秒查询一次摘要，当前会话完成时立即刷新。原始事件只展示当前页面接收到的最近 120 条，不持久化、不补发。
 
-取消需要明确的 `turnId`。取消接口返回 `202`，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
+Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 Turn，并在当前工具执行完成后进入下一轮模型响应；取消会先清空待处理的 steer/follow-up 队列再中断。两个接口都返回 `202`，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
 
 ### 多 Core 会话同步
 

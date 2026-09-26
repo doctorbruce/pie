@@ -22,6 +22,7 @@ import { createCoreServer } from "../src/server.ts";
 
 const shellTool = "bash";
 const waitCommand = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
+const steerWaitCommand = process.platform === "win32" ? "Start-Sleep -Milliseconds 250" : "sleep 0.25";
 const failCommand =
 	process.platform === "win32" ? "Write-Error 'test failure'; exit 7" : "printf 'test failure\\n' >&2; exit 7";
 
@@ -1138,6 +1139,61 @@ test("cancel targets one turn, rejects concurrent submits, and permits another t
 	}
 	assert.equal((await fetch(`${core.base}/sessions/${a.id}`, { method: "DELETE" })).status, 200);
 	assert.equal((await fetch(`${core.base}/sessions/${a.id}`)).status, 404);
+});
+
+test("steer injects a user message into the active turn and rejects idle or stale turns", async (t) => {
+	const core = await start();
+	t.after(() => core.close());
+	assert.equal(
+		(
+			await core.put("/host-runtimes", {
+				runtimes: [
+					{
+						assistantId: "steer-host",
+						assistantRevision: "1",
+						runtime: {
+							systemPrompt: "",
+							toolIds: [shellTool],
+							skills: [],
+							subagents: [],
+							permissions: { bash: "allow" },
+						},
+					},
+				],
+			})
+		).status,
+		200,
+	);
+	const session = (await (await core.post("/sessions", { assistantId: "steer-host" })).json()) as SessionSnapshot;
+	assert.equal((await core.post(`/sessions/${session.id}/steer`, { turnId: "idle", text: "改变方向" })).status, 409);
+	const stream = events(`${core.base}/sessions/${session.id}/events`);
+	await stream.next();
+	const accepted = await core.post(`/sessions/${session.id}/turns`, {
+		text: `调用工具 ${shellTool} ${JSON.stringify({ command: steerWaitCommand })}`,
+	});
+	assert.equal(accepted.status, 202);
+	const { turnId } = (await accepted.json()) as { turnId: string };
+	let steerSent = false;
+	for await (const packet of stream) {
+		if (packet.event?.type === "tool_execution_start" && !steerSent) {
+			assert.equal(
+				(await core.post(`/sessions/${session.id}/steer`, { turnId: "stale", text: "错误回合" })).status,
+				409,
+			);
+			const response = await core.post(`/sessions/${session.id}/steer`, {
+				turnId,
+				text: "改变方向",
+			});
+			assert.equal(response.status, 202);
+			assert.equal(((await response.json()) as { turnId: string }).turnId, turnId);
+			steerSent = true;
+		}
+		if (packet.type !== "turn.settled") continue;
+		assert.equal(packet.snapshot.turn?.status, "completed");
+		assert(packet.snapshot.messages.some((message) => message.role === "user" && message.content === "改变方向"));
+		break;
+	}
+	assert(steerSent);
 });
 
 test("local service rejects foreign origins, malformed input, unavailable models and unauthenticated clients", async (t) => {

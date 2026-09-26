@@ -74,7 +74,21 @@ test("upstream tool set performs file, listing and search operations", async (t)
 	assert.match(JSON.stringify(written.details), /"artifactRole":"final"/);
 	assert.match(JSON.stringify(written.details), /@@/);
 	assert.equal(await readFile(join(directory, "nested", "example.txt"), "utf8"), "alpha\nbeta\n");
-	assert.match(JSON.stringify(await read.execute("read", { path: "nested/example.txt" })), /alpha/);
+	assert.match(JSON.stringify(await read.execute("read", { path: "nested/example.txt" })), /1: alpha/);
+
+	await writeFile(join(directory, "long.txt"), Array.from({ length: 100 }, () => "x".repeat(3000)).join("\n"));
+	const bounded = await read.execute("read-bounded", { path: "long.txt" });
+	const boundedText = JSON.stringify(bounded.content);
+	const boundedDisplay = (bounded.details as { display?: { lineEnd?: number; truncated?: boolean } }).display;
+	assert.match(boundedText, /line truncated to 2000 chars/);
+	assert.equal(boundedDisplay?.truncated, true);
+	assert(boundedDisplay?.lineEnd);
+	assert.match(boundedText, new RegExp(`offset=${boundedDisplay.lineEnd + 1}`));
+
+	await writeFile(join(directory, "correct-name.txt"), "found");
+	await assert.rejects(read.execute("read-missing", { path: "correct.txt" }), /correct-name\.txt/);
+	await writeFile(join(directory, "binary.docx"), "plain-looking bytes");
+	await assert.rejects(read.execute("read-binary", { path: "binary.docx" }), /二进制文件/);
 	await edit.execute("edit", {
 		path: "nested/example.txt",
 		artifactRole: "final",

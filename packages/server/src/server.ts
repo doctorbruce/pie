@@ -926,7 +926,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				return json(201, snapshot(session));
 			}
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|turns|cancel|interactions|export|import|fork)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|turns|steer|cancel|interactions|export|import|fork)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			const session = match ? sessions.get(match[1]) : undefined;
@@ -1027,8 +1027,32 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				if (session.turn.status === "running") {
 					session.cancelRequested = true;
 					rejectSessionInteractions(session.id, new Error("会话已取消"));
+					session.agent?.clearAllQueues();
 					session.agent?.abort();
 				}
+				return json(202, { sessionId: session.id, turnId: session.turn.id });
+			}
+			if (req.method === "POST" && action === "steer") {
+				if (session.kind === "subagent") throw new HttpError(409, "子会话由父会话通过 task 管理");
+				const body = await readJson(req);
+				if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 16000)
+					throw new HttpError(400, "text 需要 1–16000 个字符");
+				if (
+					body.displayText !== undefined &&
+					(typeof body.displayText !== "string" || !body.displayText.trim() || body.displayText.length > 16000)
+				)
+					throw new HttpError(400, "displayText 需要 1–16000 个字符");
+				if (!session.turn || session.turn.status !== "running")
+					throw new HttpError(409, "当前会话没有正在执行的回合");
+				if (body.turnId !== session.turn.id) throw new HttpError(409, "turnId 不匹配");
+				const agent = attachAgent(session);
+				const userMessage: Extract<AgentMessage, { role: "user" }> & { displayContent?: string } = {
+					role: "user",
+					content: body.text,
+					timestamp: Date.now(),
+				};
+				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
+				agent.steer(userMessage);
 				return json(202, { sessionId: session.id, turnId: session.turn.id });
 			}
 			if (req.method === "POST" && action === "interactions") {

@@ -9,6 +9,7 @@ import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import type {
 	Assistant,
 	ModelCatalog,
@@ -207,6 +208,10 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 			assert.equal("snapshot" in packet, false);
 			assert.equal("message" in (packet.event ?? {}), false);
 			assert.equal("messages" in (packet.event ?? {}), false);
+			if (packet.event?.type === "message_update") {
+				const update = packet.event.assistantMessageEvent as AssistantMessageEvent;
+				assert.equal("partial" in update, false);
+			}
 		}
 		if (packet.type === "turn.settled") {
 			assert(receivedAgentEvent);
@@ -252,8 +257,20 @@ test("global SSE promotes file output details for Astron artifact discovery", as
 		202,
 	);
 	let next = await firstPacket;
+	let sawToolCallStart = false;
 	while (!next.done) {
 		const packet = next.value;
+		const update =
+			packet.event?.type === "message_update"
+				? (packet.event.assistantMessageEvent as AssistantMessageEvent & {
+						toolCall?: { name?: string };
+					})
+				: undefined;
+		if (update?.type === "toolcall_start") {
+			sawToolCallStart = true;
+			assert.equal("partial" in update, false);
+			assert.equal(update.toolCall?.name, "write");
+		}
 		if (packet.type === "interaction.requested" && packet.interaction) {
 			assert.equal(
 				(await core.post(`/sessions/${session.id}/interactions/${packet.interaction.id}`, { approved: true }))
@@ -262,6 +279,7 @@ test("global SSE promotes file output details for Astron artifact discovery", as
 			);
 		}
 		if (packet.event?.type === "tool_execution_end") {
+			assert(sawToolCallStart);
 			const result = packet.event.result as {
 				content: unknown[];
 				details: { outputs: { path: string; artifactRole: string }[] };

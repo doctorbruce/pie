@@ -164,7 +164,7 @@ export function createSkillTools(runtime: RuntimeConfig, record: (activity: Tool
 		{ additionalProperties: false },
 	);
 	const load: AgentTool<typeof loadParameters, SkillDetails> = {
-		name: "load_skill",
+		name: "skill",
 		label: "加载技能",
 		description:
 			"Load a mounted skill by its exact binding ID and record its plugin source. Use read for references and bash for commands described in the loaded skill.",

@@ -123,7 +123,7 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 	);
 	assert.match(agent.state.systemPrompt, /sample\/nested/);
 	assert.doesNotMatch(agent.state.systemPrompt, /NESTED_BODY_ONLY_AFTER_LOAD/);
-	const skillTool = agent.state.tools.find((tool) => tool.name === "load_skill");
+	const skillTool = agent.state.tools.find((tool) => tool.name === "skill");
 	assert(skillTool);
 	await assert.rejects(skillTool.execute("bad", { id: "other/nested" }), /未挂载/);
 	const empty = factory.create("faux", "empty", { systemPrompt: "", skills: [], toolIds: [], subagents: [] });
@@ -138,7 +138,7 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 			: `cd '${escapedDirectory}' && ${node} run.mjs`;
 	const faux = fauxProvider({ tokensPerSecond: 100000 });
 	faux.setResponses([
-		fauxAssistantMessage([fauxToolCall("load_skill", { id: "sample/nested" })], { stopReason: "toolUse" }),
+		fauxAssistantMessage([fauxToolCall("skill", { id: "sample/nested" })], { stopReason: "toolUse" }),
 		fauxAssistantMessage([fauxToolCall("read", { path: join(skillDirectory, "reference.txt") })], {
 			stopReason: "toolUse",
 		}),
@@ -157,7 +157,7 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 	assert.deepEqual(
 		results.map((message) => [message.toolName, message.isError]),
 		[
-			["load_skill", false],
+			["skill", false],
 			["read", false],
 			[shellName, false],
 		],

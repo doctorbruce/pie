@@ -30,12 +30,12 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 	env = Object.freeze({ ...env });
 	const settings = createModelSettings(env);
 	const catalogTools = systemTools(env);
-	const external = loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "load_skill", "task"]);
+	const external = loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task"]);
 	const toolIds = [...catalogTools.map((tool) => tool.name), ...external.keys()];
 	const composeSystemPrompt = (runtime: RuntimeConfig, systemPrompt = runtime.systemPrompt) =>
 		systemPrompt +
 		(runtime.skills.length
-			? `\n\nAvailable skills (load_skill before use; do not assume missing host dependencies are installed):\n${JSON.stringify(runtime.skills.map(({ id, description, source }) => ({ id, description, source: source?.pluginName })))}`
+			? `\n\nAvailable skills (use the skill tool before use; do not assume missing host dependencies are installed):\n${JSON.stringify(runtime.skills.map(({ id, description, source }) => ({ id, description, source: source?.pluginName })))}`
 			: "");
 
 	return {
@@ -264,11 +264,11 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 						const skillRequest = /^加载技能\s+(\S+)$/.exec(input.trim());
 						if (skillRequest) {
 							faux.setResponses([
-								availableTools.some((tool) => tool.name === "load_skill")
-									? fauxAssistantMessage([fauxToolCall("load_skill", { id: skillRequest[1] })], {
+								availableTools.some((tool) => tool.name === "skill")
+									? fauxAssistantMessage([fauxToolCall("skill", { id: skillRequest[1] })], {
 											stopReason: "toolUse",
 										})
-									: fauxAssistantMessage("当前会话未启用 load_skill。"),
+									: fauxAssistantMessage("当前会话未启用 skill。"),
 							]);
 							return localModels.streamSimple(model, context, options);
 						}

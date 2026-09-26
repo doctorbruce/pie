@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { contentText } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { type AssistantMessageEvent, contentText } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "./agent.ts";
 import { parseToolIds, ToolConfigError } from "./external-tools.ts";
 import { ModelSettingsError } from "./models/settings.ts";
@@ -18,7 +19,12 @@ import type {
 	SubagentBinding,
 	ToolActivity,
 } from "./protocol.ts";
-import { exportSession, parseSessionTransfer, transferToAgentMessages } from "./session-transfer.ts";
+import {
+	displayAgentMessages,
+	exportSession,
+	parseSessionTransfer,
+	transferToAgentMessages,
+} from "./session-transfer.ts";
 import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./skills.ts";
 import { openStore, type SavedSession } from "./store.ts";
 import { type BackgroundJobInfo, BackgroundJobs } from "./tools/jobs.ts";
@@ -344,7 +350,8 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 	async function notifyBackground(session: Session, text: string) {
 		if (closing) return;
 		const agent = attachAgent(session);
-		agent.followUp({ role: "user", content: text, timestamp: Date.now() });
+		const content = [{ type: "text" as const, text, synthetic: true as const }];
+		agent.followUp({ role: "user", content, timestamp: Date.now() });
 		if (agent.state.isStreaming || session.turn?.status === "running") return;
 		session.turn = { id: randomUUID(), status: "running" };
 		session.cancelRequested = false;
@@ -405,12 +412,13 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		};
 	}
 	function snapshot(session: Session): SessionSnapshot {
+		const messages = session.agent?.state.messages ?? session.messages;
 		return {
 			instanceId,
 			...summary(session),
 			assistant: session.assistant,
 			revision: session.revision,
-			messages: session.agent?.state.messages ?? session.messages,
+			messages: displayAgentMessages(messages),
 			streamingMessage: session.agent?.state.streamingMessage,
 			turn: session.turn,
 			runtime: session.runtime,
@@ -433,8 +441,20 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			case "agent_start":
 			case "turn_start":
 				return { type: event.type };
-			case "message_update":
-				return { type: event.type, assistantMessageEvent: event.assistantMessageEvent };
+			case "message_update": {
+				const update = event.assistantMessageEvent as AssistantMessageEvent;
+				if (!("partial" in update)) return undefined;
+				const { partial: _partial, ...assistantMessageEvent } = update;
+				if (update.type !== "toolcall_start") return { type: event.type, assistantMessageEvent };
+				const toolCall = update.partial.content[update.contentIndex];
+				return {
+					type: event.type,
+					assistantMessageEvent: {
+						...assistantMessageEvent,
+						...(toolCall?.type === "toolCall" ? { toolCall } : {}),
+					},
+				};
+			}
 			case "tool_execution_start":
 				return event;
 			case "tool_execution_update":
@@ -1031,6 +1051,11 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					(typeof body.systemPrompt !== "string" || body.systemPrompt.length > 60000)
 				)
 					throw new HttpError(400, "systemPrompt 需要字符串，最多 60000 字符");
+				if (
+					body.displayText !== undefined &&
+					(typeof body.displayText !== "string" || !body.displayText.trim() || body.displayText.length > 16000)
+				)
+					throw new HttpError(400, "displayText 需要 1–16000 个字符");
 				if (session.turn?.status === "running") throw new HttpError(409, "当前会话正在执行");
 				const configuration = resolveTurnConfiguration(session, body);
 				const oldAgent = session.agent;
@@ -1055,7 +1080,13 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				session.runtime = configuration.runtime;
 				if (configurationChanged) bindAgent(session, agent);
 				const now = Date.now();
-				agent.state.messages = [...oldMessages, { role: "user", content: body.text, timestamp: now }];
+				const userMessage: Extract<AgentMessage, { role: "user" }> & { displayContent?: string } = {
+					role: "user",
+					content: body.text,
+					timestamp: now,
+				};
+				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
+				agent.state.messages = [...oldMessages, userMessage];
 				session.turn = { id: randomUUID(), status: "running" };
 				session.updatedAt = now;
 				session.cancelRequested = false;

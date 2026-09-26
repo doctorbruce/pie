@@ -44,9 +44,9 @@
 
 `400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或助手/会话达到各自 32 的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明" }`。
 
-助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `load_skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
+助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
-这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或 `task` 时自动向 Agent 加入 `job_output/job_kill`。`load_skill` 和 `task` 也由 Pie 提供，但分别只在当前 runtime 有 Skill 或 Subagent 绑定时加入 Agent。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
+这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或 `task` 时自动向 Agent 加入 `job_output/job_kill`。`skill` 和 `task` 也由 Pie 提供，但分别只在当前 runtime 有 Skill 或 Subagent 绑定时加入 Agent。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
 
 会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。配置变化发生在 Turn 准入前：已有消息保留，空闲 Agent 按最新注册版本重建；正在运行的 Turn 不被切换，下一次提交才应用新配置。
 
@@ -62,7 +62,7 @@
 npm run serve -- --tools-dir E:/Projects/pie/examples/tools
 ```
 
-也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、load_skill 或 task 冲突会报错。
+也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill 或 task 冲突会报错。
 
 例如保存为 `hello.ts`：
 
@@ -101,7 +101,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 ## 技能绑定与加载记录
 
-宿主先注册 runtime，再用 assistantId 创建会话，无需导入 plugin.json 或复制技能文件。以下为 `PUT /host-runtimes` 的 Windows 示例，路径需替换成真实目录；name/description 由宿主提供，Skill 正文直到 load_skill 时才读取：
+宿主先注册 runtime，再用 assistantId 创建会话，无需导入 plugin.json 或复制技能文件。以下为 `PUT /host-runtimes` 的 Windows 示例，路径需替换成真实目录；name/description 由宿主提供，Skill 正文直到调用 `skill` 时才读取：
 
 ```json
 {
@@ -130,7 +130,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 注册成功后用 `POST /sessions { "assistantId": "astron-assistant-id", "mode": "faux" }` 创建会话。runtime 包含完整 systemPrompt/toolIds/skills 及可省略的 subagents；最多 128 个 Skill 绑定和 32 个 Subagent 绑定，各自 ID 必须唯一。多个 Skill 绑定可以共用同一个 directory。directory 和可选 resourceRoot 必须是绝对路径。source 可省略，表示没有指定 Plugin 来源；pluginVersion 可省略。本地插件导入会自动生成 Plugin 来源字段。
 
-`load_skill({id})` 加载已允许的绑定，记录 source 和实际正文的 contentHash；超过 64 KiB 拒绝加载。初始模型目录只有绑定 ID、说明和来源名称，不含路径或正文。未挂载的 ID 返回工具错误，不伪造来源。
+`skill({id})` 加载已允许的绑定，记录 source 和实际正文的 contentHash；超过 64 KiB 拒绝加载。初始模型目录只有绑定 ID、说明和来源名称，不含路径或正文。未挂载的 ID 返回工具错误，不伪造来源。
 
 `activities` 每项包含 id、sessionId、turnId、toolCallId、kind、binding 快照、status 和时间。kind 为 skill_load；status 为 running/succeeded/failed/cancelled/unknown。succeeded 表示 Skill 文件加载成功。绑定快照冻结来源配置，不冻结文件内容。普通 `read`、`bash` 等不产生 Plugin 使用记录，不继承“最近加载的技能”。APA 实际执行溯源后续单独设计。
 

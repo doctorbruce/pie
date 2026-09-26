@@ -185,6 +185,8 @@ export type TransferMessage = {
 	role: "user" | "assistant" | "system";
 	content: TransferContentPart[];
 	metadata?: Record<string, unknown>;
+	stopReason?: string;
+	errorMessage?: string;
 	createdAt?: number;
 };
 export type SessionTransfer = {

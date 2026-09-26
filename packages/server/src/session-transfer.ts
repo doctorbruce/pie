@@ -11,6 +11,11 @@ const EMPTY_USAGE = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
+const LEGACY_INTERNAL_TURN_SUFFIX =
+	/(?:\r?\n){2}<turn_(instructions|context) scope="current_user_turn">[\s\S]*?<\/turn_\1>\s*$/;
+const LEGACY_INTERNAL_NOTIFICATION =
+	/^<(?:background_job\s+id="[^"]+"\s+type="bash"\s+state="[^"]+"|task\s+id="[^"]+"\s+state="(?:completed|error)")[^>]*>[\s\S]*<\/(?:background_job|task)>$/;
+
 function record(value: unknown): Record<string, unknown> | undefined {
 	return value !== null && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
@@ -23,6 +28,67 @@ function text(value: unknown): string | undefined {
 
 function timestamp(value: unknown): number | undefined {
 	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function agentStopReason(value: unknown): Extract<AgentMessage, { role: "assistant" }>["stopReason"] | undefined {
+	const normalized = text(value)?.toLowerCase();
+	if (normalized === "pending") return "pending";
+	if (["stop", "end_turn", "completed", "complete", "done", "success"].includes(normalized ?? "")) return "stop";
+	if (["length", "max_tokens", "max_output_tokens"].includes(normalized ?? "")) return "length";
+	if (["tooluse", "tool_use", "tool-calls", "tool_calls"].includes(normalized ?? "")) return "toolUse";
+	if (["error", "failed", "failure"].includes(normalized ?? "")) return "error";
+	if (["aborted", "abort", "cancelled", "canceled", "interrupted"].includes(normalized ?? "")) return "aborted";
+	if (normalized === "deferred") return "deferred";
+	return undefined;
+}
+
+function stripLegacyInternalTurnContext(value: string): string {
+	let visible = value.trimEnd();
+	while (true) {
+		const next = visible.replace(LEGACY_INTERNAL_TURN_SUFFIX, "").trimEnd();
+		if (next === visible) return visible;
+		visible = next;
+	}
+}
+
+function displayedUserContent(message: Extract<AgentMessage, { role: "user" }>): typeof message.content {
+	const stored = Reflect.get(message, "displayContent");
+	if (typeof stored === "string") return stored;
+	if (typeof message.content === "string") {
+		const visible = stripLegacyInternalTurnContext(message.content);
+		return LEGACY_INTERNAL_NOTIFICATION.test(visible.trim()) ? "" : visible;
+	}
+	const visibleParts: typeof message.content = [];
+	for (const part of message.content) {
+		const source = record(part);
+		const metadata = record(source?.metadata);
+		if (source?.synthetic === true || metadata?.kind === "turn_context") continue;
+		if (part.type !== "text") {
+			visibleParts.push(part);
+			continue;
+		}
+		const visible = stripLegacyInternalTurnContext(part.text);
+		if (visible) visibleParts.push({ ...part, text: visible });
+	}
+	return visibleParts;
+}
+
+export function displayAgentMessages(messages: AgentMessage[]): AgentMessage[] {
+	const visibleMessages: AgentMessage[] = [];
+	for (const message of messages) {
+		if (message.role !== "user") {
+			visibleMessages.push(message);
+			continue;
+		}
+		const content = displayedUserContent(message);
+		if (typeof content === "string" ? !content.trim() : content.length === 0) continue;
+		visibleMessages.push({
+			role: "user",
+			content,
+			timestamp: message.timestamp,
+		});
+	}
+	return visibleMessages;
 }
 
 function transferPart(value: unknown): TransferContentPart {
@@ -43,6 +109,8 @@ function transferMessage(value: unknown): TransferMessage {
 		role,
 		content: message.content.map(transferPart),
 		metadata: metadata ? structuredClone(metadata) : undefined,
+		...(role === "assistant" && text(message.stopReason) ? { stopReason: text(message.stopReason) } : {}),
+		...(role === "assistant" && text(message.errorMessage) ? { errorMessage: text(message.errorMessage) } : {}),
 		createdAt: timestamp(message.createdAt),
 	};
 }
@@ -133,7 +201,8 @@ export function transferToAgentMessages(transfer: SessionTransfer): AgentMessage
 			provider: "pie-transfer",
 			model: "imported",
 			usage: structuredClone(EMPTY_USAGE),
-			stopReason: toolResults.length ? "toolUse" : "stop",
+			stopReason: agentStopReason(source.stopReason) ?? (toolResults.length ? "toolUse" : "stop"),
+			errorMessage: source.errorMessage,
 			timestamp: createdAt,
 		});
 		messages.push(...toolResults);
@@ -143,8 +212,9 @@ export function transferToAgentMessages(transfer: SessionTransfer): AgentMessage
 
 function canonicalContent(message: AgentMessage): TransferContentPart[] {
 	if (message.role === "user") {
-		const content =
-			typeof message.content === "string" ? [{ type: "text" as const, text: message.content }] : message.content;
+		const displayed = displayedUserContent(message);
+		if (typeof displayed === "string" && !displayed.trim()) return [];
+		const content = typeof displayed === "string" ? [{ type: "text" as const, text: displayed }] : displayed;
 		return content.map((part) =>
 			part.type === "image"
 				? { type: "file", mimeType: part.mimeType, uri: `data:${part.mimeType};base64,${part.data}` }
@@ -186,10 +256,14 @@ export function agentMessagesToTransfer(messages: AgentMessage[], sessionId: str
 			continue;
 		}
 		const content = canonicalContent(message);
+		if (message.role === "user" && content.length === 0) continue;
 		const canonical: TransferMessage = {
 			id: `pie:${sessionId}:${index}`,
 			role: message.role,
 			content,
+			...(message.role === "assistant"
+				? { stopReason: message.stopReason, errorMessage: message.errorMessage }
+				: {}),
 			createdAt: message.timestamp,
 		};
 		transcript.push(canonical);

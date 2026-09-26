@@ -99,7 +99,7 @@ export function AssistantSettings({
 						</label>
 					))}
 					<p className="settings-note">
-						挂载插件（自动提供 load_skill）。需要读参考文件或执行脚本时，请同时启用 read 及 bash 或 powershell。
+						挂载插件（自动提供 skill）。需要读参考文件或执行脚本时，请同时启用 read 及 bash 或 powershell。
 					</p>
 					{plugins.map((plugin) => (
 						<label className="settings-checkbox" key={plugin.id}>

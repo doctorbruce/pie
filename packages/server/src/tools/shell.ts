@@ -12,6 +12,14 @@ const artifactRole = Type.Union([Type.Literal("final"), Type.Literal("intermedia
 const parameters = Type.Object(
 	{
 		command: Type.String({ description: "The command to execute" }),
+		description: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: 80,
+				description:
+					"Short user-visible activity title describing why the command is being run. Use the user's language and an action phrase. Do not repeat the raw command, URLs, credentials, or file paths.",
+			}),
+		),
 		timeout: Type.Optional(
 			Type.Integer({
 				exclusiveMinimum: 0,
@@ -110,9 +118,9 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 	const tool: AgentTool<typeof parameters, ShellDetails> = {
 		name: "bash",
 		label: "Bash",
-		description: `Execute a command using ${shell.name} on ${process.platform}. This is the only native command tool. Supports workdir, permission confirmation, declared artifacts, a ${defaultTimeoutMs}ms foreground timeout, automatic backgrounding after ${defaultYieldMs}ms, incremental job output, and cancellation. timeout and yieldMs use milliseconds. Foreground output keeps the last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB.`,
+		description: `Execute a command using ${shell.name} on ${process.platform}. This is the only native command tool. Always set description to a short user-visible action phrase in the user's language. Supports workdir, permission confirmation, declared artifacts, a ${defaultTimeoutMs}ms foreground timeout, automatic backgrounding after ${defaultYieldMs}ms, incremental job output, and cancellation. timeout and yieldMs use milliseconds. Foreground output keeps the last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB.`,
 		parameters,
-		async execute(_id, { command, workdir, timeout, yieldMs, outputs }, signal, onUpdate) {
+		async execute(_id, { command, description, workdir, timeout, yieldMs, outputs }, signal, onUpdate) {
 			const cwd = resolvePath(workdir ?? ".", runtime.directory);
 			await authorizeCommand(runtime, command, cwd, signal);
 			if (!(await stat(cwd)).isDirectory()) throw new Error(`工作目录不存在：${cwd}`);
@@ -156,7 +164,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 			const started = runtime.jobs.start({
 				ownerSessionId: runtime.sessionId,
 				type: "shell",
-				title: command.slice(0, 120),
+				title: description?.trim() || command.slice(0, 120),
 				details: { outputPath, command, workdir: cwd, shell: shell.name },
 				async run(jobSignal, append) {
 					try {

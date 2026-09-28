@@ -58,6 +58,37 @@ async function readJson(req: IncomingMessage, maxBytes = 65536): Promise<Record<
 	}
 }
 
+function optionalRequestId(body: Record<string, unknown>): string | undefined {
+	if (body.requestId === undefined) return undefined;
+	if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 256)
+		throw new HttpError(400, "requestId 需要 1–256 个字符");
+	return body.requestId.trim();
+}
+
+/**
+ * 引擎侧（Astron）的 canonical 身份。Pie 自己不认识它，只是原样存到那条 user 消息上，
+ * 历史读回时由引擎用来把运行时消息认领回它的 turn / 计划任务，自身不参与任何逻辑。
+ */
+type UserMessageIdentity = {
+	clientMessageId?: string;
+	userMessageId?: string;
+	triggerTaskId?: string;
+};
+
+const USER_MESSAGE_IDENTITY_KEYS = ["clientMessageId", "userMessageId", "triggerTaskId"] as const;
+
+function optionalMessageIdentity(body: Record<string, unknown>): UserMessageIdentity {
+	const identity: UserMessageIdentity = {};
+	for (const key of USER_MESSAGE_IDENTITY_KEYS) {
+		const value = body[key];
+		if (value === undefined) continue;
+		if (typeof value !== "string" || !value.trim() || value.length > 256)
+			throw new HttpError(400, `${key} 需要 1–256 个字符`);
+		identity[key] = value.trim();
+	}
+	return identity;
+}
+
 export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 	const factory = createAgentFactory(env);
 	const plugins = createPlugins(env);
@@ -169,7 +200,6 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 	function forkSession(source: Session, messageIndex: number, requestedTitle: unknown) {
 		if (source.kind !== "root") throw new HttpError(409, "子会话不能分叉");
 		if (source.turn?.status === "running") throw new HttpError(409, "当前会话正在执行，不能分叉");
-		if (sessions.size >= 32) throw new HttpError(409, "最多 32 个会话，请删除旧会话");
 		const messages = source.agent?.state.messages ?? source.messages;
 		const selected = messages[messageIndex];
 		if (!Number.isInteger(messageIndex) || !selected || selected.role !== "user")
@@ -435,7 +465,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		if (!details || typeof details !== "object" || Array.isArray(details)) return result;
 		return { ...details, ...result };
 	}
-	function globalAgentEvent(event: SessionEvent["event"]) {
+	function globalAgentEvent(session: Session, event: SessionEvent["event"]) {
 		if (!event) return undefined;
 		switch (event.type) {
 			case "agent_start":
@@ -444,11 +474,15 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			case "message_update": {
 				const update = event.assistantMessageEvent as AssistantMessageEvent;
 				if (!("partial" in update)) return undefined;
+				const message = event.message;
+				if (!message || typeof message !== "object" || !("timestamp" in message)) return undefined;
+				const messageId = `assistant:${session.id}:${session.turn?.id ?? "idle"}:${String(message.timestamp)}`;
 				const { partial: _partial, ...assistantMessageEvent } = update;
-				if (update.type !== "toolcall_start") return { type: event.type, assistantMessageEvent };
+				if (update.type !== "toolcall_start") return { type: event.type, messageId, assistantMessageEvent };
 				const toolCall = update.partial.content[update.contentIndex];
 				return {
 					type: event.type,
+					messageId,
 					assistantMessageEvent: {
 						...assistantMessageEvent,
 						...(toolCall?.type === "toolCall" ? { toolCall } : {}),
@@ -484,7 +518,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			snapshot: snapshot(session),
 		};
 		const data = `data: ${JSON.stringify(packet)}\n\n`;
-		const projectedEvent = type === "agent.event" ? globalAgentEvent(event) : undefined;
+		const projectedEvent = type === "agent.event" ? globalAgentEvent(session, event) : undefined;
 		const globalBase = {
 			type,
 			sessionId: session.id,
@@ -542,7 +576,6 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			persist(child);
 			publish(child, "snapshot");
 		} else {
-			if (sessions.size >= 32) throw new Error("最多 32 个会话，请删除旧会话");
 			const id = randomUUID();
 			const now = Date.now();
 			const runtime = { ...structuredClone(binding.runtime), subagents: [] };
@@ -872,7 +905,6 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				}
 				if (mode === "real" && !model && !factory.info.realModel)
 					throw new HttpError(400, factory.info.realModelError ?? "真实模型未配置");
-				if (sessions.size >= 32) throw new HttpError(409, "最多 32 个会话，请删除旧会话");
 				const id = randomUUID();
 				const runtime = hostDefinition
 					? hydrateHostRuntime(hostDefinition, hostRuntimes)
@@ -1045,15 +1077,21 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				if (!session.turn || session.turn.status !== "running")
 					throw new HttpError(409, "当前会话没有正在执行的回合");
 				if (body.turnId !== session.turn.id) throw new HttpError(409, "turnId 不匹配");
+				const requestId = optionalRequestId(body);
+				const messageIdentity = optionalMessageIdentity(body);
 				const agent = attachAgent(session);
-				const userMessage: Extract<AgentMessage, { role: "user" }> & { displayContent?: string } = {
+				const userMessage: Extract<AgentMessage, { role: "user" }> & {
+					displayContent?: string;
+				} & UserMessageIdentity = {
 					role: "user",
 					content: body.text,
 					timestamp: Date.now(),
+					...messageIdentity,
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
+				if (requestId) session.turn.requestId = requestId;
 				agent.steer(userMessage);
-				return json(202, { sessionId: session.id, turnId: session.turn.id });
+				return json(202, { sessionId: session.id, turnId: session.turn.id, requestId });
 			}
 			if (req.method === "POST" && action === "interactions") {
 				if (!interactionId) throw new HttpError(404, "交互不存在");
@@ -1081,6 +1119,8 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				)
 					throw new HttpError(400, "displayText 需要 1–16000 个字符");
 				if (session.turn?.status === "running") throw new HttpError(409, "当前会话正在执行");
+				const requestId = optionalRequestId(body);
+				const messageIdentity = optionalMessageIdentity(body);
 				const configuration = resolveTurnConfiguration(session, body);
 				const oldAgent = session.agent;
 				const oldSavedMessages = session.messages;
@@ -1104,14 +1144,17 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				session.runtime = configuration.runtime;
 				if (configurationChanged) bindAgent(session, agent);
 				const now = Date.now();
-				const userMessage: Extract<AgentMessage, { role: "user" }> & { displayContent?: string } = {
+				const userMessage: Extract<AgentMessage, { role: "user" }> & {
+					displayContent?: string;
+				} & UserMessageIdentity = {
 					role: "user",
 					content: body.text,
 					timestamp: now,
+					...messageIdentity,
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
 				agent.state.messages = [...oldMessages, userMessage];
-				session.turn = { id: randomUUID(), status: "running" };
+				session.turn = { id: randomUUID(), requestId, status: "running" };
 				session.updatedAt = now;
 				session.cancelRequested = false;
 				try {
@@ -1131,7 +1174,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					typeof body.systemPrompt === "string" ? body.systemPrompt : configuration.runtime.systemPrompt,
 				);
 				publish(session, "snapshot");
-				json(202, { sessionId: session.id, turnId: session.turn.id });
+				json(202, { sessionId: session.id, turnId: session.turn.id, requestId });
 				session.runPromise = run(session);
 				return;
 			}

@@ -1168,8 +1168,14 @@ test("steer injects a user message into the active turn and rejects idle or stal
 	assert.equal((await core.post(`/sessions/${session.id}/steer`, { turnId: "idle", text: "改变方向" })).status, 409);
 	const stream = events(`${core.base}/sessions/${session.id}/events`);
 	await stream.next();
+	const globalStream = events(`${core.base}/events`);
+	const firstGlobalPacket = globalStream.next();
 	const accepted = await core.post(`/sessions/${session.id}/turns`, {
+		requestId: "request-before-steer",
 		text: `调用工具 ${shellTool} ${JSON.stringify({ command: steerWaitCommand })}`,
+		clientMessageId: "user-first",
+		userMessageId: "user-first",
+		triggerTaskId: "2097233113755746304",
 	});
 	assert.equal(accepted.status, 202);
 	const { turnId } = (await accepted.json()) as { turnId: string };
@@ -1181,8 +1187,12 @@ test("steer injects a user message into the active turn and rejects idle or stal
 				409,
 			);
 			const response = await core.post(`/sessions/${session.id}/steer`, {
+				requestId: "request-after-steer",
 				turnId,
 				text: "改变方向",
+				clientMessageId: "user-steer",
+				userMessageId: "user-steer",
+				triggerTaskId: "2097233113755746304",
 			});
 			assert.equal(response.status, 202);
 			assert.equal(((await response.json()) as { turnId: string }).turnId, turnId);
@@ -1190,10 +1200,40 @@ test("steer injects a user message into the active turn and rejects idle or stal
 		}
 		if (packet.type !== "turn.settled") continue;
 		assert.equal(packet.snapshot.turn?.status, "completed");
+		assert.equal(packet.snapshot.turn?.requestId, "request-after-steer");
 		assert(packet.snapshot.messages.some((message) => message.role === "user" && message.content === "改变方向"));
+		// 引擎侧身份必须原样留在 user 消息上（历史读回靠它认领 turn / 计划任务）。
+		const firstTurnMessage = packet.snapshot.messages.find(
+			(message) =>
+				message.role === "user" && typeof message.content === "string" && message.content.startsWith("调用工具"),
+		);
+		const steerMessage = packet.snapshot.messages.find(
+			(message) => message.role === "user" && message.content === "改变方向",
+		);
+		assert.equal((firstTurnMessage as { clientMessageId?: string } | undefined)?.clientMessageId, "user-first");
+		assert.equal((firstTurnMessage as { triggerTaskId?: string } | undefined)?.triggerTaskId, "2097233113755746304");
+		assert.equal((steerMessage as { clientMessageId?: string } | undefined)?.clientMessageId, "user-steer");
+		assert.equal((steerMessage as { userMessageId?: string } | undefined)?.userMessageId, "user-steer");
+		assert.equal((steerMessage as { triggerTaskId?: string } | undefined)?.triggerTaskId, "2097233113755746304");
 		break;
 	}
 	assert(steerSent);
+	const assistantMessageIds = new Set<string>();
+	let nextGlobal = await firstGlobalPacket;
+	while (!nextGlobal.done) {
+		const packet = nextGlobal.value;
+		if (packet.sessionId === session.id && packet.event?.type === "message_update") {
+			assert.equal(typeof packet.event.messageId, "string");
+			assistantMessageIds.add(String(packet.event.messageId));
+		}
+		if (packet.sessionId === session.id && packet.type === "turn.settled") {
+			assert.equal(packet.snapshot.turn?.requestId, "request-after-steer");
+			break;
+		}
+		nextGlobal = await globalStream.next();
+	}
+	await globalStream.return(undefined);
+	assert.equal(assistantMessageIds.size, 2);
 });
 
 test("local service rejects foreign origins, malformed input, unavailable models and unauthenticated clients", async (t) => {

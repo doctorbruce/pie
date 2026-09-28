@@ -145,6 +145,7 @@ export type ModelCatalog = {
 };
 export type Turn = {
 	id: string;
+	requestId?: string;
 	status: "running" | "completed" | "cancelled" | "failed";
 	error?: string;
 };

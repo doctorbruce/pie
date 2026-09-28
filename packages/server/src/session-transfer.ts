@@ -82,7 +82,10 @@ export function displayAgentMessages(messages: AgentMessage[]): AgentMessage[] {
 		}
 		const content = displayedUserContent(message);
 		if (typeof content === "string" ? !content.trim() : content.length === 0) continue;
+		// 只清洗正文，保留引擎写入的身份字段（clientMessageId / userMessageId / triggerTaskId）；
+		// 重建对象会把它们丢掉，历史就认领不回 turn。
 		visibleMessages.push({
+			...message,
 			role: "user",
 			content,
 			timestamp: message.timestamp,

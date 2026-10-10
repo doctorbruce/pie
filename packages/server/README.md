@@ -8,7 +8,7 @@
 
 ## HTTP
 
-请求体为 JSON 对象，必须带 `Content-Type: application/json`。普通请求最多 64 KiB；宿主 runtime 注册表最多 4 MiB；会话导入最多 32 MiB。设置 `PI_SERVER_TOKEN` 时，所有请求（含 health 和 SSE）需要 `Authorization: Bearer <token>`。Web 客户端通过同源 Vite 代理访问；Core 默认只允许 `http://127.0.0.1:5174` Origin，可用 `PI_WEB_ORIGIN` 覆盖。
+请求体为 JSON 对象，必须带 `Content-Type: application/json`。普通请求最多 64 KiB；宿主 runtime 注册表最多 4 MiB；会话导入和 turn/steer 请求最多 32 MiB。设置 `PI_SERVER_TOKEN` 时，所有请求（含 health 和 SSE）需要 `Authorization: Bearer <token>`。Web 客户端通过同源 Vite 代理访问；Core 默认只允许 `http://127.0.0.1:5174` Origin，可用 `PI_WEB_ORIGIN` 覆盖。
 
 | 方法和路径 | 请求 | 响应 |
 | --- | --- | --- |
@@ -31,16 +31,20 @@
 | `PUT /host-runtimes` | `{ runtimes: [{ assistantId, assistantRevision, runtime }] }` | 事务性替换宿主 runtime 注册表并持久化；最多 256 个 Assistant，runtime 可引用同一批次中的 Subagent Assistant |
 | `POST /sessions` | `{ assistantId?, title?, mode?, model?: { provider, id } }` | `201` + 会话快照；assistantId 命中宿主注册表时创建宿主会话，否则解析本地助手；mode 默认 faux |
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
+| `PUT /sessions/:id/model-override` | `{ modelOverride: { providerId, model } \| null, initializeOnly? }` | 保存会话模型选择；null 跟随默认模型。initializeOnly 仅补入尚未初始化的历史会话，保留已存在的选择或 null |
 | `GET /sessions/:id` | 无 | 会话快照，含全部已完成消息、当前部分消息、最近一次 turn |
 | `GET /events` | 无 | 宿主使用的全局 SSE，只推送连接后的所有会话事件，不发送初始快照 |
 | `GET /sessions/:id/events` | 无 | SSE，第一条是当前快照，然后推送后续事件 |
 | `GET /sessions/:id/export` | 无 | 导出 canonical `SessionTransfer`；运行中的会话返回 409 |
 | `PUT /sessions/:id/import` | `SessionTransfer` | 用转储覆盖空闲会话历史并保留产品会话 ID；失败时回滚原状态 |
 | `POST /sessions/:id/fork` | `{ messageIndex, title? }` | 按上游 `/fork` 语义从指定用户消息之前创建独立根会话，返回 `{ session, selectedText }`；原会话不变 |
-| `POST /sessions/:id/turns` | `{ text, assistantId?, systemPrompt? }` | `202` + `{ sessionId, turnId }`；宿主会话在准入时读取已注册的最新 runtime，systemPrompt 是本轮动态完整系统上下文 |
+| `POST /sessions/:id/turns` | `{ text?, images?, assistantId?, systemPrompt?, displayText? }` | `202` + `{ sessionId, turnId }`；宿主会话在准入时读取已注册的最新 runtime，systemPrompt 是与助手提示词拼接的本轮附加系统规则 |
+| `POST /sessions/:id/steer` | `{ turnId, text?, images?, displayText? }` | `202`，将文字和图片一起追加到当前运行回合；turnId 必须匹配 |
 | `POST /sessions/:id/cancel` | `{ "turnId": "要取消的 turn" }` | `202`，请求取消；以最终 `turn.settled` 为准 |
 | `POST /sessions/:id/interactions/:interactionId` | `{ "approved": true/false }` | `202`，答复当前工具交互；以 SSE 的 `interaction.resolved` 为准 |
 | `DELETE /sessions/:id` | 无 | 删除空闲会话并关闭对应事件连接 |
+
+`turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
 `400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或助手/会话达到各自 32 的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明" }`。
 
@@ -54,6 +58,8 @@
 
 独立 Web 模式在 Assistant 设置中选择“可调用助手”，Core 将 subagentIds 转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
 
+模型系统提示词按“本轮 `systemPrompt` → 助手 `runtime.systemPrompt` → 可用技能索引”拼接，不用本轮规则覆盖助手角色。省略或传空白的本轮规则时保留助手提示词；与助手提示词完全相同的内容不重复添加，技能索引只追加一次。
+
 ## 外部工具文件
 
 宿主把适配后的工具文件放到 `PI_DATA_DIR/tools`（默认 `.pie/tools`），或启动时指定目录：
@@ -62,7 +68,7 @@
 npm run serve -- --tools-dir E:/Projects/pie/examples/tools
 ```
 
-也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill 或 task 冲突会报错。
+也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill、task 或 tool_search 冲突会报错。
 
 例如保存为 `hello.ts`：
 
@@ -97,6 +103,14 @@ Web 客户端的助手设置从 `GET /tools` 读取目录，勾选后新建真�
 
 这些文件是与 Core 同进程执行的可信宿主代码；模块顶层会在启动加载时执行，创建函数只应组装工具，业务请求放在 execute 内。模块及依赖不能使用顶层 await，TS 仅支持 Node 可擦除语法。变更文件需要重启整个服务进程；会话只保存工具 ID 和历史，不冻结工具代码。重启时工具被移除，相关会话历史可读，继续执行会明确报错。
 
+### 工具按需曝光
+
+移植 Pi v1.1.0 的 `exposure + tool_search` 行为，不引入上游 Harness、CLI 或 Code Mode。外部业务工具默认 `exposure: "deferred"`；可在工厂返回对象上显式设置 `exposure: "default"`，通过 `@pie/server/tools` 的 `ExternalTool` 类型声明该字段。原生基础工具、skill 和 task 保持直接曝光。只在会话有延迟工具时自动加入 `tool_search({ query, limit? })`，它不属于可配置 toolIds，也不出现在 `GET /tools`。
+
+首轮模型请求不包含延迟工具的完整描述和参数 schema。工具仍在执行注册表中，搜索只扫描当前 runtime 允许且尚未曝光的工具，以 BM25 对 ID、label、描述和 schema 关键词排序，支持英文词和中文二元词组。limit 默认 5，允许 1–20；没有命中不会加载其他工具。搜索不执行业务操作，命中的完整 schema 从下一次模型请求开始发送。同会话已曝光工具继续保留，不影响其他会话。
+
+加载点沿用工具结果的 `addedToolNames`，并在公开结果正文中保存 `loaded` ID 列表。每次请求在上下文压缩前从完整历史恢复；重启、runtime 重建、历史导入及 fork 只恢复保留历史中的加载点或历史调用，且始终与当前 toolIds 取交集。搜索不增加工具权限，不绕过已有确认策略。这是模型 schema 的延迟曝光，不是模块导入或工具文件复制的延迟加载；启动同步和模块加载时机不变。
+
 Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目录、进程管理器和 Core adapter：首次使用时懒启动 Pie，启动前同步其维护的工具并注入 Engine 端口，随后负责探活、停止、重启和异常恢复。当前已适配 19 个工具；Cowork 已注册 `pie` provider，并支持会话、Turn、交互、事件和跨 Core 历史同步。具体分工见 [Agent 开发文档](../../docs/agent-development.md#astron-工具文件接入)。
 
 ## 技能绑定与加载记录
@@ -110,12 +124,17 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
     "assistantRevision": "42",
     "runtime": {
       "systemPrompt": "按需加载技能。",
+      "language": "zh",
       "toolIds": [],
       "subagents": [],
       "skills": [{
         "id": "plugin-b/hello",
         "name": "hello",
-        "description": "通过 plugin-b 加载 hello",
+        "description": "Greet someone in the current session.",
+        "descriptions": {
+          "zh-CN": "在当前会话打招呼",
+          "en-US": "Greet someone in the current session."
+        },
         "directory": "E:/Projects/pie/examples/plugins/hello-skill/skills/hello",
         "source": {
           "pluginId": "plugin-b",
@@ -130,7 +149,10 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 注册成功后用 `POST /sessions { "assistantId": "astron-assistant-id", "mode": "faux" }` 创建会话。runtime 包含完整 systemPrompt/toolIds/skills 及可省略的 subagents；最多 128 个 Skill 绑定和 32 个 Subagent 绑定，各自 ID 必须唯一。多个 Skill 绑定可以共用同一个 directory。directory 和可选 resourceRoot 必须是绝对路径。source 可省略，表示没有指定 Plugin 来源；pluginVersion 可省略。本地插件导入会自动生成 Plugin 来源字段。
 
-`skill({id})` 加载已允许的绑定，记录 source 和实际正文的 contentHash；超过 64 KiB 拒绝加载。初始模型目录只有绑定 ID、说明和来源名称，不含路径或正文。未挂载的 ID 返回工具错误，不伪造来源。
+`language` 可省略；`zh` 选中 `descriptions["zh-CN"]`，`en` 选中 `descriptions["en-US"]`，其它语言按原值查找，缺失时回落到 `description`（与 OpenCode 的技能索引一致）。
+
+`skill({id})` 加载已允许的绑定，记录 source 和实际正文的 contentHash；超过 64 KiB 拒绝加载。初始模型目录只包含绑定 ID、一行说明和来源名称，不含路径或正文；这一行说明按 `descriptions[language] → description` 选择，取首个非空行并截断到 160 字符。未挂载的 ID 返回工具错误，不伪造来源。
+
 
 `activities` 每项包含 id、sessionId、turnId、toolCallId、kind、binding 快照、status 和时间。kind 为 skill_load；status 为 running/succeeded/failed/cancelled/unknown。succeeded 表示 Skill 文件加载成功。绑定快照冻结来源配置，不冻结文件内容。普通 `read`、`bash` 等不产生 Plugin 使用记录，不继承“最近加载的技能”。APA 实际执行溯源后续单独设计。
 
@@ -158,6 +180,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - `agent.event`：原版 Agent 事件，携带 session/turn 标识；不要把内部 `turn_end`（一轮模型响应）当成用户提交完成。
 - `activity.updated`：携带持久技能记录 activity，同一个 id 从 running 更新至最终状态；snapshot.activities 保存历史。
 - `compaction.updated`：模型上下文达到预算后生成新摘要；snapshot.compaction 保存摘要边界、压缩次数和压缩前后的估算 token 数。
+- `compaction.started` / `compaction.retry` / `compaction.finished`：自动压缩的开始、退避重试和结束；结束状态为 completed、failed 或 cancelled，全局 SSE 也提供这些生命周期事件。
 - `turn.settled`：先持久化输入，再等待 `agent.continue()` 完成、Agent 空闲后发送。状态为 `completed`、`cancelled` 或 `failed`，失败原因在 `snapshot.turn.error`。
 
 `revision` 在服务进程的单个会话内递增；客户端在相同 `snapshot.instanceId` 下忽略旧快照，服务重启后接受新的进程快照。每 15 秒发送 SSE 注释心跳。慢客户端的待发送缓冲超过 1 MiB 时断开，客户端重连获取新快照。
@@ -169,7 +192,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、确认型工具交互和前台单层 Subagent；不实现 MCP、后台 Subagent 或递归派发。
 - Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_SHELL`（或平台默认的 `PI_BASH`/`PI_POWERSHELL`）、`PI_BASH_TIMEOUT_MS`、`PI_BASH_YIELD_MS` 和 `PI_RG` 配置可执行文件与超时。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
 - 事件的 `event` 字段保留 Pi 原始格式。Astron adapter 将其转换为 `CoreEvent`；其他宿主也应在 adapter 边界转换，不要将 Pi 原始结构传入产品服务。
-- 自动压缩只改变送给模型的上下文：达到模型上下文窗口减去保留预算后，Core 用同一模型生成结构化摘要，保留最近消息，并在后续压缩中合并旧摘要。完整历史仍用于存储和页面展示。摘要失败时本轮继续使用压缩前上下文，不删除消息。当前 SSE 仍推送完整快照；长历史还需要增量事件和分页。
+- 自动压缩只改变送给模型的上下文：请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片和完整历史保留。摘要支持有限退避重试；失败、取消或压缩后仍超预算时明确结束本轮，不再静默发送原上下文。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)。当前 SSE 仍推送完整快照；长历史还需要增量事件和分页。
 - 最多 32 个助手、32 个会话（含子会话）；全量加载到内存。页面保存 session ID 于 sessionStorage；服务重启后恢复历史，执行按需恢复。独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。
 - 模型配置为进程共享，Agent 保留创建时解析的模型调用配置。Assistant/runtime 版本变化或服务重启会重建 Agent，并用会话保存的 provider/model 选择重新解析当前端点和凭据；模型不可用时历史仍可读，提交报错。目录和 health 表示本地配置状态，不代表远端凭据有效；创建会话和保存配置均不调用模型。
 - 输入在返回 `202` 前落盘；完整消息在 message_end 落盘，流式片段不逐 token 保存。崩溃遗留的 running 标记为 failed，未匹配工具调用补入结果未知的错误，不自动重放；不保证工具副作用恰好一次。

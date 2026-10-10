@@ -49,6 +49,17 @@ function parsePermissionPolicy(value: unknown): PermissionPolicy {
 	return Object.fromEntries(entries) as PermissionPolicy;
 }
 
+function parseLocalizedDescriptions(value: unknown): Record<string, string> {
+	const entries = Object.entries(object(value));
+	if (entries.length === 0 || entries.length > 32) throw new SkillConfigError("Skill 多语言说明需要 1-32 项语言映射");
+	return Object.fromEntries(
+		entries.map(([locale, description]) => [
+			text(locale, "Skill 多语言说明语言", 32),
+			text(description, "Skill 多语言说明", 4096),
+		]),
+	);
+}
+
 function parseAgentRuntimeConfig(
 	input: Record<string, unknown>,
 	availableToolIds: readonly string[],
@@ -66,6 +77,7 @@ function parseAgentRuntimeConfig(
 			description: text(entry.description, "Skill 说明", 4096),
 			directory: absolutePath(entry.directory, "Skill 目录"),
 		};
+		if (entry.descriptions !== undefined) binding.descriptions = parseLocalizedDescriptions(entry.descriptions);
 		if (entry.resourceRoot !== undefined) binding.resourceRoot = absolutePath(entry.resourceRoot, "资源根目录");
 		if (entry.source !== undefined) {
 			const source = object(entry.source);
@@ -79,7 +91,14 @@ function parseAgentRuntimeConfig(
 		return binding;
 	});
 	if (new Set(skills.map((skill) => skill.id)).size !== skills.length) throw new SkillConfigError("绑定 ID 不可重复");
-	return { systemPrompt: input.systemPrompt, toolIds, skills, permissions: parsePermissionPolicy(input.permissions) };
+	const language = input.language === undefined ? undefined : text(input.language, "语言", 32);
+	return {
+		systemPrompt: input.systemPrompt,
+		...(language ? { language } : {}),
+		toolIds,
+		skills,
+		permissions: parsePermissionPolicy(input.permissions),
+	};
 }
 
 // Host configuration only. Model tool arguments cannot register or modify bindings.
@@ -128,6 +147,7 @@ export function hydrateHostRuntime(
 				assistantRevision: target.assistantRevision,
 				runtime: {
 					systemPrompt: target.runtime.systemPrompt,
+					language: target.runtime.language,
 					toolIds: structuredClone(target.runtime.toolIds),
 					skills: structuredClone(target.runtime.skills),
 					permissions: structuredClone(target.runtime.permissions),

@@ -17,6 +17,15 @@ export type WireMessage =
 			)[];
 			stopReason: string;
 			errorMessage?: string;
+			usage?: {
+				input: number;
+				output: number;
+				reasoning?: number;
+				cacheRead: number;
+				cacheWrite: number;
+				totalTokens: number;
+				cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+			};
 			timestamp: number;
 	  }
 	| {
@@ -42,6 +51,7 @@ export type SkillBinding = {
 	id: string;
 	name: string;
 	description: string;
+	descriptions?: Record<string, string>;
 	directory: string;
 	resourceRoot?: string;
 	source?: SkillSource;
@@ -50,6 +60,7 @@ export type PermissionDecision = "allow" | "ask";
 export type PermissionPolicy = Record<string, PermissionDecision>;
 export type AgentRuntimeConfig = {
 	systemPrompt: string;
+	language?: string;
 	toolIds: ToolId[];
 	skills: SkillBinding[];
 	permissions?: PermissionPolicy;
@@ -116,6 +127,7 @@ export type SessionSummary = {
 	mode: Mode;
 	model: string;
 	provider?: string;
+	modelOverride?: { providerId: string; model: string } | null;
 	createdAt: number;
 	updatedAt: number;
 	turn?: Turn;
@@ -152,6 +164,10 @@ export type Turn = {
 export type ContextCompaction = {
 	summary: string;
 	firstKeptMessage: number;
+	turnStartIndex?: number;
+	messageCount?: number;
+	details?: { readFiles: string[]; modifiedFiles: string[] };
+	usage?: Extract<WireMessage, { role: "assistant" }>["usage"];
 	tokensBefore: number;
 	estimatedTokensAfter: number;
 	compactedAt: number;
@@ -192,6 +208,7 @@ export type TransferMessage = {
 };
 export type SessionTransfer = {
 	schemaVersion: 1;
+	modelOverride?: SessionSummary["modelOverride"];
 	source: {
 		astronSessionId: string;
 		coreId: string;
@@ -211,6 +228,9 @@ export type SessionEvent = {
 		| "turn.settled"
 		| "activity.updated"
 		| "compaction.updated"
+		| "compaction.started"
+		| "compaction.finished"
+		| "compaction.retry"
 		| "interaction.requested"
 		| "interaction.resolved";
 	sessionId: string;

@@ -199,6 +199,9 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 	const accepted = await core.post(`/sessions/${session.id}/turns`, { text: "继续" });
 	assert.equal(accepted.status, 202, await accepted.clone().text());
 	let receivedAgentEvent = false;
+	let receivedMessageEnd = false;
+	let streamedMessageId: unknown;
+	let completedUsage: unknown;
 	let next = await firstPacket;
 	while (!next.done) {
 		const packet = next.value;
@@ -210,13 +213,24 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 			assert.equal("message" in (packet.event ?? {}), false);
 			assert.equal("messages" in (packet.event ?? {}), false);
 			if (packet.event?.type === "message_update") {
+				streamedMessageId = packet.event.messageId;
 				const update = packet.event.assistantMessageEvent as AssistantMessageEvent;
 				assert.equal("partial" in update, false);
+			}
+			if (packet.event?.type === "message_end") {
+				receivedMessageEnd = true;
+				assert.equal(packet.event.messageId, streamedMessageId);
+				completedUsage = packet.event.usage;
 			}
 		}
 		if (packet.type === "turn.settled") {
 			assert(receivedAgentEvent);
+			assert(receivedMessageEnd);
 			assert.equal(packet.snapshot.turn?.status, "completed");
+			const saved = (await (await fetch(`${core.base}/sessions/${session.id}`)).json()) as SessionSnapshot;
+			const assistant = saved.messages.find((message) => message.role === "assistant");
+			assert(assistant?.role === "assistant");
+			assert.deepEqual(completedUsage, assistant.usage);
 			break;
 		}
 		next = await stream.next();
@@ -721,6 +735,42 @@ test("host runtime revisions rebuild the agent while preserving session messages
 	assert.equal(restored.assistantRevision, "2");
 	assert.equal(restored.assistant, undefined);
 	assert.deepEqual(restored.messages, completed.messages);
+});
+
+test("host runtime keeps the language and localized skill summaries for the prompt index", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-skill-language-"));
+	t.after(async () => {
+		await core.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	const skillDirectory = join(directory, "astron-search");
+	await mkdir(skillDirectory, { recursive: true });
+	await writeFile(join(skillDirectory, "SKILL.md"), "# Astron search\n\nSearch the web.\n");
+	const core = await start({ PI_DATA_DIR: directory });
+	const skill = {
+		id: "astron-search",
+		name: "astron-search",
+		description: "Search the web with Astron.",
+		descriptions: { "zh-CN": "使用 Astron 联网搜索", "en-US": "Search the web with Astron." },
+		directory: skillDirectory,
+	};
+	const runtime = { systemPrompt: "宿主提示词", language: "zh", toolIds: [], skills: [skill], subagents: [] };
+	const registry = (revision: string, body: unknown) => ({
+		runtimes: [{ assistantId: "localized", assistantRevision: revision, runtime: body }],
+	});
+	assert.equal((await core.put("/host-runtimes", registry("1", runtime))).status, 200);
+	const created = await core.post("/sessions", { assistantId: "localized" });
+	assert.equal(created.status, 201, await created.clone().text());
+	const session = (await created.json()) as SessionSnapshot;
+	assert.equal(session.runtime?.language, "zh");
+	assert.deepEqual(session.runtime?.skills[0]?.descriptions, skill.descriptions);
+	for (const invalid of [
+		{ ...runtime, language: " " },
+		{ ...runtime, skills: [{ ...skill, descriptions: {} }] },
+		{ ...runtime, skills: [{ ...skill, descriptions: 5 }] },
+		{ ...runtime, skills: [{ ...skill, descriptions: { "zh-CN": " " } }] },
+	])
+		assert.equal((await core.put("/host-runtimes", registry("bad", invalid))).status, 400);
 });
 
 test("task delegates to fresh child sessions using the latest host assistant binding", async (t) => {

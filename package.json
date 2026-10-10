@@ -18,7 +18,7 @@
 		"web": "vite --config apps/web/vite.config.ts",
 		"check": "biome check --write --error-on-warnings . && tsc --noEmit && tsc --noEmit -p apps/web && npm run check:model-data",
 		"test:core": "npm exec --workspace=@earendil-works/pi-agent-core -- vitest run test/agent.test.ts test/agent-loop.test.ts",
-		"test:server": "node --conditions=source --test packages/server/test/server.test.ts packages/server/test/compaction.test.ts packages/server/test/compaction-server.test.ts packages/server/test/fork.test.ts packages/server/test/plugins.test.ts packages/server/test/external-tools.test.ts packages/server/test/tools.test.ts apps/web/test/messages.test.ts",
+		"test:server": "node --conditions=source --test packages/server/test/server.test.ts packages/server/test/compaction.test.ts packages/server/test/compaction-server.test.ts packages/server/test/auto-compaction.test.ts packages/server/test/auto-compaction-server.test.ts packages/server/test/fork.test.ts packages/server/test/plugins.test.ts packages/server/test/external-tools.test.ts packages/server/test/tools.test.ts apps/web/test/messages.test.ts",
 		"example": "node --conditions=source examples/basic.ts",
 		"hydrate:model-data": "npm run hydrate-model-data --workspace=@earendil-works/pi-ai",
 		"check:model-data": "npm run check:model-data --workspace=@earendil-works/pi-ai",

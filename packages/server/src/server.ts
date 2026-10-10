@@ -11,6 +11,7 @@ import type {
 	Assistant,
 	ContextCompaction,
 	HostRuntimeDefinition,
+	ImagePart,
 	InteractionRequest,
 	SessionEvent,
 	SessionSnapshot,
@@ -22,6 +23,7 @@ import type {
 import {
 	displayAgentMessages,
 	exportSession,
+	parseSessionModelOverride,
 	parseSessionTransfer,
 	transferToAgentMessages,
 } from "./session-transfer.ts";
@@ -38,6 +40,8 @@ class HttpError extends Error {
 }
 
 const HOST_RUNTIME_REQUEST_LIMIT = 4 * 1024 * 1024;
+const TURN_REQUEST_LIMIT = 32 * 1024 * 1024;
+const MAX_TURN_IMAGE_BYTES = 20 * 1024 * 1024;
 
 async function readJson(req: IncomingMessage, maxBytes = 65536): Promise<Record<string, unknown>> {
 	if (req.headers["content-type"]?.split(";")[0] !== "application/json")
@@ -63,6 +67,44 @@ function optionalRequestId(body: Record<string, unknown>): string | undefined {
 	if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 256)
 		throw new HttpError(400, "requestId 需要 1–256 个字符");
 	return body.requestId.trim();
+}
+
+function turnContent(body: Record<string, unknown>): Extract<AgentMessage, { role: "user" }>["content"] {
+	const text = body.text === undefined ? "" : body.text;
+	if (typeof text !== "string" || text.length > 16000) throw new HttpError(400, "text 需要字符串，最多 16000 个字符");
+	const values = body.images === undefined ? [] : body.images;
+	if (!Array.isArray(values)) throw new HttpError(400, "images 需要图片数组");
+	const images: ImagePart[] = [];
+	let totalBytes = 0;
+	for (const value of values) {
+		if (!value || typeof value !== "object" || Array.isArray(value))
+			throw new HttpError(400, "images 需要有效的图片对象");
+		const image = value as Record<string, unknown>;
+		if (
+			image.type !== "image" ||
+			typeof image.mimeType !== "string" ||
+			!/^image\/[a-z0-9.+-]+$/i.test(image.mimeType) ||
+			typeof image.data !== "string" ||
+			!image.data
+		)
+			throw new HttpError(400, "图片需要 type、image MIME 类型和 Base64 data");
+		if (image.data.length > Math.ceil(MAX_TURN_IMAGE_BYTES / 3) * 4)
+			throw new HttpError(413, "图片总大小不能超过 20 MiB");
+		const bytes = Buffer.from(image.data, "base64");
+		if (bytes.toString("base64") !== image.data) throw new HttpError(400, "图片 Base64 data 无效");
+		totalBytes += bytes.length;
+		if (totalBytes > MAX_TURN_IMAGE_BYTES) throw new HttpError(413, "图片总大小不能超过 20 MiB");
+		images.push({ type: "image", mimeType: image.mimeType, data: image.data });
+	}
+	if (!text.trim() && images.length === 0) throw new HttpError(400, "text 或 images 不能为空");
+	if (
+		body.displayText !== undefined &&
+		(typeof body.displayText !== "string" ||
+			body.displayText.length > 16000 ||
+			(!body.displayText.trim() && images.length === 0))
+	)
+		throw new HttpError(400, "displayText 需要字符串，最多 16000 个字符；纯文本消息不能为空");
+	return images.length ? [...(text ? [{ type: "text" as const, text }] : []), ...images] : text;
 }
 
 /**
@@ -192,6 +234,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			mode: session.mode,
 			model: session.model,
 			provider: session.provider,
+			modelOverride: session.modelOverride,
 			createdAt: session.createdAt,
 			updatedAt: session.updatedAt,
 			turn: session.turn,
@@ -233,6 +276,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			mode: source.mode,
 			model: source.model,
 			provider: source.provider,
+			modelOverride: structuredClone(source.modelOverride),
 			createdAt: now,
 			updatedAt: now,
 			messages: keptMessages,
@@ -353,12 +397,17 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		session: Session,
 		runtime: NonNullable<Session["runtime"]>,
 		messages = session.messages,
+		selected?: { provider: string; id: string } | null,
 	) {
 		return factory.create(
 			session.mode,
 			session.id,
 			runtime,
-			session.mode === "real" && session.provider ? { provider: session.provider, id: session.model } : undefined,
+			selected === undefined
+				? session.mode === "real" && session.provider
+					? { provider: session.provider, id: session.model }
+					: undefined
+				: (selected ?? undefined),
 			messages,
 			(activity) => recordActivity(session, activity),
 			(request, signal) => requestInteraction(session, request, signal),
@@ -369,6 +418,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			{
 				current: session.compaction,
 				update: (next) => updateCompaction(session, next),
+				report: (event) => publish(session, event.type, event),
 			},
 			{
 				directory: session.workspacePath ?? process.cwd(),
@@ -471,6 +521,23 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			case "agent_start":
 			case "turn_start":
 				return { type: event.type };
+			case "message_end": {
+				const message = event.message;
+				if (
+					!message ||
+					typeof message !== "object" ||
+					!("role" in message) ||
+					message.role !== "assistant" ||
+					!("timestamp" in message) ||
+					!("usage" in message)
+				)
+					return undefined;
+				return {
+					type: event.type,
+					messageId: `assistant:${session.id}:${session.turn?.id ?? "idle"}:${String(message.timestamp)}`,
+					usage: message.usage,
+				};
+			}
 			case "message_update": {
 				const update = event.assistantMessageEvent as AssistantMessageEvent;
 				if (!("partial" in update)) return undefined;
@@ -535,7 +602,9 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					? { ...globalBase, snapshot: { turn: session.turn } }
 					: type === "interaction.requested"
 						? { ...globalBase, interaction }
-						: undefined;
+						: type.startsWith("compaction.")
+							? { ...globalBase, event }
+							: undefined;
 		const globalData = globalPacket ? `data: ${JSON.stringify(globalPacket)}\n\n` : undefined;
 		for (const client of session.clients) {
 			if (client.writableLength > 1024 * 1024) client.destroy();
@@ -923,6 +992,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 						runSubagent(session, toolCallId, binding, description, prompt, options, signal),
 					{
 						update: (next) => updateCompaction(session, next),
+						report: (event) => publish(session, event.type, event),
 					},
 					{
 						directory: typeof body.workspacePath === "string" ? body.workspacePath.trim() : process.cwd(),
@@ -942,6 +1012,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					workspacePath: typeof body.workspacePath === "string" ? body.workspacePath.trim() : undefined,
 					model: agent.state.model.id,
 					provider: agent.state.model.provider,
+					modelOverride: null,
 					createdAt: Date.now(),
 					updatedAt: Date.now(),
 					messages: [],
@@ -958,7 +1029,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				return json(201, snapshot(session));
 			}
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|turns|steer|cancel|interactions|export|import|fork)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|turns|steer|cancel|interactions|export|import|fork|model-override)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			const session = match ? sessions.get(match[1]) : undefined;
@@ -992,6 +1063,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					compaction: session.compaction,
 					transferBase: session.transferBase,
 					transferBaseMessageCount: session.transferBaseMessageCount,
+					modelOverride: session.modelOverride,
 				};
 				session.agent = undefined;
 				session.astronSessionId = transfer.source.astronSessionId;
@@ -1004,6 +1076,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				session.compaction = undefined;
 				session.transferBase = structuredClone(transfer.transcript);
 				session.transferBaseMessageCount = importedMessages.length;
+				session.modelOverride = transfer.modelOverride ?? null;
 				try {
 					persist(session);
 				} catch (error) {
@@ -1012,6 +1085,26 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				}
 				const result: SessionTransfer = exportSession(session);
 				return json(200, { session: snapshot(session), transfer: result });
+			}
+			if (req.method === "PUT" && action === "model-override") {
+				if (session.kind === "subagent") throw new HttpError(409, "子会话为只读会话");
+				const body = await readJson(req);
+				if (!("modelOverride" in body)) throw new HttpError(400, "需要 modelOverride 字段");
+				const selection = parseSessionModelOverride(body.modelOverride);
+				if (body.initializeOnly === true && "modelOverride" in session) return json(200, snapshot(session));
+				const previous = { modelOverride: session.modelOverride, updatedAt: session.updatedAt };
+				const initialized = "modelOverride" in session;
+				session.modelOverride = selection ?? null;
+				session.updatedAt = Date.now();
+				try {
+					persist(session);
+				} catch (error) {
+					Object.assign(session, previous);
+					if (!initialized) delete session.modelOverride;
+					throw error;
+				}
+				publish(session, "snapshot");
+				return json(200, snapshot(session));
 			}
 			if (req.method === "PATCH" && !action) {
 				if (session.kind === "subagent") throw new HttpError(409, "子会话为只读会话");
@@ -1066,14 +1159,8 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			}
 			if (req.method === "POST" && action === "steer") {
 				if (session.kind === "subagent") throw new HttpError(409, "子会话由父会话通过 task 管理");
-				const body = await readJson(req);
-				if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 16000)
-					throw new HttpError(400, "text 需要 1–16000 个字符");
-				if (
-					body.displayText !== undefined &&
-					(typeof body.displayText !== "string" || !body.displayText.trim() || body.displayText.length > 16000)
-				)
-					throw new HttpError(400, "displayText 需要 1–16000 个字符");
+				const body = await readJson(req, TURN_REQUEST_LIMIT);
+				const content = turnContent(body);
 				if (!session.turn || session.turn.status !== "running")
 					throw new HttpError(409, "当前会话没有正在执行的回合");
 				if (body.turnId !== session.turn.id) throw new HttpError(409, "turnId 不匹配");
@@ -1084,7 +1171,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					displayContent?: string;
 				} & UserMessageIdentity = {
 					role: "user",
-					content: body.text,
+					content,
 					timestamp: Date.now(),
 					...messageIdentity,
 				};
@@ -1105,19 +1192,13 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			}
 			if (req.method === "POST" && action === "turns") {
 				if (session.kind === "subagent") throw new HttpError(409, "子会话由父会话通过 task 管理");
-				const body = await readJson(req);
-				if (typeof body.text !== "string" || !body.text.trim() || body.text.length > 16000)
-					throw new HttpError(400, "text 需要 1–16000 个字符");
+				const body = await readJson(req, TURN_REQUEST_LIMIT);
+				const content = turnContent(body);
 				if (
 					body.systemPrompt !== undefined &&
 					(typeof body.systemPrompt !== "string" || body.systemPrompt.length > 60000)
 				)
 					throw new HttpError(400, "systemPrompt 需要字符串，最多 60000 字符");
-				if (
-					body.displayText !== undefined &&
-					(typeof body.displayText !== "string" || !body.displayText.trim() || body.displayText.length > 16000)
-				)
-					throw new HttpError(400, "displayText 需要 1–16000 个字符");
 				if (session.turn?.status === "running") throw new HttpError(409, "当前会话正在执行");
 				const requestId = optionalRequestId(body);
 				const messageIdentity = optionalMessageIdentity(body);
@@ -1130,25 +1211,48 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				const oldAssistantRevision = session.assistantRevision;
 				const oldRuntimeSource = session.runtimeSource;
 				const oldRuntime = session.runtime;
+				const oldModel = session.model;
+				const oldProvider = session.provider;
+				let selectedModel = session.modelOverride
+					? { provider: session.modelOverride.providerId, id: session.modelOverride.model }
+					: (factory.settings.current.selected ?? null);
+				if (body.model !== undefined) {
+					const value = body.model;
+					if (
+						!value ||
+						typeof value !== "object" ||
+						!("provider" in value) ||
+						!("id" in value) ||
+						typeof value.provider !== "string" ||
+						typeof value.id !== "string" ||
+						!value.provider.trim() ||
+						!value.id.trim()
+					)
+						throw new HttpError(400, "model 需要 provider 和 id");
+					selectedModel = { provider: value.provider, id: value.id };
+				}
 				const configurationChanged =
 					!oldAgent ||
 					configuration.runtimeSource !== oldRuntimeSource ||
 					configuration.assistantRevision !== oldAssistantRevision ||
-					JSON.stringify(configuration.runtime) !== JSON.stringify(oldRuntime);
+					JSON.stringify(configuration.runtime) !== JSON.stringify(oldRuntime) ||
+					Boolean(selectedModel && (selectedModel.id !== oldModel || selectedModel.provider !== oldProvider));
 				const agent = configurationChanged
-					? createSessionAgent(session, configuration.runtime, oldMessages)
+					? createSessionAgent(session, configuration.runtime, oldMessages, selectedModel)
 					: oldAgent;
 				session.assistant = configuration.assistant;
 				session.assistantRevision = configuration.assistantRevision;
 				session.runtimeSource = configuration.runtimeSource;
 				session.runtime = configuration.runtime;
+				session.model = agent.state.model.id;
+				session.provider = agent.state.model.provider;
 				if (configurationChanged) bindAgent(session, agent);
 				const now = Date.now();
 				const userMessage: Extract<AgentMessage, { role: "user" }> & {
 					displayContent?: string;
 				} & UserMessageIdentity = {
 					role: "user",
-					content: body.text,
+					content,
 					timestamp: now,
 					...messageIdentity,
 				};
@@ -1166,6 +1270,8 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					session.assistantRevision = oldAssistantRevision;
 					session.runtimeSource = oldRuntimeSource;
 					session.runtime = oldRuntime;
+					session.model = oldModel;
+					session.provider = oldProvider;
 					session.turn = oldTurn;
 					throw error;
 				}

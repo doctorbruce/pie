@@ -6,6 +6,14 @@ import { MAX_BYTES, resolvePath, runProcess, truncateHead } from "./shared.ts";
 
 const grepParameters = Type.Object({
 	pattern: Type.String({ description: "Search pattern (regex or literal string)" }),
+	description: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: 80,
+			description:
+				"Short user-visible activity title describing why this tool is being used. Use the user's language and an action phrase. Do not include raw commands, technical tool names, URLs, credentials, or file paths.",
+		}),
+	),
 	path: Type.Optional(Type.String({ description: "Directory or file to search (default: current directory)" })),
 	glob: Type.Optional(Type.String({ description: "Filter files by glob pattern" })),
 	ignoreCase: Type.Optional(Type.Boolean({ description: "Case-insensitive search" })),
@@ -21,7 +29,8 @@ function createGrepTool(
 	return {
 		name: "grep",
 		label: "grep",
-		description: "Search file contents with ripgrep. Returns paths and line numbers and respects .gitignore.",
+		description:
+			"Search file contents with ripgrep. Returns paths and line numbers and respects .gitignore. Always set description to a short user-visible action phrase in the user's language.",
 		parameters: grepParameters,
 		async execute(_id, { pattern, path, glob, ignoreCase, literal, context, limit }, signal) {
 			const searchPath = resolvePath(path ?? ".", cwd);

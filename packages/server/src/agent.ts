@@ -1,4 +1,10 @@
-import { Agent, type AgentMessage, type AgentTool, type AgentToolResult } from "@earendil-works/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentTool,
+	type AgentToolResult,
+	type StreamFn,
+} from "@earendil-works/pi-agent-core";
 import {
 	contentText,
 	createModels,
@@ -7,7 +13,10 @@ import {
 	fauxToolCall,
 	Type,
 } from "@earendil-works/pi-ai";
-import { createCompactionTransform } from "./compaction.ts";
+import { retryAssistantCall } from "./compaction/retry.ts";
+import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction/utils.ts";
+import { type CompactionEvent, createCompactionStream, createCompactionTransform } from "./compaction.ts";
+import { readCompactionSettings } from "./compaction-settings.ts";
 import { loadExternalTools, parseToolIds } from "./external-tools.ts";
 import { resolveConfiguredModelHeaders } from "./models/provider-composer.ts";
 import { createModelSettings, ModelSettingsError } from "./models/settings.ts";
@@ -18,25 +27,62 @@ import type {
 	ModelSelection,
 	RuntimeConfig,
 	ServerInfo,
+	SkillBinding,
 	SubagentBinding,
 	ToolActivity,
 } from "./protocol.ts";
 import { createSkillTools } from "./skills.ts";
+import { createToolSearch } from "./tool-search.ts";
 import { BackgroundJobs } from "./tools/jobs.ts";
 import { applyPermissionPolicy, type ToolRuntime } from "./tools/runtime.ts";
 import { systemTools } from "./tools.ts";
+
+const SKILL_DESCRIPTION_LIMIT = 160;
+
+// Mirror of the OpenCode skill index: the host language selects the localized
+// summary, and a missing entry falls back to the binding description.
+function skillDescription(binding: SkillBinding, language: string | undefined) {
+	if (!language) return binding.description;
+	const requested = language.trim().toLowerCase();
+	const locale = requested.startsWith("zh") ? "zh-CN" : requested.startsWith("en") ? "en-US" : requested;
+	return binding.descriptions?.[locale] ?? binding.description;
+}
+
+function oneLineDescription(description: string, fallback: string) {
+	const summary =
+		description
+			.split(/\r?\n/)
+			.map((line) => line.trim())
+			.find((line) => line.length > 0) ?? "";
+	if (summary.length > SKILL_DESCRIPTION_LIMIT) return `${summary.slice(0, SKILL_DESCRIPTION_LIMIT - 3)}...`;
+	return summary || fallback;
+}
 
 export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 	env = Object.freeze({ ...env });
 	const settings = createModelSettings(env);
 	const catalogTools = systemTools(env);
-	const external = loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task"]);
+	const external = loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
 	const toolIds = [...catalogTools.map((tool) => tool.name), ...external.keys()];
-	const composeSystemPrompt = (runtime: RuntimeConfig, systemPrompt = runtime.systemPrompt) =>
-		systemPrompt +
-		(runtime.skills.length
-			? `\n\nAvailable skills (use the skill tool before use; do not assume missing host dependencies are installed):\n${JSON.stringify(runtime.skills.map(({ id, description, source }) => ({ id, description, source: source?.pluginName })))}`
-			: "");
+	const composeSystemPrompt = (runtime: RuntimeConfig, turnSystemPrompt?: string) => {
+		const systemPrompt = [
+			...(turnSystemPrompt?.trim() && turnSystemPrompt !== runtime.systemPrompt ? [turnSystemPrompt] : []),
+			runtime.systemPrompt,
+		]
+			.filter((prompt) => prompt.trim().length > 0)
+			.join("\n\n");
+		const chinese = runtime.language?.trim().toLowerCase().startsWith("zh") ?? false;
+		const skills = [...runtime.skills]
+			.sort((first, second) => first.id.localeCompare(second.id))
+			.map(
+				(binding) =>
+					`- ${binding.id}: ${oneLineDescription(skillDescription(binding, runtime.language), chinese ? "未提供描述。" : "No description provided.")}`,
+			);
+		const guidance = chinese
+			? "## 可用技能\n以下列出技能 ID 和一句简短说明；完整指引仅在调用 skill 工具后加载。\n不要默认认为技能所需的程序或依赖已安装。"
+			: "## Available Skills\nSkill IDs and one-line descriptions; full instructions are loaded only after calling the skill tool; do not assume missing host dependencies are installed.";
+		return systemPrompt + (skills.length ? `\n\n${guidance}\n${skills.join("\n")}` : "");
+	};
 
 	return {
 		settings,
@@ -84,6 +130,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 			compaction?: {
 				current?: ContextCompaction;
 				update: (next: ContextCompaction) => void;
+				report?: (event: CompactionEvent) => void;
 			},
 			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground">,
 		) {
@@ -182,59 +229,88 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				selectedNativeTools.add("job_output");
 				selectedNativeTools.add("job_kill");
 			}
+			const toolSearch = createToolSearch(
+				[
+					...tools.filter((tool) => selectedNativeTools.has(tool.name)),
+					...externalTools,
+					...skillTools.tools,
+					...(taskTool ? [taskTool] : []),
+				],
+				externalTools.map((tool) => tool.name),
+			);
+			const automation = mode === "real" && realModel ? readCompactionSettings(env, realModel) : undefined;
+			const compactContext =
+				mode === "real" && realModel && compaction
+					? createCompactionTransform({
+							contextWindow: realModel.contextWindow,
+							initial: compaction.current,
+							settings: automation?.compaction,
+							onCompacted: compaction.update,
+							report: compaction.report,
+							summarize: async ({ prompt, maxTokens }, signal) => {
+								const response = await retryAssistantCall(
+									() =>
+										models.completeSimple(
+											realModel,
+											{
+												systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
+												messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+											},
+											{
+												signal,
+												maxTokens: Math.min(maxTokens, realModel.maxTokens),
+												cacheRetention: "none",
+												sessionId: `compaction:${sessionId}`,
+												headers: modelHeaders,
+												maxRetries: 0,
+											},
+										),
+									automation?.retry,
+									signal,
+									{
+										onRetryScheduled: (attempt, maxAttempts, delayMs, error) =>
+											compaction.report?.({
+												type: "compaction.retry",
+												attempt,
+												maxAttempts,
+												delayMs,
+												error,
+											}),
+									},
+								);
+								if (response.stopReason === "aborted") throw new DOMException("上下文摘要已取消", "AbortError");
+								if (response.stopReason !== "stop")
+									throw new Error(response.errorMessage || `上下文摘要未完成：${response.stopReason}`);
+								if (response.content.some((block) => block.type === "toolCall"))
+									throw new Error("上下文摘要返回了工具调用");
+								return { summary: contentText(response.content), usage: response.usage };
+							},
+						})
+					: undefined;
+			const realStream: StreamFn = (model, context, options) =>
+				models.streamSimple(model, context, {
+					...options,
+					headers: { ...options?.headers, ...modelHeaders },
+				});
+			const compactStream = compactContext
+				? createCompactionStream(realStream, compactContext, { enabled: automation?.compaction.enabled })
+				: realStream;
 			return new Agent({
 				sessionId,
 				afterToolCall: skillTools.afterToolCall,
-				transformContext:
-					mode === "real" && realModel && compaction
-						? createCompactionTransform({
-								contextWindow: realModel.contextWindow,
-								initial: compaction.current,
-								onCompacted: compaction.update,
-								summarize: async ({ prompt, maxTokens }, signal) => {
-									const response = await models.completeSimple(
-										realModel,
-										{
-											systemPrompt:
-												"Summarize the supplied conversation into a context checkpoint. Output only the requested summary.",
-											messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
-										},
-										{
-											signal,
-											maxTokens: Math.min(maxTokens, realModel.maxTokens),
-											cacheRetention: "none",
-											sessionId: `compaction:${sessionId}`,
-											headers: modelHeaders,
-										},
-									);
-									if (response.stopReason !== "stop")
-										throw new Error(response.errorMessage || `上下文摘要未完成：${response.stopReason}`);
-									if (response.content.some((block) => block.type === "toolCall"))
-										throw new Error("上下文摘要返回了工具调用");
-									return contentText(response.content);
-								},
-							})
-						: undefined,
+				transformContext: async (messages) => {
+					toolSearch.restore(messages);
+					return messages;
+				},
 				initialState: {
 					model: mode === "real" && realModel ? realModel : faux.getModel(),
 					systemPrompt: composeSystemPrompt(runtime),
-					tools: [
-						...tools.filter((tool) => selectedNativeTools.has(tool.name)),
-						...externalTools,
-						...skillTools.tools,
-						...(taskTool ? [taskTool] : []),
-					],
+					tools: toolSearch.tools,
 					messages,
 				},
 				streamFn: (model, context, options) => {
-					if (mode === "real")
-						return models.streamSimple(model, context, {
-							...options,
-							headers: {
-								...options?.headers,
-								...modelHeaders,
-							},
-						});
+					context = toolSearch.expose(context);
+					if (mode === "real") return compactStream(model, context, options);
 					const last = context.messages.at(-1);
 					const availableTools = context.tools ?? [];
 					if (last?.role === "toolResult") {

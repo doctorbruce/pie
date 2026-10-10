@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fauxToolCall, validateToolArguments } from "@earendil-works/pi-ai";
 import { BackgroundJobs } from "../src/tools/jobs.ts";
 import { applyPermissionPolicy, type ToolRuntime } from "../src/tools/runtime.ts";
 import { systemTools } from "../src/tools.ts";
@@ -21,6 +22,40 @@ test("host permission policy allows configured operations but preserves explicit
 	});
 	await ask({ type: "confirmation", title: "question", message: "choose" });
 	assert.deepEqual(requested, ["credential", "question"]);
+});
+
+test("read, edit, write and grep expose optional user-visible activity descriptions", () => {
+	const tools = new Map(systemTools({}).map((tool) => [tool.name, tool]));
+	const cases = [
+		{ name: "read", args: { path: "example.txt" } },
+		{
+			name: "edit",
+			args: {
+				path: "example.txt",
+				edits: [{ oldText: "before", newText: "after" }],
+				artifactRole: "final",
+			},
+		},
+		{ name: "write", args: { path: "example.txt", content: "text", artifactRole: "final" } },
+		{ name: "grep", args: { pattern: "text" } },
+	];
+	for (const { name, args } of cases) {
+		const tool = tools.get(name);
+		assert(tool);
+		assert.match(tool.description, /Always set description/);
+		assert.match(JSON.stringify(tool.parameters), /Short user-visible activity title/);
+		assert.deepEqual(validateToolArguments(tool, fauxToolCall(name, args)), args);
+		const titled = { ...args, description: "检查项目配置" };
+		assert.deepEqual(validateToolArguments(tool, fauxToolCall(name, titled)), titled);
+		for (const description of ["", "x".repeat(81)]) {
+			assert.throws(() => validateToolArguments(tool, fauxToolCall(name, { ...args, description })));
+		}
+	}
+	for (const name of ["find", "ls", "job_output", "job_kill"]) {
+		const tool = tools.get(name);
+		assert(tool);
+		assert.doesNotMatch(JSON.stringify(tool.parameters), /Short user-visible activity title/);
+	}
 });
 
 function pdf(text: string): Buffer {
@@ -68,13 +103,17 @@ test("upstream tool set performs file, listing and search operations", async (t)
 
 	const written = await write.execute("write", {
 		path: "nested/example.txt",
+		description: "创建示例文件",
 		content: "alpha\nbeta\n",
 		artifactRole: "final",
 	});
 	assert.match(JSON.stringify(written.details), /"artifactRole":"final"/);
 	assert.match(JSON.stringify(written.details), /@@/);
 	assert.equal(await readFile(join(directory, "nested", "example.txt"), "utf8"), "alpha\nbeta\n");
-	assert.match(JSON.stringify(await read.execute("read", { path: "nested/example.txt" })), /1: alpha/);
+	assert.match(
+		JSON.stringify(await read.execute("read", { path: "nested/example.txt", description: "查看示例内容" })),
+		/1: alpha/,
+	);
 
 	await writeFile(join(directory, "long.txt"), Array.from({ length: 100 }, () => "x".repeat(3000)).join("\n"));
 	const bounded = await read.execute("read-bounded", { path: "long.txt" });
@@ -91,6 +130,7 @@ test("upstream tool set performs file, listing and search operations", async (t)
 	await assert.rejects(read.execute("read-binary", { path: "binary.docx" }), /二进制文件/);
 	await edit.execute("edit", {
 		path: "nested/example.txt",
+		description: "更新示例内容",
 		artifactRole: "final",
 		edits: [
 			{ oldText: "alpha", newText: "first" },
@@ -99,7 +139,10 @@ test("upstream tool set performs file, listing and search operations", async (t)
 	});
 	assert.equal(await readFile(join(directory, "nested", "example.txt"), "utf8"), "first\nsecond\n");
 	assert.match(JSON.stringify(await ls.execute("ls", { path: "." })), /nested\//);
-	assert.match(JSON.stringify(await grep.execute("grep", { pattern: "second", path: "." })), /example\.txt/);
+	assert.match(
+		JSON.stringify(await grep.execute("grep", { pattern: "second", path: ".", description: "查找更新内容" })),
+		/example\.txt/,
+	);
 	const found = await find.execute("find", { pattern: "**/*.txt", path: "." });
 	const foundText = found.content[0];
 	assert(foundText.type === "text");

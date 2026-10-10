@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { ModelSettingsError } from "./models/settings.ts";
 import type { SessionTransfer, TransferContentPart, TransferMessage } from "./protocol.ts";
 import type { SavedSession } from "./store.ts";
 
@@ -53,7 +54,13 @@ function stripLegacyInternalTurnContext(value: string): string {
 
 function displayedUserContent(message: Extract<AgentMessage, { role: "user" }>): typeof message.content {
 	const stored = Reflect.get(message, "displayContent");
-	if (typeof stored === "string") return stored;
+	if (typeof stored === "string") {
+		if (typeof message.content === "string") return stored;
+		return [
+			...(stored ? [{ type: "text" as const, text: stored }] : []),
+			...message.content.filter((part) => part.type === "image"),
+		];
+	}
 	if (typeof message.content === "string") {
 		const visible = stripLegacyInternalTurnContext(message.content);
 		return LEGACY_INTERNAL_NOTIFICATION.test(visible.trim()) ? "" : visible;
@@ -118,6 +125,15 @@ function transferMessage(value: unknown): TransferMessage {
 	};
 }
 
+export function parseSessionModelOverride(value: unknown): SavedSession["modelOverride"] {
+	if (value === undefined || value === null) return value;
+	const selection = record(value);
+	const providerId = text(selection?.providerId)?.trim();
+	const model = text(selection?.model)?.trim();
+	if (!providerId || !model) throw new ModelSettingsError("modelOverride 需要 providerId 和 model，或 null");
+	return { providerId, model };
+}
+
 export function parseSessionTransfer(value: Record<string, unknown>): SessionTransfer {
 	if (value.schemaVersion !== 1) throw new Error("仅支持 session transfer schemaVersion 1");
 	const source = record(value.source);
@@ -135,6 +151,7 @@ export function parseSessionTransfer(value: Record<string, unknown>): SessionTra
 		transcript: value.transcript.map(transferMessage),
 		createdAt: timestamp(value.createdAt),
 		updatedAt: timestamp(value.updatedAt),
+		modelOverride: parseSessionModelOverride(value.modelOverride),
 	};
 }
 
@@ -160,13 +177,33 @@ export function transferToAgentMessages(transfer: SessionTransfer): AgentMessage
 	for (const source of transfer.transcript) {
 		const createdAt = source.createdAt ?? transfer.updatedAt ?? Date.now();
 		if (source.role !== "assistant") {
-			const content = source.content.flatMap((part) => {
+			const content: Exclude<Extract<AgentMessage, { role: "user" }>["content"], string> = [];
+			for (const part of source.content) {
+				const image =
+					part.type === "file" &&
+					typeof part.uri === "string" &&
+					typeof part.mimeType === "string" &&
+					part.mimeType.startsWith("image/")
+						? /^data:(image\/[a-z0-9.+-]+);base64,([a-zA-Z0-9+/]+={0,2})$/.exec(part.uri)
+						: null;
+				if (
+					image &&
+					image[1] === part.mimeType &&
+					Buffer.from(image[2], "base64").toString("base64") === image[2]
+				) {
+					content.push({ type: "image", mimeType: image[1], data: image[2] });
+					continue;
+				}
 				const rendered = renderedPart(part);
-				return rendered ? [{ type: "text" as const, text: rendered }] : [];
-			});
+				if (rendered) content.push({ type: "text", text: rendered });
+			}
 			const prefix = source.role === "system" ? "[系统消息]\n" : "";
 			if (content.length === 0) content.push({ type: "text", text: prefix || "[空消息]" });
-			else if (prefix) content[0] = { ...content[0], text: prefix + content[0].text };
+			else if (prefix) {
+				const first = content[0];
+				if (first.type === "text") content[0] = { ...first, text: prefix + first.text };
+				else content.unshift({ type: "text", text: prefix });
+			}
 			messages.push({ role: "user", content, timestamp: createdAt });
 			continue;
 		}
@@ -289,5 +326,6 @@ export function exportSession(session: SavedSession): SessionTransfer {
 		transcript: [...structuredClone(prefix), ...suffix],
 		createdAt: session.createdAt,
 		updatedAt: session.updatedAt,
+		modelOverride: session.modelOverride,
 	};
 }

@@ -64,7 +64,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
   → POST /plugins/import → 校验、复制到 PI_DATA_DIR/plugins/<id>
   → Assistant.pluginIds → 创建 Session 时复制挂载关系
   → plugins.runtime() → 解析为带来源的 RuntimeConfig，写入 Session
-  → Agent systemPrompt 只包含 Skill ID、description 和来源名称
+  → Agent systemPrompt 只包含 Skill ID、一行说明和来源名称（说明按宿主 language 选 `descriptions[locale]`，回落 `description`）
   → 模型调用 skill → 读取完整 SKILL.md 和实际目录
   → read / bash / write / edit / grep / find / ls
   → 原版 loop 把工具结果交回模型
@@ -110,7 +110,7 @@ POST /sessions { assistantId, mode, model?, title? }
 POST /sessions/:id/turns { text, assistantId?, systemPrompt? }
   → 检查该会话空闲 → 解析本地最新配置或宿主注册表
   → 配置变化时保留消息并重建 Agent，否则复用 Agent
-  → systemPrompt 只覆盖本轮动态系统上下文；Skill 目录仍由稳定 runtime 追加
+  → 本轮 systemPrompt 与助手 runtime.systemPrompt 拼接（本轮规则在前），最后追加一次 Skill 索引
   → 追加用户消息并持久化 running 状态 → 返回 202
   → Agent.continue() → runAgentLoopContinue()
   → 模型流式输出 / 工具执行 / 下一轮模型响应

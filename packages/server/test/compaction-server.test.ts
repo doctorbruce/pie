@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout } from "node:timers/promises";
-import type { SessionSnapshot } from "../src/protocol.ts";
+import type { Assistant, SessionSnapshot } from "../src/protocol.ts";
 import { createCoreServer } from "../src/server.ts";
 
 async function listen(core: ReturnType<typeof createCoreServer>) {
@@ -38,7 +38,7 @@ test("real sessions compact before model calls and restore the checkpoint after 
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(chunk);
 			const body = Buffer.concat(chunks).toString("utf8");
-			const summary = body.includes("Summarize the supplied conversation into a context checkpoint");
+			const summary = body.includes("You are a context summarization assistant");
 			requests.push({ summary, body });
 			const content = summary ? "## Goal\nContinue the compacted test conversation." : "reply";
 			res.writeHead(200, { "Content-Type": "text/event-stream" });
@@ -80,10 +80,17 @@ test("real sessions compact before model calls and restore the checkpoint after 
 		}),
 	});
 	assert.equal(configure.status, 200);
+	const assistantResponse = await fetch(`${base}/assistants`, {
+		method: "POST",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({ name: "Compaction test", systemPrompt: "", toolIds: [] }),
+	});
+	assert.equal(assistantResponse.status, 201);
+	const assistant = (await assistantResponse.json()) as Assistant;
 	const created = await fetch(`${base}/sessions`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ mode: "real" }),
+		body: JSON.stringify({ mode: "real", assistantId: assistant.id }),
 	});
 	assert.equal(created.status, 201);
 	const session = (await created.json()) as SessionSnapshot;

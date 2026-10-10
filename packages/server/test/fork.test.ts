@@ -46,6 +46,17 @@ test("fork creates an independent session before the selected user message and r
 	});
 	assert.equal(created.status, 201);
 	const source = (await created.json()) as SessionSnapshot;
+	const modelOverride = { providerId: "custom", model: "custom-model" };
+	assert.equal(
+		(
+			await fetch(`${running.base}/sessions/${source.id}/model-override`, {
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ modelOverride }),
+			})
+		).status,
+		200,
+	);
 	await submit(running.base, source.id, "第一条消息");
 	const sourceAfterSecond = await submit(running.base, source.id, "第二条消息");
 	assert.deepEqual(
@@ -62,6 +73,7 @@ test("fork creates an independent session before the selected user message and r
 	assert.equal(result.session.turn, undefined);
 	assert.deepEqual(result.session.messages, sourceAfterSecond.messages.slice(0, 2));
 	assert.deepEqual(result.session.runtime, sourceAfterSecond.runtime);
+	assert.deepEqual(result.session.modelOverride, modelOverride);
 
 	assert.equal((await post(running.base, `/sessions/${source.id}/fork`, { messageIndex: 1 })).status, 400);
 	const forkAfterTurn = await submit(running.base, result.session.id, "修改后的第二条消息");
@@ -75,6 +87,7 @@ test("fork creates an independent session before the selected user message and r
 	running = await start(directory);
 	const restored = (await (await fetch(`${running.base}/sessions/${result.session.id}`)).json()) as SessionSnapshot;
 	assert.equal(restored.forkedFromSessionId, source.id);
+	assert.deepEqual(restored.modelOverride, modelOverride);
 	assert.equal(restored.messages.length, 4);
 	assert.equal((await fetch(`${running.base}/sessions/${source.id}`, { method: "DELETE" })).status, 200);
 	assert.equal((await fetch(`${running.base}/sessions/${result.session.id}`)).status, 200);

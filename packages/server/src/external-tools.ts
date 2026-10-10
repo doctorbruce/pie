@@ -14,7 +14,8 @@ export type ToolContext = {
 	readonly Type: typeof Type;
 	readonly ask: (request: Omit<InteractionRequest, "id">, signal?: AbortSignal) => Promise<void>;
 };
-export type ToolFactory = (context: ToolContext) => AgentTool;
+export type ExternalTool = AgentTool & { exposure?: "default" | "deferred" };
+export type ToolFactory = (context: ToolContext) => ExternalTool;
 
 export function parseToolIds(value: unknown, available: readonly string[]): string[] {
 	if (
@@ -54,6 +55,7 @@ export function loadExternalTools(env: NodeJS.ProcessEnv, reservedIds: readonly 
 				!tool.label.trim() ||
 				typeof tool.description !== "string" ||
 				!tool.description.trim() ||
+				(tool.exposure !== undefined && tool.exposure !== "default" && tool.exposure !== "deferred") ||
 				!tool.parameters ||
 				typeof tool.parameters !== "object" ||
 				!("type" in tool.parameters) ||

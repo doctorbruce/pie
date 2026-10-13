@@ -4,6 +4,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type AssistantMessageEvent, contentText } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "./agent.ts";
 import { parseToolIds, ToolConfigError } from "./external-tools.ts";
+import { McpConfigError } from "./mcp.ts";
 import { ModelSettingsError } from "./models/settings.ts";
 import { createPlugins, PluginError } from "./plugins.ts";
 import type {
@@ -186,7 +187,9 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			}),
 		};
 	}
+	factory.mcp.configure([...hostRuntimes.values()].map((definition) => definition.runtime.mcp ?? {}));
 	type Session = SavedSession & {
+		mcpAbort?: AbortController;
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
 		clients: Set<ServerResponse>;
@@ -690,6 +693,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					child.cancelRequested = true;
 					rejectSessionInteractions(child.id, new Error("Subagent 已取消"));
 					child.agent?.abort();
+					child.mcpAbort?.abort();
 				};
 				jobSignal.addEventListener("abort", abortChild, { once: true });
 				if (jobSignal.aborted) abortChild();
@@ -757,7 +761,12 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		const turn = session.turn;
 		const agent = session.agent;
 		if (!turn || !agent) return;
+		const mcpAbort = new AbortController();
+		session.mcpAbort = mcpAbort;
+		if (session.cancelRequested) mcpAbort.abort();
+		let releaseMcp: (() => void) | undefined;
 		try {
+			releaseMcp = await agent.prepareMcp(mcpAbort.signal);
 			do {
 				await agent.continue();
 			} while (agent.hasQueuedMessages() && !session.cancelRequested);
@@ -767,6 +776,8 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			turn.status = session.cancelRequested ? "cancelled" : "failed";
 			turn.error = error instanceof Error ? error.message : String(error);
 		} finally {
+			releaseMcp?.();
+			session.mcpAbort = undefined;
 			rejectSessionInteractions(session.id, new Error("回合已结束"));
 			session.updatedAt = Date.now();
 			try {
@@ -898,6 +909,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				});
 				return;
 			}
+			if (req.method === "GET" && path === "/mcp") return json(200, factory.mcp.status());
 			if (req.method === "GET" && path === "/health") return json(200, { healthy: true, ...factory.info });
 			if (req.method === "PUT" && path === "/host-runtimes") {
 				const body = await readJson(req, HOST_RUNTIME_REQUEST_LIMIT);
@@ -907,6 +919,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				store.replaceHostRuntimes(definitions);
 				hostRuntimes.clear();
 				for (const [id, definition] of registry) hostRuntimes.set(id, definition);
+				factory.mcp.configure(definitions.map((definition) => definition.runtime.mcp ?? {}));
 				return json(200, {
 					runtimes: definitions.map(({ assistantId, assistantRevision }) => ({
 						assistantId,
@@ -1154,6 +1167,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					rejectSessionInteractions(session.id, new Error("会话已取消"));
 					session.agent?.clearAllQueues();
 					session.agent?.abort();
+					session.mcpAbort?.abort();
 				}
 				return json(202, { sessionId: session.id, turnId: session.turn.id });
 			}
@@ -1308,7 +1322,8 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					: error instanceof ModelSettingsError ||
 							error instanceof ToolConfigError ||
 							error instanceof PluginError ||
-							error instanceof SkillConfigError
+							error instanceof SkillConfigError ||
+							error instanceof McpConfigError
 						? 400
 						: 500,
 				{
@@ -1330,6 +1345,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					session.cancelRequested = true;
 					rejectSessionInteractions(session.id, new Error("服务正在关闭"));
 					session.agent?.abort();
+					session.mcpAbort?.abort();
 					for (const client of session.clients) client.end();
 				}
 				await Promise.all([...sessions.values()].map((session) => session.runPromise));
@@ -1337,6 +1353,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					server.close((error) => (error ? reject(error) : resolve()));
 					server.closeAllConnections();
 				});
+				await factory.mcp.close();
 				store.close();
 			})();
 			return closePromise;

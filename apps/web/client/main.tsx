@@ -24,7 +24,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AssistantSettings } from "./assistant-settings.tsx";
-import { toThreadMessages } from "./messages.ts";
+import { toThreadMessages, updateToolProgress } from "./messages.ts";
 import { ModelSettings } from "./model-settings.tsx";
 import { PluginSettings } from "./plugin-settings.tsx";
 import { request } from "./request.ts";
@@ -45,6 +45,7 @@ function Tool({
 	result,
 	isError,
 	status,
+	artifact,
 }: ToolCallMessagePartProps<Record<string, unknown>, unknown>) {
 	const running = status.type === "running";
 	return (
@@ -58,6 +59,14 @@ function Tool({
 			<div className="tool-detail">
 				<span className="tool-detail-label">输入</span>
 				<pre>{argsText}</pre>
+				{typeof artifact === "string" && (
+					<>
+						<span className="tool-detail-label">进度</span>
+						<pre>
+							<output>{artifact}</output>
+						</pre>
+					</>
+				)}
 				{result !== undefined && (
 					<>
 						<span className="tool-detail-label">输出</span>
@@ -218,6 +227,7 @@ function App() {
 	const [providers, setProviders] = useState<ProviderCatalog>();
 	const [selectedModel, setSelectedModel] = useState<ModelSelection>();
 	const [snapshot, setSnapshot] = useState<SessionSnapshot>();
+	const [toolProgress, setToolProgress] = useState<ReadonlyMap<string, string>>(new Map());
 	const [assistants, setAssistants] = useState<Assistant[]>([]);
 	const [sessions, setSessions] = useState<SessionSummary[]>([]);
 	const [assistantId, setAssistantId] = useState("");
@@ -259,6 +269,7 @@ function App() {
 	const activate = useCallback((next?: SessionSnapshot) => {
 		sessionRef.current = next;
 		setSnapshot(next);
+		setToolProgress(new Map());
 		setTitle(next?.title ?? "");
 		setConnected(false);
 		if (next) {
@@ -315,6 +326,7 @@ function App() {
 			if (sessionRef.current?.id !== packet.sessionId) return;
 			setConnected(true);
 			accept(packet.snapshot);
+			setToolProgress((current) => updateToolProgress(current, packet));
 			if (packet.type === "turn.settled") void refreshSessions().catch(() => {});
 		};
 		source.onerror = () => setConnected(false);
@@ -412,7 +424,7 @@ function App() {
 		});
 	}
 
-	const messages = useMemo(() => toThreadMessages(snapshot), [snapshot]);
+	const messages = useMemo(() => toThreadMessages(snapshot, toolProgress), [snapshot, toolProgress]);
 	const runtime = useExternalStoreRuntime({
 		messages,
 		convertMessage: (message: ThreadMessageLike) => message,

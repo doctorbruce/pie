@@ -89,7 +89,7 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	const catalog = (await (await fetch(`${core.base}/tools`)).json()) as { tools: { id: string }[] };
 	assert.deepEqual(
 		catalog.tools.map((tool) => tool.id),
-		["read", "bash", "edit", "write", "grep", "find", "ls", "job_output", "job_kill"],
+		["read", "bash", "edit", "write", "grep", "find", "ls", "webfetch", "job_output", "job_kill"],
 	);
 	const assistants = (await (await fetch(`${core.base}/assistants`)).json()) as { assistants: Assistant[] };
 	assert.deepEqual(assistants.assistants[0].toolIds, []);

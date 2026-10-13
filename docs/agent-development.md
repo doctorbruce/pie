@@ -80,9 +80,11 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 本地助手挂载变更在已有会话下一次 Turn 前生效。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
 
-`skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册九个独立工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。命令只暴露一个 `bash` ID，实际 Shell 由平台和配置决定。
+`skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`webfetch`、`job_output`、`job_kill`。命令只暴露一个 `bash` ID，实际 Shell 由平台和配置决定。
 
-这九个工具、按绑定出现的 `skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
+这十个工具、按绑定出现的 `skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
+
+`webfetch` 适配 Amio/OpenCode 的抓取和格式转换逻辑，不引入其 Effect 运行框架。它接受 HTTP(S) URL，支持 `text/markdown/html`，默认 Markdown；网络请求及响应读取默认超时 30 秒、最大 120 秒，响应上限 5 MiB。抓取前通过 `context.ask()` 请求 `webfetch` 权限，Turn 取消会中断传输和响应读取。模型结果最多预览 2000 行或 50 KiB，完整长结果保存到临时文件供 `read` 续读。图片和其他二进制文件仍与 Amio 一样拒绝。源码及新增转换依赖的许可随 Sidecar 的 `.LICENSES.txt` 发行。
 
 内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 对齐 Amio v1 的文件读取边界：文本按行流式读取，默认最多 2000 行/50 KiB，单行最多 2000 字符并返回正确的续读 offset；前 4 KiB 用于图片/PDF/二进制识别，缺失路径会返回同目录候选。它也支持目录、图片和 PDF 文本分页，PDF 一次最多 20 页；PDF.js worker 随单文件 sidecar 打包。`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
 
@@ -343,7 +345,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `packages/server/src/compaction.ts` | 上下文预算、切分点、摘要生成输入和压缩后模型上下文 |
 | `packages/server/src/plugins.ts` | Astron manifest 的 Skill 索引、本地导入与卸载 |
 | `packages/server/src/skills.ts` | 运行配置校验、skill、来源与加载结果 |
-| `packages/server/src/tools.ts`、`tools/` | 九个内置工具的 Core 适配、文件操作、搜索、系统命令和后台作业管理 |
+| `packages/server/src/tools.ts`、`tools/` | 十个内置工具的 Core 适配、文件操作、网页抓取、搜索、系统命令和后台作业管理 |
 | `packages/server/src/external-tools.ts` | 工具文件加载、ToolContext、工具 ID 和定义校验 |
 | `examples/tools/memory-manage.ts` | Astron 记忆工具适配示例，可复制到外部目录 |
 | `packages/server/src/models/` | 上游模型配置抽取和提供商管理 |
@@ -351,7 +353,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `apps/web/client/assistant-settings.tsx` | 助手配置表单 |
 | `packages/agent/src/agent.ts`、`agent-loop.ts` | 原版执行内核，当前保持 `b2602be` 基线 |
 
-运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖九个内置工具的注册、文件读写改查、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Bash 失败、限额、取消、后台执行和超时。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
+运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖十个内置工具的注册、文件读写改查、网页抓取、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Bash 失败、限额、取消、后台执行和超时。`webfetch.test.ts` 覆盖格式转换、权限、重定向、响应限额、结果预览、超时和取消。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
 
 自动压缩位于服务层，不修改 `agent-loop.ts`。真实模型每次调用前，`transformContext` 根据最后一次有效模型 usage 加尾部消息估算 token；超过模型窗口减去保留预算时，用同一模型生成结构化摘要，并把“摘要 + 最近消息”作为本次模型上下文。切分点不会落在 `toolResult`，后续压缩会把新历史合并进旧摘要。摘要记录随会话持久化，完整消息数组保持不变，因此页面和恢复仍能看到原始历史。摘要请求失败时回退到原上下文。
 

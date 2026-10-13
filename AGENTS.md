@@ -1,5 +1,9 @@
 # Development Rules
 
+## MCP Integration
+
+修改 MCP 配置、工具或生命周期时先读 `docs/mcp-integration.md`。协议源位于 `packages/mcp`；产品连接、权限和工具适配位于 `packages/server/src/mcp.ts`。同步上游时保留原测试和适用许可，Sidecar 发行须携带对应 `.LICENSES.txt`。
+
 ## Conversational Style
 
 - Keep answers short and concise

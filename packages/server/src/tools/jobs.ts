@@ -101,13 +101,26 @@ export class BackgroundJobs {
 		return job ? this.snapshot(job) : undefined;
 	}
 
-	async wait(id: string, waitMs?: number): Promise<BackgroundJobInfo | undefined> {
+	async wait(id: string, waitMs?: number, signal?: AbortSignal): Promise<BackgroundJobInfo | undefined> {
+		signal?.throwIfAborted();
 		const job = this.#jobs.get(id);
 		if (!job) return undefined;
-		if (job.status === "running") {
-			if (waitMs === undefined) await job.settled;
-			else if (waitMs > 0)
-				await Promise.race([job.settled, new Promise<void>((resolve) => setTimeout(resolve, waitMs))]);
+		if (job.status === "running" && (waitMs === undefined || waitMs > 0)) {
+			let timer: ReturnType<typeof setTimeout> | undefined;
+			let onAbort: (() => void) | undefined;
+			try {
+				await Promise.race([
+					job.settled,
+					new Promise<void>((resolve, reject) => {
+						if (waitMs !== undefined) timer = setTimeout(resolve, waitMs);
+						onAbort = () => reject(signal?.reason);
+						signal?.addEventListener("abort", onAbort, { once: true });
+					}),
+				]);
+			} finally {
+				clearTimeout(timer);
+				if (onAbort) signal?.removeEventListener("abort", onAbort);
+			}
 		}
 		return this.snapshot(job);
 	}

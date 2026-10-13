@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { contentText, Type } from "@earendil-works/pi-ai";
 import type { ExternalTool } from "../src/external-tools.ts";
@@ -35,7 +36,7 @@ async function submit(base: string, sessionId: string, text: string) {
 	throw new Error("tool search turn did not settle");
 }
 
-test("real provider requests defer business schemas, load searched tools, and recover session-local exposure", async (context) => {
+test("real provider requests stack MCP guidance in tool results without rewriting the prompt prefix", async (context) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-tool-search-"));
 	const toolsDir = join(directory, "tools");
 	await mkdir(toolsDir);
@@ -55,12 +56,41 @@ test("real provider requests defer business schemas, load searched tools, and re
 			});`,
 		);
 	}
-	const requests: { tools?: { function: { name: string } }[]; messages: unknown[] }[] = [];
+	const requests: { tools?: { function: { name: string } }[]; messages: { role: string; content: unknown }[] }[] = [];
 	const responses: { name?: string; args?: Record<string, unknown>; text?: string }[] = [];
+	let serviceInstructions = "MCP_GUIDE_1: Inspect schema before querying.\nUse workspace-relative paths.";
 	const endpoint = createServer((req, res) => {
 		void (async () => {
+			if (req.url?.startsWith("/mcp/") && req.method !== "POST") {
+				res.writeHead(405).end();
+				return;
+			}
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(chunk);
+			if (req.url?.startsWith("/mcp/")) {
+				const message = JSON.parse(Buffer.concat(chunks).toString("utf8")) as { id?: number; method: string };
+				if (message.id === undefined) {
+					res.writeHead(204).end();
+					return;
+				}
+				const result =
+					message.method === "initialize"
+						? {
+								protocolVersion: "2025-06-18",
+								capabilities: { tools: {} },
+								serverInfo: { name: "guide", version: "1" },
+								instructions:
+									req.url === "/mcp/blank"
+										? " \n "
+										: req.url === "/mcp/peer"
+											? "MCP_PEER_ONLY: Use ticket keys."
+											: serviceInstructions,
+							}
+						: { tools: [{ name: "query", inputSchema: { type: "object", properties: {} } }] };
+				res.writeHead(200, { "Content-Type": "application/json" });
+				res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }));
+				return;
+			}
 			requests.push(JSON.parse(Buffer.concat(chunks).toString("utf8")));
 			const response = responses.shift() ?? { text: "reply" };
 			const delta = response.name
@@ -120,10 +150,29 @@ test("real provider requests defer business schemas, load searched tools, and re
 		"PUT",
 	);
 	const runtime = {
-		systemPrompt: "Use tool_search to discover business tools when needed.",
+		systemPrompt: "Host system prompt.",
+		language: "zh-CN",
 		toolIds: ["read", "mail-operation", "weather-query", "security-bash"],
 		skills: [],
 		subagents: [],
+		mcp: {
+			guide: { type: "remote", url: `http://127.0.0.1:${address.port}/mcp/guide`, oauth: false },
+			peer: { type: "remote", url: `http://127.0.0.1:${address.port}/mcp/peer`, oauth: false },
+			blank: { type: "remote", url: `http://127.0.0.1:${address.port}/mcp/blank`, oauth: false },
+			disabled: {
+				type: "remote",
+				url: `http://127.0.0.1:${address.port}/mcp/disabled`,
+				oauth: false,
+				enabled: false,
+			},
+			fixture: {
+				type: "local",
+				command: [
+					process.execPath,
+					fileURLToPath(new URL("../../mcp/test/fixtures/stdio-server.mjs", import.meta.url)),
+				],
+			},
+		},
 	};
 	await request(
 		base,
@@ -133,10 +182,45 @@ test("real provider requests defer business schemas, load searched tools, and re
 	);
 	const session = (await request(base, "/sessions", { assistantId: "host", mode: "real" })) as SessionSnapshot;
 	const toolNames = (index = requests.length - 1) => requests[index].tools?.map((tool) => tool.function.name).sort();
+	const systemPrompt = (index = requests.length - 1) =>
+		requests[index].messages
+			.filter((message) => message.role === "system")
+			.map((message) => message.content)
+			.join("\n");
+	const toolResults = (index = requests.length - 1) =>
+		requests[index].messages
+			.filter((message) => message.role === "tool")
+			.map((message) => message.content)
+			.join("\n");
+	const assertAppendOnly = (before: number, after: number) => {
+		assert.equal(systemPrompt(after), systemPrompt(before));
+		assert.deepEqual(requests[after].messages.slice(0, requests[before].messages.length), requests[before].messages);
+	};
 	await submit(base, session.id, "你好");
 	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
+	assert.match(systemPrompt(), /## 工具发现/);
+	assert.match(systemPrompt(), /- mail-operation: 发送邮件 send email/);
+	assert.match(systemPrompt(), /- weather-query: 查询天气 weather forecast/);
+	assert.match(systemPrompt(), /- mcp__fixture__echo: echo/);
+	assert.doesNotMatch(systemPrompt(), /disabled-private|- security-bash:|- read:/);
+	assert.equal(systemPrompt().split("## 工具发现").length, 2);
 	assert.equal(JSON.stringify(requests.at(-1)).includes("mail-operation_payload_only"), false);
 	assert.equal(JSON.stringify(requests.at(-1)).includes("weather-query_payload_only"), false);
+	assert.doesNotMatch(systemPrompt(), /## MCP 服务指令|MCP_GUIDE|MCP_PEER_ONLY/);
+	await request(
+		base,
+		"/host-runtimes",
+		{
+			runtimes: [
+				{ assistantId: "host", assistantRevision: "1", runtime },
+				{ assistantId: "unmounted", assistantRevision: "1", runtime: { ...runtime, mcp: {} } },
+			],
+		},
+		"PUT",
+	);
+	const unmounted = (await request(base, "/sessions", { assistantId: "unmounted", mode: "real" })) as SessionSnapshot;
+	await submit(base, unmounted.id, "没有挂载 MCP 的助手");
+	assert.doesNotMatch(systemPrompt(), /MCP_GUIDE_1|## MCP 服务指令|mcp__/);
 	responses.push({ name: "tool_search", args: { query: "邮件", limit: 21 } }, { text: "invalid search rejected" });
 	const rejected = await submit(base, session.id, "无效搜索参数");
 	assert(
@@ -155,6 +239,11 @@ test("real provider requests defer business schemas, load searched tools, and re
 	let snapshot = await submit(base, session.id, "请发送邮件");
 	assert.deepEqual(toolNames(searchStart), ["read", "security-bash", "tool_search"]);
 	assert.deepEqual(toolNames(searchStart + 1), ["mail-operation", "read", "security-bash", "tool_search"]);
+	assert.match(systemPrompt(searchStart), /- mail-operation:/);
+	assert.match(systemPrompt(searchStart + 1), /- mail-operation:/);
+	assertAppendOnly(searchStart, searchStart + 1);
+	assert.match(systemPrompt(searchStart + 1), /- mcp__fixture__echo:/);
+	assert.doesNotMatch(systemPrompt(searchStart + 1), /## MCP 服务指令|MCP_GUIDE|MCP_PEER_ONLY/);
 	assert(
 		snapshot.messages.some(
 			(message) =>
@@ -168,21 +257,48 @@ test("real provider requests defer business schemas, load searched tools, and re
 	assert(toolNames()?.includes("mail-operation"));
 	assert.equal(toolNames()?.includes("disabled-private"), false);
 	assert.equal(toolNames()?.includes("weather-query"), false);
+	responses.push({ name: "tool_search", args: { query: "mcp__blank__query", limit: 1 } }, { text: "blank loaded" });
+	await submit(base, session.id, "加载没有说明的 MCP 工具");
+	assert(toolNames()?.includes("mcp__blank__query"));
+	assert.doesNotMatch(systemPrompt(), /## MCP 服务指令|MCP_GUIDE|MCP_PEER_ONLY/);
+	const mcpSearchStart = requests.length;
+	responses.push({ name: "tool_search", args: { query: "mcp__guide__query", limit: 1 } }, { text: "guide loaded" });
+	await submit(base, session.id, "加载有说明的 MCP 工具");
+	assert.doesNotMatch(toolResults(mcpSearchStart), /MCP_GUIDE|MCP_PEER_ONLY/);
+	assert(toolNames(mcpSearchStart + 1)?.includes("mcp__guide__query"));
+	assert.doesNotMatch(systemPrompt(mcpSearchStart + 1), /MCP_GUIDE|mcpInstructions/);
+	assert.match(toolResults(mcpSearchStart + 1), /MCP_GUIDE_1/);
+	assert.match(toolResults(mcpSearchStart + 1), /"server":"guide"/);
+	assert.doesNotMatch(toolResults(mcpSearchStart + 1), /"server":"(?:peer|blank|disabled|fixture)"|MCP_PEER_ONLY/);
+	assertAppendOnly(mcpSearchStart, mcpSearchStart + 1);
 	const transfer = await request(base, `/sessions/${session.id}/export`);
 	const imported = (await request(base, "/sessions", { assistantId: "host", mode: "real" })) as SessionSnapshot;
 	await request(base, `/sessions/${imported.id}/import`, transfer, "PUT");
 	await submit(base, imported.id, "导入后继续");
 	assert(toolNames()?.includes("mail-operation"));
 	assert.equal(toolNames()?.includes("weather-query"), false);
+	assert.match(systemPrompt(), /- mail-operation:/);
+	assert.match(toolResults(), /MCP_GUIDE_1/);
 
 	const isolated = (await request(base, "/sessions", { assistantId: "host", mode: "real" })) as SessionSnapshot;
 	await submit(base, isolated.id, "你好");
 	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
+	assert.match(systemPrompt(), /- mail-operation:/);
+	serviceInstructions = "MCP_GUIDE_2: Updated instructions after restart.";
 	await core?.close();
 	base = await start();
+	responses.push(
+		{ name: "tool_search", args: { query: "mcp__guide__query", limit: 1 } },
+		{ text: "guidance refreshed" },
+	);
+	const restartSearchStart = requests.length;
 	snapshot = await submit(base, session.id, "恢复后继续");
 	assert(toolNames()?.includes("mail-operation"));
 	assert.equal(toolNames()?.includes("weather-query"), false);
+	assert.match(toolResults(), /MCP_GUIDE_2/);
+	assert.match(toolResults(), /MCP_GUIDE_1/);
+	assert.doesNotMatch(toolResults(), /MCP_PEER_ONLY/);
+	assertAppendOnly(restartSearchStart, restartSearchStart + 1);
 
 	for (const [text, expected] of [
 		["请发送邮件", false],
@@ -197,7 +313,9 @@ test("real provider requests defer business schemas, load searched tools, and re
 		};
 		await submit(base, fork.session.id, "分支继续");
 		assert.equal(toolNames()?.includes("mail-operation"), expected);
+		assert.equal(toolResults().includes("MCP_GUIDE_1"), expected);
 	}
+	serviceInstructions = "MCP_GUIDE_3: Updated instructions after configuration change.";
 	await request(
 		base,
 		"/host-runtimes",
@@ -206,7 +324,37 @@ test("real provider requests defer business schemas, load searched tools, and re
 				{
 					assistantId: "host",
 					assistantRevision: "2",
-					runtime: { ...runtime, toolIds: ["read", "weather-query", "security-bash"] },
+					runtime: {
+						...runtime,
+						language: "en-US",
+						mcp: { guide: { ...runtime.mcp.guide, url: `http://127.0.0.1:${address.port}/mcp/guide-new` } },
+					},
+				},
+			],
+		},
+		"PUT",
+	);
+	responses.push(
+		{ name: "tool_search", args: { query: "mcp__guide__query", limit: 1 } },
+		{ text: "latest guidance loaded" },
+	);
+	const refreshSearchStart = requests.length;
+	await submit(base, session.id, "更新 MCP 配置后重新查询说明");
+	assert.match(systemPrompt(), /## Tool Discovery/);
+	assert.doesNotMatch(systemPrompt(), /MCP_GUIDE|mcpInstructions/);
+	assert.match(toolResults(), /MCP_GUIDE_3/);
+	assert.match(toolResults(), /MCP_GUIDE_1/);
+	assert.match(toolResults(), /MCP_GUIDE_2/);
+	assertAppendOnly(refreshSearchStart, refreshSearchStart + 1);
+	await request(
+		base,
+		"/host-runtimes",
+		{
+			runtimes: [
+				{
+					assistantId: "host",
+					assistantRevision: "3",
+					runtime: { ...runtime, language: "en-US", mcp: {}, toolIds: ["read", "weather-query", "security-bash"] },
 				},
 			],
 		},
@@ -214,6 +362,13 @@ test("real provider requests defer business schemas, load searched tools, and re
 	);
 	await submit(base, session.id, "移除邮件工具后继续");
 	assert.equal(toolNames()?.includes("mail-operation"), false);
+	assert.match(systemPrompt(), /## Tool Discovery/);
+	assert.match(systemPrompt(), /- weather-query:/);
+	assert.doesNotMatch(systemPrompt(), /- mail-operation:|mcp__fixture__echo|## 工具发现/);
+	assert.doesNotMatch(systemPrompt(), /MCP_GUIDE|## MCP Server Instructions|## MCP 服务指令/);
+	assert.match(toolResults(), /MCP_GUIDE_1/);
+	assert.match(toolResults(), /MCP_GUIDE_2/);
+	assert.match(toolResults(), /MCP_GUIDE_3/);
 });
 
 test("tool search ranks Chinese, English, exact IDs and schema keywords without exposing unmatched tools", async () => {
@@ -291,6 +446,42 @@ test("tool search ranks Chinese, English, exact IDs and schema keywords without 
 	assert(
 		deferred.expose({ messages: [], tools: deferred.tools }).tools?.some((tool) => tool.name === "weather-query"),
 	);
+});
+
+test("discovery summaries stay brief and stable before and after schema loading", () => {
+	const tool: ExternalTool = {
+		name: "mcp__calendar__list",
+		label: "Calendar",
+		description: `List calendar events\n${"details ".repeat(40)}`,
+		exposure: "deferred",
+		parameters: Type.Object({ private_schema_marker: Type.String() }),
+		async execute() {
+			return { content: [], details: {} };
+		},
+	};
+	const discovery = createToolSearch([tool]);
+	const context = { systemPrompt: "Host instructions", messages: [], tools: discovery.tools };
+	const prompt = discovery.expose(context).systemPrompt ?? "";
+	assert.match(prompt, /^Host instructions\n\n## Tool Discovery/);
+	const summary = prompt.split(`- ${tool.name}: `)[1];
+	assert.equal(summary.length, 160);
+	assert(summary.endsWith("..."));
+	assert.doesNotMatch(summary, /\n|private_schema_marker/);
+	assert.equal(context.systemPrompt, "Host instructions");
+	assert.equal(discovery.expose(context).systemPrompt, prompt);
+	discovery.restore([
+		{
+			role: "toolResult",
+			toolName: "tool_search",
+			toolCallId: "loaded",
+			content: [],
+			addedToolNames: [tool.name],
+			isError: false,
+			timestamp: 1,
+		},
+	]);
+	assert.equal(discovery.expose(context).systemPrompt, prompt);
+	assert.equal(createToolSearch([]).expose({ messages: [] }).systemPrompt, undefined);
 });
 
 test("restoration cannot activate absent tools, user-provided load records or failed searches", () => {

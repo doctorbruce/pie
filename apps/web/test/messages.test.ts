@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SessionSnapshot, WireMessage } from "@pie/server/protocol";
-import { toThreadMessages } from "../client/messages.ts";
+import type { SessionEvent, SessionSnapshot, WireMessage } from "@pie/server/protocol";
+import { toThreadMessages, updateToolProgress } from "../client/messages.ts";
 
 const assistant: WireMessage = {
 	role: "assistant",
@@ -80,4 +80,84 @@ test("partial text retains identity when committed; aborted output stays cancell
 	assert.equal(streaming.at(-1)?.id, finished.at(-1)?.id);
 	assert.deepEqual(finished.at(-1)?.status, { type: "incomplete", reason: "cancelled" });
 	assert.deepEqual(toThreadMessages(), []);
+});
+
+test("tool progress stays UI-only and does not mark a running call as completed", () => {
+	const packet: SessionEvent = {
+		type: "agent.event",
+		sessionId: snapshot.id,
+		snapshot,
+		event: {
+			type: "tool_execution_update",
+			toolCallId: "call-1",
+			partialResult: { content: [{ type: "text", text: "仍在执行（已等待 60 秒）" }], details: {} },
+		},
+	};
+	const original = structuredClone(snapshot);
+	const progress = updateToolProgress(new Map(), packet);
+	const messages = toThreadMessages(snapshot, progress);
+	assert.deepEqual(messages[1].status, { type: "running" });
+	assert(Array.isArray(messages[1].content));
+	const call = messages[1].content[1];
+	assert.equal(call.type, "tool-call");
+	assert.equal(call.result, undefined);
+	assert.equal(call.artifact, "仍在执行（已等待 60 秒）");
+	assert.deepEqual(snapshot, original);
+	const finished = toThreadMessages(
+		{
+			...snapshot,
+			messages: [
+				...snapshot.messages,
+				{
+					role: "toolResult",
+					toolCallId: "call-1",
+					toolName: "powershell",
+					isError: false,
+					content: [{ type: "text", text: "done" }],
+					timestamp: 2,
+				},
+			],
+		},
+		progress,
+	);
+	assert(Array.isArray(finished[1].content));
+	assert.equal(finished[1].content[1].artifact, undefined);
+	assert.equal(finished[1].content[1].result, "done");
+	assert.equal(
+		updateToolProgress(progress, { ...packet, event: { type: "tool_execution_end", toolCallId: "call-1" } }).size,
+		0,
+	);
+	const cancelled = { ...snapshot, turn: { id: "turn-1", status: "cancelled" as const } };
+	assert.equal(updateToolProgress(progress, { ...packet, snapshot: cancelled }).size, 0);
+	const cancelledMessages = toThreadMessages(cancelled, progress);
+	assert(Array.isArray(cancelledMessages[1].content));
+	assert.equal(cancelledMessages[1].content[1].artifact, undefined);
+});
+
+test("progress updates preserve other calls and ignore malformed or unrelated events", () => {
+	const progress = new Map([
+		["call-1", "first"],
+		["call-2", "second"],
+	]);
+	const packet: SessionEvent = { type: "agent.event", sessionId: snapshot.id, snapshot };
+	assert.equal(updateToolProgress(progress, packet), progress);
+	for (const partialResult of [null, {}, { content: null }, { content: [null, 42, { type: "text", text: false }] }]) {
+		assert.equal(
+			updateToolProgress(progress, {
+				...packet,
+				event: {
+					type: "tool_execution_update",
+					toolCallId: "call-1",
+					partialResult,
+				},
+			}),
+			progress,
+		);
+	}
+	const next = updateToolProgress(progress, {
+		...packet,
+		event: { type: "tool_execution_start", toolCallId: "call-1" },
+	});
+	assert.deepEqual([...next], [["call-2", "second"]]);
+	assert.equal(progress.get("call-1"), "first");
 });

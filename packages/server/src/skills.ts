@@ -4,6 +4,7 @@ import { isAbsolute, join, resolve } from "node:path";
 import type { AfterToolCallContext, AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import { parseToolIds } from "./external-tools.ts";
+import { parseMcpServers } from "./mcp.ts";
 import type {
 	AgentRuntimeConfig,
 	HostRuntimeDefinition,
@@ -98,6 +99,7 @@ function parseAgentRuntimeConfig(
 		toolIds,
 		skills,
 		permissions: parsePermissionPolicy(input.permissions),
+		...(input.mcp !== undefined ? { mcp: parseMcpServers(input.mcp) } : {}),
 	};
 }
 
@@ -151,6 +153,7 @@ export function hydrateHostRuntime(
 					toolIds: structuredClone(target.runtime.toolIds),
 					skills: structuredClone(target.runtime.skills),
 					permissions: structuredClone(target.runtime.permissions),
+					...(target.runtime.mcp ? { mcp: structuredClone(target.runtime.mcp) } : {}),
 				},
 			};
 		}),

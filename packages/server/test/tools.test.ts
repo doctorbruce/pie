@@ -89,7 +89,7 @@ test("upstream tool set performs file, listing and search operations", async (t)
 	const tools = new Map(systemTools({}, directory).map((tool) => [tool.name, tool]));
 	assert.deepEqual(
 		[...tools.keys()],
-		["read", "bash", "edit", "write", "grep", "find", "ls", "job_output", "job_kill"],
+		["read", "bash", "edit", "write", "grep", "find", "ls", "webfetch", "job_output", "job_kill"],
 	);
 	assert.equal(tools.has("powershell"), false);
 

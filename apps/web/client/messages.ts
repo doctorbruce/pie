@@ -1,7 +1,42 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
-import type { SessionSnapshot } from "@pie/server/protocol";
+import type { SessionEvent, SessionSnapshot } from "@pie/server/protocol";
 
-export function toThreadMessages(snapshot?: SessionSnapshot): ThreadMessageLike[] {
+export function updateToolProgress(
+	current: ReadonlyMap<string, string>,
+	packet: SessionEvent,
+): ReadonlyMap<string, string> {
+	if (packet.snapshot.turn?.status !== "running") return current.size ? new Map() : current;
+	const event = packet.event;
+	if (typeof event?.toolCallId !== "string") return current;
+	if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
+		if (!current.has(event.toolCallId)) return current;
+		const next = new Map(current);
+		next.delete(event.toolCallId);
+		return next;
+	}
+	if (event.type !== "tool_execution_update") return current;
+	const result = event.partialResult;
+	if (!result || typeof result !== "object" || !("content" in result) || !Array.isArray(result.content))
+		return current;
+	const text = result.content
+		.flatMap((part: unknown) =>
+			part &&
+			typeof part === "object" &&
+			"type" in part &&
+			part.type === "text" &&
+			"text" in part &&
+			typeof part.text === "string"
+				? [part.text]
+				: [],
+		)
+		.join("\n");
+	return text ? new Map(current).set(event.toolCallId, text) : current;
+}
+
+export function toThreadMessages(
+	snapshot?: SessionSnapshot,
+	toolProgress?: ReadonlyMap<string, string>,
+): ThreadMessageLike[] {
 	if (!snapshot) return [];
 	const messages = snapshot.streamingMessage ? [...snapshot.messages, snapshot.streamingMessage] : snapshot.messages;
 	const results = new Map(messages.filter((m) => m.role === "toolResult").map((m) => [m.toolCallId, m]));
@@ -31,6 +66,7 @@ export function toThreadMessages(snapshot?: SessionSnapshot): ThreadMessageLike[
 				argsText: JSON.stringify(part.arguments),
 				result: result?.content.map((c) => (c.type === "text" ? c.text : "[图片结果]")).join("\n"),
 				isError: result?.isError,
+				artifact: !result && snapshot.turn?.status === "running" ? toolProgress?.get(part.id) : undefined,
 			};
 		});
 		const pending =

@@ -12,7 +12,8 @@ const parameters = Type.Object(
 			Type.Integer({
 				minimum: 0,
 				maximum: 300_000,
-				description: "Wait up to this many milliseconds before reading new output",
+				description:
+					"Optional bounded wait in milliseconds before reading, up to 300000. Use it to wait in chunks (for example 30000) when blocked on this job; never sleep or spin in a tight loop.",
 			}),
 		),
 	},
@@ -88,15 +89,19 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 	const output: AgentTool<typeof parameters, JobDetails> = {
 		name: "job_output",
 		label: "后台任务输出",
-		description:
-			"Read new output from a background bash or task job. Reads are incremental. Use wait_ms to wait without polling in a tight loop; completion is also reported automatically.",
+		description: [
+			"Read new output from a background job started by bash or task.",
+			"Reads are incremental: each call returns only output produced since the previous call, or (no new output), plus the current status.",
+			"Pass wait_ms to block until the job settles or the bounded wait elapses, which is how you wait without ending your turn. If it is still running and you are blocked on it, continue waiting in chunks (for example 30000).",
+			"Completion is also reported automatically, so you can keep working on something else instead of waiting.",
+		].join(" "),
 		parameters,
 		async execute(_id, { job_id, wait_ms }, signal) {
 			signal?.throwIfAborted();
 			const initial = runtime.jobs.get(job_id);
 			if (!initial) throw unknownJob(runtime, job_id);
 			if (initial.ownerSessionId !== runtime.sessionId) throw new Error("后台任务属于其他会话");
-			if (wait_ms) await runtime.jobs.wait(job_id, wait_ms);
+			if (wait_ms) await runtime.jobs.wait(job_id, wait_ms, signal);
 			signal?.throwIfAborted();
 			const job = runtime.jobs.get(job_id);
 			if (!job) throw unknownJob(runtime, job_id);

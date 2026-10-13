@@ -5,6 +5,7 @@ import { BackgroundJobs } from "./tools/jobs.ts";
 import type { ToolRuntime } from "./tools/runtime.ts";
 import { searchTools } from "./tools/search.ts";
 import { shellTools } from "./tools/shell.ts";
+import { webFetchTool } from "./tools/webfetch.ts";
 
 export { readText };
 
@@ -27,10 +28,11 @@ export function systemTools(env: NodeJS.ProcessEnv, cwd = process.cwd(), context
 		...fileTools(runtime),
 		...shellTools(env, runtime),
 		...searchTools(runtime.directory, env),
+		webFetchTool(runtime),
 		...jobTools(runtime),
 	];
 	const byName = new Map(tools.map((tool) => [tool.name, tool]));
-	return ["read", "bash", "edit", "write", "grep", "find", "ls", "job_output", "job_kill"].map((name) => {
+	return ["read", "bash", "edit", "write", "grep", "find", "ls", "webfetch", "job_output", "job_kill"].map((name) => {
 		const tool = byName.get(name);
 		if (!tool) throw new Error(`缺少内置工具：${name}`);
 		return tool;

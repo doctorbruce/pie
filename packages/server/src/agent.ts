@@ -18,6 +18,7 @@ import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction/utils.ts";
 import { type CompactionEvent, createCompactionStream, createCompactionTransform } from "./compaction.ts";
 import { readCompactionSettings } from "./compaction-settings.ts";
 import { loadExternalTools, parseToolIds } from "./external-tools.ts";
+import { isMcpError, McpManager } from "./mcp.ts";
 import { resolveConfiguredModelHeaders } from "./models/provider-composer.ts";
 import { createModelSettings, ModelSettingsError } from "./models/settings.ts";
 import type {
@@ -32,6 +33,7 @@ import type {
 	ToolActivity,
 } from "./protocol.ts";
 import { createSkillTools } from "./skills.ts";
+import { withToolProgress } from "./tool-progress.ts";
 import { createToolSearch } from "./tool-search.ts";
 import { BackgroundJobs } from "./tools/jobs.ts";
 import { applyPermissionPolicy, type ToolRuntime } from "./tools/runtime.ts";
@@ -61,6 +63,7 @@ function oneLineDescription(description: string, fallback: string) {
 export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 	env = Object.freeze({ ...env });
 	const settings = createModelSettings(env);
+	const mcp = new McpManager(env);
 	const catalogTools = systemTools(env);
 	const external = loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
 	const toolIds = [...catalogTools.map((tool) => tool.name), ...external.keys()];
@@ -86,6 +89,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 
 	return {
 		settings,
+		mcp,
 		toolIds,
 		composeSystemPrompt,
 		toolCatalog: [
@@ -229,13 +233,14 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				selectedNativeTools.add("job_output");
 				selectedNativeTools.add("job_kill");
 			}
-			const toolSearch = createToolSearch(
-				[
-					...tools.filter((tool) => selectedNativeTools.has(tool.name)),
-					...externalTools,
-					...skillTools.tools,
-					...(taskTool ? [taskTool] : []),
-				],
+			const availableTools = [
+				...tools.filter((tool) => selectedNativeTools.has(tool.name)),
+				...externalTools,
+				...skillTools.tools,
+				...(taskTool ? [taskTool] : []),
+			];
+			let toolSearch = createToolSearch(
+				availableTools,
 				externalTools.map((tool) => tool.name),
 			);
 			const automation = mode === "real" && realModel ? readCompactionSettings(env, realModel) : undefined;
@@ -295,9 +300,14 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 			const compactStream = compactContext
 				? createCompactionStream(realStream, compactContext, { enabled: automation?.compaction.enabled })
 				: realStream;
-			return new Agent({
+			const sessionAgent = new Agent({
 				sessionId,
-				afterToolCall: skillTools.afterToolCall,
+				afterToolCall: async (context) => {
+					const skillResult = await skillTools.afterToolCall(context);
+					return context.toolCall.name.startsWith("mcp__") && isMcpError(context.result.details)
+						? { ...skillResult, isError: true }
+						: skillResult;
+				},
 				transformContext: async (messages) => {
 					toolSearch.restore(messages);
 					return messages;
@@ -305,11 +315,11 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				initialState: {
 					model: mode === "real" && realModel ? realModel : faux.getModel(),
 					systemPrompt: composeSystemPrompt(runtime),
-					tools: toolSearch.tools,
+					tools: toolSearch.tools.map(withToolProgress),
 					messages,
 				},
 				streamFn: (model, context, options) => {
-					context = toolSearch.expose(context);
+					context = toolSearch.expose(context, runtime.language);
 					if (mode === "real") return compactStream(model, context, options);
 					const last = context.messages.at(-1);
 					const availableTools = context.tools ?? [];
@@ -357,6 +367,22 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 						]);
 					}
 					return localModels.streamSimple(model, context, options);
+				},
+			});
+			return Object.assign(sessionAgent, {
+				async prepareMcp(signal?: AbortSignal) {
+					const lease = await mcp.acquire(runtime.mcp ?? {}, context.directory, requestInteraction, signal, [
+						...availableTools.map((tool) => tool.name),
+						"tool_search",
+					]);
+					toolSearch = createToolSearch(
+						[...availableTools, ...lease.tools],
+						[...externalTools.map((tool) => tool.name), ...lease.tools.map((tool) => tool.name)],
+						lease.instructions,
+					);
+					toolSearch.restore(sessionAgent.state.messages);
+					sessionAgent.state.tools = toolSearch.tools.map(withToolProgress);
+					return lease.release;
 				},
 			});
 		},

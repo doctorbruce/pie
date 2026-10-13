@@ -58,7 +58,25 @@ export type SkillBinding = {
 };
 export type PermissionDecision = "allow" | "ask";
 export type PermissionPolicy = Record<string, PermissionDecision>;
+export type McpServerConfig =
+	| {
+			type: "local";
+			command: string[];
+			environment?: Record<string, string>;
+			cwd?: string;
+			enabled?: boolean;
+			timeout?: number;
+	  }
+	| {
+			type: "remote";
+			url: string;
+			headers?: Record<string, string>;
+			oauth?: false | { clientId?: string; clientSecret?: string; scope?: string };
+			enabled?: boolean;
+			timeout?: number;
+	  };
 export type AgentRuntimeConfig = {
+	mcp?: Record<string, McpServerConfig>;
 	systemPrompt: string;
 	language?: string;
 	toolIds: ToolId[];

@@ -6,7 +6,7 @@
 
 - Record complete provider request payloads for each session, including context compaction calls, without changing the prompt or recording authentication headers.
 
-- Add durable same-session conversation trees with upstream `/tree` navigation semantics.
+- Add durable same-session conversation trees with upstream `/tree` navigation semantics and Web branch selection.
 - Accept native message boundaries when forking sessions through Astron.
 
 - Persist per-session `modelOverride`, including explicit null, through the session API, restart, fork, and transfer.

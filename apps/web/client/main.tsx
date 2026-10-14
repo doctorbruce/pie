@@ -19,6 +19,7 @@ import type {
 	SessionForkResult,
 	SessionSnapshot,
 	SessionSummary,
+	SessionTree,
 	ToolActivity,
 } from "@pie/server/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -28,6 +29,7 @@ import { toThreadMessages, updateToolProgress } from "./messages.ts";
 import { ModelSettings } from "./model-settings.tsx";
 import { PluginSettings } from "./plugin-settings.tsx";
 import { request } from "./request.ts";
+import { SessionTreeDialog } from "./session-tree.tsx";
 import "./style.css";
 
 function Reasoning({ text }: ReasoningMessagePartProps) {
@@ -242,6 +244,7 @@ function App() {
 	const [showModelSettings, setShowModelSettings] = useState(false);
 	const [showPluginSettings, setShowPluginSettings] = useState(false);
 	const [showFork, setShowFork] = useState(false);
+	const [tree, setTree] = useState<SessionTree>();
 	const [assistantEditor, setAssistantEditor] = useState<Assistant | "new">();
 	const [replyingInteractionId, setReplyingInteractionId] = useState<string>();
 	const draftRef = useRef(new Map<string, string>());
@@ -350,6 +353,7 @@ function App() {
 		if (sessionRef.current) draftRef.current.set(sessionRef.current.id, runtime.thread.composer.getState().text);
 		runtime.thread.composer.setText(next ? (draftRef.current.get(next.id) ?? "") : "");
 		setShowFork(false);
+		setTree(undefined);
 		activate(next);
 		setShowSidebar(false);
 	}
@@ -357,6 +361,7 @@ function App() {
 	async function send(text: string) {
 		const current = sessionRef.current;
 		if (!current || !connected || pending || current.turn?.status === "running") return;
+		if (text.trim() === "/tree") return openTree();
 		setPending(true);
 		setError("");
 		try {
@@ -420,6 +425,28 @@ function App() {
 			const result = await request<SessionForkResult>(`/sessions/${current.id}/fork`, "POST", { messageIndex });
 			draftRef.current.set(result.session.id, result.selectedText);
 			switchSession(result.session);
+			await refreshSessions();
+		});
+	}
+
+	async function openTree() {
+		const current = sessionRef.current;
+		if (!current || busy) return;
+		await operate(async () => setTree(await request<SessionTree>(`/sessions/${current.id}/tree`)));
+	}
+
+	async function navigateTree(entryId: string) {
+		const current = sessionRef.current;
+		if (!current || busy) return;
+		await operate(async () => {
+			const result = await request<SessionForkResult>(`/sessions/${current.id}/tree`, "POST", { entryId });
+			accept(result.session);
+			setToolProgress(new Map());
+			if (tree?.entries.find((entry) => entry.id === entryId)?.role === "user") {
+				runtime.thread.composer.setText(result.selectedText);
+				draftRef.current.set(current.id, result.selectedText);
+			}
+			setTree(undefined);
 			await refreshSessions();
 		});
 	}
@@ -763,6 +790,9 @@ function App() {
 										</div>
 									</dl>
 									<div className="session-actions">
+										<button type="button" disabled={busy} onClick={() => void openTree()}>
+											会话树
+										</button>
 										<button
 											type="button"
 											disabled={busy || !snapshot.messages.some((message) => message.role === "user")}
@@ -862,6 +892,14 @@ function App() {
 							.then(setProviders)
 							.catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)));
 					}}
+				/>
+			)}
+			{tree && (
+				<SessionTreeDialog
+					tree={tree}
+					disabled={busy}
+					onClose={() => setTree(undefined)}
+					onSelect={(entryId) => void navigateTree(entryId)}
 				/>
 			)}
 			{showFork && snapshot && (

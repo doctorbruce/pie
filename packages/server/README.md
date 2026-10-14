@@ -37,7 +37,9 @@
 | `GET /sessions/:id/events` | 无 | SSE，第一条是当前快照，然后推送后续事件 |
 | `GET /sessions/:id/export` | 无 | 导出 canonical `SessionTransfer`；运行中的会话返回 409 |
 | `PUT /sessions/:id/import` | `SessionTransfer` | 用转储覆盖空闲会话历史并保留产品会话 ID；失败时回滚原状态 |
-| `POST /sessions/:id/fork` | `{ messageIndex, title? }` | 按上游 `/fork` 语义从指定用户消息之前创建独立根会话，返回 `{ session, selectedText }`；原会话不变 |
+| `POST /sessions/:id/fork` | `{ messageIndex, title? }` 或 `{ beforeMessageId: string \| null, title? }` | 从用户消息之前或原生消息边界创建独立根会话，返回 `{ session, selectedText }`；null 复制完整当前分支，原会话不变 |
+| `GET /sessions/:id/tree` | 无 | `{ leafId, entries: [{ id, parentId, messageId, role, text, active, selectable }] }`，含所有分支，不返回图片正文 |
+| `POST /sessions/:id/tree` | `{ entryId }` 或 `{ messageId }` | 同会话切换当前分支，返回 `{ session, selectedText }`；用户节点回退到父节点并回填文本，其他节点切换到该节点，不自动发送 |
 | `POST /sessions/:id/turns` | `{ text?, images?, assistantId?, systemPrompt?, displayText? }` | `202` + `{ sessionId, turnId }`；宿主会话在准入时读取已注册的最新 runtime，systemPrompt 是与助手提示词拼接的本轮附加系统规则 |
 | `POST /sessions/:id/steer` | `{ turnId, text?, images?, displayText? }` | `202`，将文字和图片一起追加到当前运行回合；turnId 必须匹配 |
 | `POST /sessions/:id/cancel` | `{ "turnId": "要取消的 turn" }` | `202`，请求取消；以最终 `turn.settled` 为准 |
@@ -109,7 +111,7 @@ Web 客户端的助手设置从 `GET /tools` 读取目录，勾选后新建真�
 
 首轮模型请求不包含延迟工具的完整描述和参数 schema。工具仍在执行注册表中，搜索只扫描当前 runtime 允许且尚未曝光的工具，以 BM25 对 ID、label、描述和 schema 关键词排序，支持英文词和中文二元词组。limit 默认 5，允许 1–20；没有命中不会加载其他工具。搜索不执行业务操作，命中的完整 schema 从下一次模型请求开始发送。同会话已曝光工具继续保留，不影响其他会话。
 
-加载点沿用工具结果的 `addedToolNames`，并在公开结果正文中保存 `loaded` ID 列表。每次请求在上下文压缩前从完整历史恢复；重启、runtime 重建、历史导入及 fork 只恢复保留历史中的加载点或历史调用，且始终与当前 toolIds 取交集。搜索不增加工具权限，不绕过已有确认策略。这是模型 schema 的延迟曝光，不是模块导入或工具文件复制的延迟加载；启动同步和模块加载时机不变。
+加载点沿用工具结果的 `addedToolNames`，并在公开结果正文中保存 `loaded` ID 列表。每次请求从工作历史恢复新增加载点；压缩 checkpoint 保存已曝光工具名，重启、runtime 或 MCP 重建时据此恢复，不重新加载冷正文。历史导入及 fork 从所保留的原始消息恢复加载点或历史调用；所有恢复均与当前允许的工具取交集。搜索不增加工具权限，不绕过已有确认策略。这是模型 schema 的延迟曝光，不是模块导入或工具文件复制的延迟加载；启动同步和模块加载时机不变。
 
 Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目录、进程管理器和 Core adapter：首次使用时懒启动 Pie，启动前同步其维护的工具并注入 Engine 端口，随后负责探活、停止、重启和异常恢复。当前已适配 19 个工具；Cowork 已注册 `pie` provider，并支持会话、Turn、交互、事件和跨 Core 历史同步。具体分工见 [Agent 开发文档](../../docs/agent-development.md#astron-工具文件接入)。
 
@@ -164,6 +166,8 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 ## SSE
 
+会话树沿用上游 `a4d040d30f2cb30fffbd841b3f0a7052158e2e21` 的无分支摘要导航语义。新消息追加到当前叶节点，旧分支保留在 SQLite，重启可继续切换。运行中、子会话和未闭合工具调用处不能切换；切换后仅当前路径进入模型上下文，旧压缩摘要不会跨分支复用。尚未接入上游的分支摘要生成、树标签和搜索过滤。
+
 每条 `data:` 是一个 JSON 包：
 
 ```json
@@ -192,8 +196,8 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、确认型工具交互和前台单层 Subagent；不实现 MCP、后台 Subagent 或递归派发。
 - Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_SHELL`（或平台默认的 `PI_BASH`/`PI_POWERSHELL`）、`PI_BASH_TIMEOUT_MS`、`PI_BASH_YIELD_MS` 和 `PI_RG` 配置可执行文件与超时。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
 - 事件的 `event` 字段保留 Pi 原始格式。Astron adapter 将其转换为 `CoreEvent`；其他宿主也应在 adapter 边界转换，不要将 Pi 原始结构传入产品服务。
-- 自动压缩只改变送给模型的上下文：请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片和完整历史保留。摘要支持有限退避重试；失败、取消或压缩后仍超预算时明确结束本轮，不再静默发送原上下文。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)。当前 SSE 仍推送完整快照；长历史还需要增量事件和分页。
-- 最多 32 个助手、32 个会话（含子会话）；全量加载到内存。页面保存 session ID 于 sessionStorage；服务重启后恢复历史，执行按需恢复。独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。
+- 自动压缩在 checkpoint 与原文事务提交后替换 Agent、执行 loop 和 Session 的工作历史，保留摘要、必要的当前输入和近期消息，解除冷正文引用；完整原文仍在 SQLite，摘要不成为原始消息节点。请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片保留。摘要失败、取消、提交失败或压缩后仍超预算时不裁剪工作历史，明确结束本轮。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)，正文回收见 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
+- 会话元信息保存在 `sessions`，消息以 `session_entries` 树节点唯一持久化；新增节点和叶子状态在同一事务中写入，不再整段保存 `messages`。旧 payload 在首次启动时逐会话事务迁移，保留节点 ID、分支和导入原文。启动及列表只读元信息，执行时按 checkpoint 节点边界读取工作窗口；内存树只留叶子，消息身份通过弱引用索引关联存储。完整快照、导出、fork 和树导航临时从数据库读取原文，不回填已裁剪的工作窗口。存储层提供按父指针读取的 seq 游标分页，HTTP/SSE 仍返回完整快照，读取和发送成本尚未有界；闲置 Agent 卸载和前端分页留待后续。页面保存 session ID 于 sessionStorage；独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。实现与验证见 [历史存储 SPEC](../../docs/specs/history-storage.md) 和 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
 - 模型配置为进程共享，Agent 保留创建时解析的模型调用配置。Assistant/runtime 版本变化或服务重启会重建 Agent，并用会话保存的 provider/model 选择重新解析当前端点和凭据；模型不可用时历史仍可读，提交报错。目录和 health 表示本地配置状态，不代表远端凭据有效；创建会话和保存配置均不调用模型。
 - 输入在返回 `202` 前落盘；完整消息在 message_end 落盘，流式片段不逐 token 保存。崩溃遗留的 running 标记为 failed，未匹配工具调用补入结果未知的错误，不自动重放；不保证工具副作用恰好一次。
 
@@ -261,4 +265,4 @@ Web 客户端使用提供商配置接口 `PUT /providers/config`：
 
 API key 和 headers 支持 `$VAR` / `${VAR}`，`$$` 表示字面量 `$`，`$!` 表示字面量 `!`。尚未恢复 OAuth / auth.json / 扩展注册 / 上游后台目录刷新机制；`!command` 和 `oauth` 配置明确拒绝。环境变量在服务启动时取快照。无鉴权本地兼容端点可配置占位 key `local`。自定义 Base URL 限 HTTP(S)，不要把凭据放进 URL。
 
-`src/models/model-config.ts` 的 schema、`provider-composer.ts` 的模型/compat 合成、`resolve-config-value.ts` 的模板解析、`json.ts` 来自 Pi `b2602be` 的 coding-agent，并按上述范围抽取；服务文件存储、HTTP API 和 UI 为本项目实现。原版 Agent loop 与 pi-ai 源码未改动。
+`src/models/model-config.ts` 的 schema、`provider-composer.ts` 的模型/compat 合成、`resolve-config-value.ts` 的模板解析、`json.ts` 来自 Pi `b2602be` 的 coding-agent，并按上述范围抽取；服务文件存储、HTTP API 和 UI 为本项目实现。pi-ai 源码未改动；Agent loop 仅增加请求间隙的工作历史替换支持，不引入上游 Harness。

@@ -182,6 +182,10 @@ export type Turn = {
 export type ContextCompaction = {
 	summary: string;
 	firstKeptMessage: number;
+	firstKeptEntryId?: string;
+	turnStartEntryId?: string;
+	workingMessageCount?: number;
+	loadedToolNames?: string[];
 	turnStartIndex?: number;
 	messageCount?: number;
 	details?: { readFiles: string[]; modifiedFiles: string[] };
@@ -213,6 +217,18 @@ export type SessionSnapshot = SessionSummary & {
 export type SessionForkResult = {
 	session: SessionSnapshot;
 	selectedText: string;
+};
+export type SessionTree = {
+	leafId: string | null;
+	entries: {
+		id: string;
+		parentId: string | null;
+		messageId: string;
+		role: string;
+		text: string;
+		active: boolean;
+		selectable: boolean;
+	}[];
 };
 export type TransferContentPart = { type: string; [key: string]: unknown };
 export type TransferMessage = {

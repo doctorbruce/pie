@@ -133,7 +133,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 			>,
 			compaction?: {
 				current?: ContextCompaction;
-				update: (next: ContextCompaction) => void;
+				update: (next: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => void;
 				report?: (event: CompactionEvent) => void;
 			},
 			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground">,
@@ -243,6 +243,8 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				availableTools,
 				externalTools.map((tool) => tool.name),
 			);
+			toolSearch.restoreLoaded(compaction?.current?.loadedToolNames);
+			let checkpoint = compaction?.current;
 			const automation = mode === "real" && realModel ? readCompactionSettings(env, realModel) : undefined;
 			const compactContext =
 				mode === "real" && realModel && compaction
@@ -250,7 +252,14 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 							contextWindow: realModel.contextWindow,
 							initial: compaction.current,
 							settings: automation?.compaction,
-							onCompacted: compaction.update,
+							onCompacted: (next, source, projected) => {
+								next.loadedToolNames = toolSearch.loadedToolNames;
+								compaction.update(next, source, projected);
+								checkpoint = next;
+								sessionAgent.replaceMessages(projected);
+								source.length = 0;
+								for (const message of projected) source.push(message);
+							},
 							report: compaction.report,
 							summarize: async ({ prompt, maxTokens }, signal) => {
 								const response = await retryAssistantCall(
@@ -380,6 +389,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 						[...externalTools.map((tool) => tool.name), ...lease.tools.map((tool) => tool.name)],
 						lease.instructions,
 					);
+					toolSearch.restoreLoaded(checkpoint?.loadedToolNames);
 					toolSearch.restore(sessionAgent.state.messages);
 					sessionAgent.state.tools = toolSearch.tools.map(withToolProgress);
 					return lease.release;

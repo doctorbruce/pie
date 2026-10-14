@@ -130,6 +130,12 @@ export function createToolSearch(
 	};
 	return {
 		tools: documents.length ? [...tools, search] : tools,
+		get loadedToolNames() {
+			return [...loaded];
+		},
+		restoreLoaded(names: readonly string[] = []) {
+			activate(names);
+		},
 		restore(messages: AgentMessage[]) {
 			for (const message of messages) {
 				if (message.role === "assistant") {

@@ -198,6 +198,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * ```
 	 */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
+	onContextReady?: (context: AgentContext, newMessages: AgentMessage[]) => void;
 
 	/**
 	 * Resolves an API key dynamically for each LLM call.

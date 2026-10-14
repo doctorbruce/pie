@@ -204,7 +204,20 @@ export function transferToAgentMessages(transfer: SessionTransfer): AgentMessage
 				if (first.type === "text") content[0] = { ...first, text: prefix + first.text };
 				else content.unshift({ type: "text", text: prefix });
 			}
-			messages.push({ role: "user", content, timestamp: createdAt });
+			messages.push({
+				role: "user",
+				content,
+				timestamp: createdAt,
+				...{
+					id: source.id,
+					transferMessage: structuredClone(source),
+					...Object.fromEntries(
+						["clientMessageId", "userMessageId", "triggerTaskId"].flatMap((key) =>
+							typeof source.metadata?.[key] === "string" ? [[key, source.metadata[key]]] : [],
+						),
+					),
+				},
+			});
 			continue;
 		}
 		const content: Extract<AgentMessage, { role: "assistant" }>["content"] = [];
@@ -244,6 +257,7 @@ export function transferToAgentMessages(transfer: SessionTransfer): AgentMessage
 			stopReason: agentStopReason(source.stopReason) ?? (toolResults.length ? "toolUse" : "stop"),
 			errorMessage: source.errorMessage,
 			timestamp: createdAt,
+			...{ id: source.id, transferMessage: structuredClone(source) },
 		});
 		messages.push(...toolResults);
 	}
@@ -286,6 +300,7 @@ export function agentMessagesToTransfer(messages: AgentMessage[], sessionId: str
 			const tool = tools.get(message.toolCallId);
 			if (tool) {
 				tool.state = {
+					...record(tool.state),
 					status: message.isError ? "error" : "completed",
 					input: record(record(tool.state)?.input) ?? {},
 					output: message.content
@@ -296,16 +311,19 @@ export function agentMessagesToTransfer(messages: AgentMessage[], sessionId: str
 			continue;
 		}
 		const content = canonicalContent(message);
-		if (message.role === "user" && content.length === 0) continue;
-		const canonical: TransferMessage = {
-			id: `pie:${sessionId}:${index}`,
-			role: message.role,
-			content,
-			...(message.role === "assistant"
-				? { stopReason: message.stopReason, errorMessage: message.errorMessage }
-				: {}),
-			createdAt: message.timestamp,
-		};
+		const imported = record(Reflect.get(message, "transferMessage"));
+		if (message.role === "user" && content.length === 0 && !imported) continue;
+		const canonical: TransferMessage = imported
+			? (structuredClone(imported) as TransferMessage)
+			: {
+					id: `pie:${sessionId}:${index}`,
+					role: message.role,
+					content,
+					...(message.role === "assistant"
+						? { stopReason: message.stopReason, errorMessage: message.errorMessage }
+						: {}),
+					createdAt: message.timestamp,
+				};
 		transcript.push(canonical);
 		for (const part of content) {
 			if (part.type === "tool" && typeof part.callID === "string") tools.set(part.callID, part);
@@ -315,8 +333,9 @@ export function agentMessagesToTransfer(messages: AgentMessage[], sessionId: str
 }
 
 export function exportSession(session: SavedSession): SessionTransfer {
-	const prefix = session.transferBase ?? [];
 	const prefixMessageCount = session.transferBaseMessageCount ?? 0;
+	const prefix =
+		session.transferBase ?? agentMessagesToTransfer(session.messages.slice(0, prefixMessageCount), session.id);
 	const suffix = agentMessagesToTransfer(session.messages.slice(prefixMessageCount), session.id);
 	return {
 		schemaVersion: 1,

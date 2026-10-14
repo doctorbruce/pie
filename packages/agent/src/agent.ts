@@ -202,6 +202,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	private activeContext?: AgentContext;
+	private activeMessages?: AgentMessage[];
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -259,6 +261,23 @@ export class Agent {
 	 */
 	get state(): AgentState {
 		return this._state;
+	}
+
+	replaceMessages(messages: AgentMessage[]): void {
+		if (this._state.streamingMessage || this._state.pendingToolCalls.size > 0)
+			throw new Error("Cannot replace messages while a response or tool call is in progress");
+		messages = messages.slice();
+		const retained = new Set(messages);
+		this._state.messages = messages;
+		if (this.activeContext) {
+			this.activeContext.messages.length = 0;
+			for (const message of messages) this.activeContext.messages.push(message);
+		}
+		if (this.activeMessages) {
+			const remaining = this.activeMessages.filter((message) => retained.has(message));
+			this.activeMessages.length = 0;
+			for (const message of remaining) this.activeMessages.push(message);
+		}
 	}
 
 	/** Controls how queued steering messages are drained. */
@@ -471,6 +490,10 @@ export class Agent {
 					: undefined,
 			convertToLlm: this.convertToLlm,
 			transformContext: this.transformContext,
+			onContextReady: (context, newMessages) => {
+				this.activeContext = context;
+				this.activeMessages = newMessages;
+			},
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
@@ -527,6 +550,8 @@ export class Agent {
 	}
 
 	private finishRun(): void {
+		this.activeContext = undefined;
+		this.activeMessages = undefined;
 		this._state.isStreaming = false;
 		this._state.streamingMessage = undefined;
 		this._state.pendingToolCalls = new Set<string>();

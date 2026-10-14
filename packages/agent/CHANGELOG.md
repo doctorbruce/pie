@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Add `Agent.replaceMessages()` to replace persisted working history between provider requests, releasing live loop and accumulated result references as well as state. Subsequent `agent_end.messages` contains only retained messages produced by that run.
+
 ## [0.85.1] - 2026-09-05
 
 ## [0.85.0] - 2026-09-04

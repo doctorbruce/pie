@@ -301,6 +301,8 @@ agent.state.messages.push(message);
 agent.reset();
 ```
 
+Use `agent.replaceMessages(workingMessages)` after a durable checkpoint commits, while idle or between provider requests. It replaces state and the running loop's working history and removes pruned messages from its accumulated result. After replacement, `agent_end.messages` contains only retained messages produced by that run; original message events are not replayed or retracted. Persist complete history separately before pruning. Calls during response streaming or tool execution reject. Replacing state alone does not update an already converted provider request; a stream wrapper must also replace that request's message array before sending it.
+
 ### Session and Thinking Budgets
 
 ```typescript

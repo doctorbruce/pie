@@ -16,6 +16,13 @@
 - When the user asks a question, answer it first before making edits or running implementation commands.
 - When responding to user feedback or an analysis, explicitly say whether you agree or disagree before saying what you changed.
 
+## Feature Specs
+
+- 新功能实现前，在 `docs/specs/<feature>.md` 创建或更新一份简短 SPEC，写清问题与目标、本次范围与不做的事、实现思路、验收方式。已有对应 SPEC 时直接维护同一份。
+- 开始实现时将状态改为“进行中”；实现思路或范围改变时，同步更新 SPEC，保持它与实际工作一致。
+- 每个阶段完成后，在同一份 SPEC 回填实际改动及关键文件、验证命令与结果、未完成项和相对原方案的偏差。待办或未验证内容应明确标注，验收完成后再将状态改为“已完成”。
+- SPEC 保持简短，不要求大型模板或逐行开发流水账。
+
 ## Code Quality
 
 - Read files in full before wide-ranging changes, before editing files you have not fully inspected, and when asked to investigate or audit. Do not rely on search snippets for broad changes.

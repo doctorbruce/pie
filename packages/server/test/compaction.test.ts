@@ -75,3 +75,58 @@ test("compaction does not split before a tool result", async () => {
 	assert(record);
 	assert.notEqual(messages[record.firstKeptMessage].role, "toolResult");
 });
+
+test("materialized working windows compact repeatedly without summarizing checkpoint messages", async () => {
+	let working = conversation(12);
+	const prompts: string[] = [];
+	const transform = createCompactionTransform({
+		contextWindow: 220,
+		settings: { reserveTokens: 40, keepRecentTokens: 60 },
+		summarize: async ({ prompt }) => {
+			prompts.push(prompt);
+			return `checkpoint-${prompts.length}`;
+		},
+		onCompacted: (_next, _source, projected) => {
+			working = projected;
+		},
+	});
+	await transform(working);
+	working.push(...conversation(10, 12));
+	await transform(working);
+	assert.equal(prompts.length, 2);
+	assert.match(prompts[1], /<previous-summary>\ncheckpoint-1/);
+	assert(!prompts[1].includes("<context-checkpoint>"));
+	assert(!prompts[1].includes("user-0-"));
+	assert(working.length < 10);
+});
+
+test("commit failure and cancellation leave the original working history available for retry", async () => {
+	const messages = conversation(12);
+	const original = structuredClone(messages);
+	let fail = true;
+	const generations: number[] = [];
+	const transform = createCompactionTransform({
+		contextWindow: 220,
+		summarize: async () => "checkpoint",
+		onCompacted: (next) => {
+			if (fail) throw new Error("checkpoint commit failed");
+			generations.push(next.generation);
+		},
+	});
+	await assert.rejects(transform(messages), /commit failed/);
+	assert.deepEqual(messages, original);
+	fail = false;
+	await transform(messages);
+	assert.deepEqual(generations, [1]);
+	const controller = new AbortController();
+	const cancelled = createCompactionTransform({
+		contextWindow: 220,
+		summarize: async () => {
+			controller.abort();
+			return "checkpoint";
+		},
+		onCompacted: () => assert.fail("cancelled checkpoint must not commit"),
+	});
+	await assert.rejects(cancelled(messages, controller.signal), { name: "AbortError" });
+	assert.deepEqual(messages, original);
+});

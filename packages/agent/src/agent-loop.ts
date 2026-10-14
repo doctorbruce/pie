@@ -106,6 +106,7 @@ export async function runAgentLoop(
 		...context,
 		messages: [...context.messages, ...prompts],
 	};
+	if (config.onContextReady) context.messages = currentContext.messages;
 
 	await emit({ type: "agent_start" });
 	await emit({ type: "turn_start" });
@@ -195,6 +196,7 @@ async function runLoop(
 					pendingMessages = (await config.getSteeringMessages?.()) || [];
 				}
 				await emit({ type: "turn_start" });
+				lastCompletedTurn = undefined;
 			}
 
 			// Process pending messages (inject before next assistant response)
@@ -209,6 +211,8 @@ async function runLoop(
 			}
 
 			// Stream assistant response
+			if (config.onContextReady) initialContext.messages = currentContext.messages;
+			config.onContextReady?.(currentContext, newMessages);
 			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
 			newMessages.push(message);
 

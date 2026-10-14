@@ -3,6 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { type AssistantMessageEvent, contentText } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "./agent.ts";
+import { checkpointMessage, isContextCheckpoint } from "./compaction.ts";
 import { parseToolIds, ToolConfigError } from "./external-tools.ts";
 import { McpConfigError } from "./mcp.ts";
 import { ModelSettingsError } from "./models/settings.ts";
@@ -28,6 +29,7 @@ import {
 	parseSessionTransfer,
 	transferToAgentMessages,
 } from "./session-transfer.ts";
+import { completeToolHistory, historyMessageId, type MessageTree, sessionTree, treePath } from "./session-tree.ts";
 import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./skills.ts";
 import { openStore, type SavedSession } from "./store.ts";
 import { type BackgroundJobInfo, BackgroundJobs } from "./tools/jobs.ts";
@@ -189,6 +191,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 	}
 	factory.mcp.configure([...hostRuntimes.values()].map((definition) => definition.runtime.mcp ?? {}));
 	type Session = SavedSession & {
+		historyLoaded?: boolean;
 		mcpAbort?: AbortController;
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
@@ -205,18 +208,68 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		signal?: AbortSignal;
 		onAbort?: () => void;
 	};
-	// ponytail: bounded histories are loaded into memory; add pagination/eviction for large installations.
 	const sessions = new Map<string, Session>(
 		store.sessions.map((session) => [
 			session.id,
 			{
 				...session,
+				messages: [],
+				tree: { nodes: [], leafId: session.leafId },
+				historyLoaded: false,
 				cancelRequested: false,
 				clients: new Set<ServerResponse>(),
 			},
 		]),
 	);
 	const pendingInteractions = new Map<string, PendingInteraction>();
+	const entryIds = new WeakMap<AgentMessage, string>();
+	function loadHistory(session: Session) {
+		if (session.historyLoaded !== false) return;
+		if (session.compaction && !session.compaction.firstKeptEntryId) {
+			const ids = store.readPathIds(session.id);
+			session.compaction = {
+				...session.compaction,
+				firstKeptEntryId: ids[session.compaction.firstKeptMessage],
+				turnStartEntryId:
+					session.compaction.turnStartIndex === undefined ? undefined : ids[session.compaction.turnStartIndex],
+			};
+			if (!session.compaction.firstKeptEntryId) throw new Error("压缩 checkpoint 缺少有效保留边界");
+		}
+		const tree = store.readWorkingPath(session.id, session.compaction);
+		for (const node of tree.nodes) entryIds.set(node.message, node.id);
+		session.tree = { nodes: [], leafId: tree.leafId };
+		session.messages = tree.nodes.map((node) => node.message);
+		if (session.compaction) {
+			session.messages.unshift(checkpointMessage(session.compaction));
+			session.compaction.workingMessageCount ??=
+				session.compaction.messageCount === undefined
+					? session.messages.length
+					: 1 +
+						(session.compaction.turnStartEntryId ? 1 : 0) +
+						Math.max(0, session.compaction.messageCount - session.compaction.firstKeptMessage);
+		}
+		session.historyLoaded = true;
+	}
+	function fullHistory(session: Session) {
+		return store.readPath(session.id).nodes.map((node) => node.message);
+	}
+	function historyUpdate(session: Session, messages: AgentMessage[]) {
+		const tree: MessageTree = { nodes: [], leafId: session.tree?.leafId ?? null };
+		const identities = new Map<AgentMessage, string>();
+		for (const message of messages) {
+			if (isContextCheckpoint(message)) continue;
+			const existing = entryIds.get(message);
+			if (existing) {
+				identities.set(message, existing);
+				continue;
+			}
+			const id = randomUUID();
+			tree.nodes.push({ id, parentId: tree.leafId, message });
+			tree.leafId = id;
+			identities.set(message, id);
+		}
+		return { tree, identities };
+	}
 	const globalClients = new Set<ServerResponse>();
 	let storageFailed = false;
 	let closing = false;
@@ -243,13 +296,20 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			turn: session.turn,
 		};
 	}
-	function forkSession(source: Session, messageIndex: number, requestedTitle: unknown) {
+	function forkSession(source: Session, messageIndex: number, requestedTitle: unknown, boundary = false) {
 		if (source.kind !== "root") throw new HttpError(409, "子会话不能分叉");
 		if (source.turn?.status === "running") throw new HttpError(409, "当前会话正在执行，不能分叉");
-		const messages = source.agent?.state.messages ?? source.messages;
+		const messages = fullHistory(source);
 		const selected = messages[messageIndex];
-		if (!Number.isInteger(messageIndex) || !selected || selected.role !== "user")
+		if (
+			!Number.isInteger(messageIndex) ||
+			messageIndex < 0 ||
+			messageIndex > messages.length ||
+			(!boundary && selected?.role !== "user")
+		)
 			throw new HttpError(400, "messageIndex 需要指向有效的用户消息");
+		if (!completeToolHistory(messages.slice(0, messageIndex)))
+			throw new HttpError(409, "不能在未完成的工具调用中分叉");
 		if (
 			requestedTitle !== undefined &&
 			(typeof requestedTitle !== "string" || !requestedTitle.trim() || requestedTitle.length > 100)
@@ -283,6 +343,20 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			createdAt: now,
 			updatedAt: now,
 			messages: keptMessages,
+			transferBase: source.transferBase
+				? structuredClone(
+						source.transferBase.slice(
+							0,
+							keptMessages
+								.slice(0, source.transferBaseMessageCount ?? 0)
+								.filter((message) => message.role !== "toolResult").length,
+						),
+					)
+				: undefined,
+			transferBaseMessageCount:
+				source.transferBaseMessageCount === undefined
+					? undefined
+					: Math.min(source.transferBaseMessageCount, messageIndex),
 			runtime: source.runtime ? structuredClone(source.runtime) : undefined,
 			activities: (source.activities ?? [])
 				.filter((activity) => keptToolCalls.has(activity.toolCallId))
@@ -293,27 +367,40 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		};
 		persist(forked);
 		sessions.set(id, forked);
-		return { session: snapshot(forked), selectedText: contentText(selected.content) };
+		return {
+			session: snapshot(forked),
+			selectedText: selected?.role === "user" ? contentText(selected.content) : "",
+		};
 	}
-	function persist(session: Session) {
-		if (session.agent) session.messages = session.agent.state.messages;
+	function persist(session: Session, replaceHistory = false, update?: ReturnType<typeof historyUpdate>) {
+		loadHistory(session);
+		const messages = session.agent?.state.messages ?? session.messages;
+		const { tree, identities } = update ?? historyUpdate(session, messages);
 		try {
-			store.saveSession({
-				...summary(session),
-				astronSessionId: session.astronSessionId,
-				assistant: session.assistant,
-				revision: session.revision + 1,
-				messages: session.messages,
-				runtime: session.runtime,
-				activities: session.activities,
-				compaction: session.compaction,
-				transferBase: session.transferBase,
-				transferBaseMessageCount: session.transferBaseMessageCount,
-			});
+			store.saveSession(
+				{
+					...summary(session),
+					astronSessionId: session.astronSessionId,
+					assistant: session.assistant,
+					revision: session.revision + 1,
+					messages,
+					tree,
+					runtime: session.runtime,
+					activities: session.activities,
+					compaction: session.compaction,
+					transferBase: session.transferBase,
+					transferBaseMessageCount: session.transferBaseMessageCount,
+				},
+				replaceHistory,
+			);
 		} catch (error) {
 			storageFailed = true;
 			throw error;
 		}
+		session.messages = messages;
+		session.tree = { nodes: [], leafId: tree.leafId };
+		session.transferBase = undefined;
+		for (const [message, id] of identities) entryIds.set(message, id);
 	}
 	function recordActivity(session: Session, activity: ToolActivity) {
 		if (!session.turn) throw new Error("技能记录缺少 Turn");
@@ -325,15 +412,37 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		persist(session);
 		publish(session, "activity.updated", undefined, record);
 	}
-	function updateCompaction(session: Session, next: ContextCompaction) {
+	function updateCompaction(
+		session: Session,
+		next: ContextCompaction,
+		source: AgentMessage[],
+		projected: AgentMessage[],
+	) {
+		const update = historyUpdate(session, source);
+		const ids = [
+			...store.readPathIds(session.id, session.tree?.leafId ?? null),
+			...update.tree.nodes.map((node) => node.id),
+		];
+		const firstKeptEntryId = update.identities.get(source[next.firstKeptMessage]);
+		const turnStartEntryId =
+			next.turnStartIndex === undefined ? undefined : update.identities.get(source[next.turnStartIndex]);
+		if (!firstKeptEntryId) throw new Error("压缩保留边界缺少历史节点");
+		Object.assign(next, {
+			firstKeptEntryId,
+			turnStartEntryId,
+			firstKeptMessage: ids.indexOf(firstKeptEntryId),
+			turnStartIndex: turnStartEntryId === undefined ? undefined : ids.indexOf(turnStartEntryId),
+			messageCount: ids.length,
+		});
 		const previous = session.compaction;
 		session.compaction = next;
 		try {
-			persist(session);
+			persist(session, false, update);
 		} catch (error) {
 			session.compaction = previous;
 			throw error;
 		}
+		session.messages = projected;
 		publish(session, "compaction.updated");
 	}
 	function settleInteraction(id: string, approved: boolean, error?: Error) {
@@ -420,7 +529,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				: undefined,
 			{
 				current: session.compaction,
-				update: (next) => updateCompaction(session, next),
+				update: (next, source, projected) => updateCompaction(session, next, source, projected),
 				report: (event) => publish(session, event.type, event),
 			},
 			{
@@ -453,6 +562,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		return agent;
 	}
 	function attachAgent(session: Session, prepared?: ReturnType<typeof factory.create>) {
+		loadHistory(session);
 		if (session.agent) return session.agent;
 		if (!session.runtime) {
 			if (session.runtimeSource === "host") {
@@ -495,7 +605,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		};
 	}
 	function snapshot(session: Session): SessionSnapshot {
-		const messages = session.agent?.state.messages ?? session.messages;
+		const messages = fullHistory(session);
 		return {
 			instanceId,
 			...summary(session),
@@ -518,7 +628,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 		if (!details || typeof details !== "object" || Array.isArray(details)) return result;
 		return { ...details, ...result };
 	}
-	function globalAgentEvent(session: Session, event: SessionEvent["event"]) {
+	function globalAgentEvent(event: SessionEvent["event"]) {
 		if (!event) return undefined;
 		switch (event.type) {
 			case "agent_start":
@@ -537,7 +647,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					return undefined;
 				return {
 					type: event.type,
-					messageId: `assistant:${session.id}:${session.turn?.id ?? "idle"}:${String(message.timestamp)}`,
+					messageId: historyMessageId(message as AgentMessage),
 					usage: message.usage,
 				};
 			}
@@ -546,7 +656,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				if (!("partial" in update)) return undefined;
 				const message = event.message;
 				if (!message || typeof message !== "object" || !("timestamp" in message)) return undefined;
-				const messageId = `assistant:${session.id}:${session.turn?.id ?? "idle"}:${String(message.timestamp)}`;
+				const messageId = historyMessageId(message as AgentMessage);
 				const { partial: _partial, ...assistantMessageEvent } = update;
 				if (update.type !== "toolcall_start") return { type: event.type, messageId, assistantMessageEvent };
 				const toolCall = update.partial.content[update.contentIndex];
@@ -588,7 +698,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			snapshot: snapshot(session),
 		};
 		const data = `data: ${JSON.stringify(packet)}\n\n`;
-		const projectedEvent = type === "agent.event" ? globalAgentEvent(session, event) : undefined;
+		const projectedEvent = type === "agent.event" ? globalAgentEvent(event) : undefined;
 		const globalBase = {
 			type,
 			sessionId: session.id,
@@ -1004,7 +1114,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 					(toolCallId, binding, description, prompt, options, signal) =>
 						runSubagent(session, toolCallId, binding, description, prompt, options, signal),
 					{
-						update: (next) => updateCompaction(session, next),
+						update: (next, source, projected) => updateCompaction(session, next, source, projected),
 						report: (event) => publish(session, event.type, event),
 					},
 					{
@@ -1042,7 +1152,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				return json(201, snapshot(session));
 			}
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|turns|steer|cancel|interactions|export|import|fork|model-override)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|turns|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			const session = match ? sessions.get(match[1]) : undefined;
@@ -1052,12 +1162,61 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 			if (req.method === "GET" && !action) return json(200, snapshot(session));
 			if (req.method === "GET" && action === "export") {
 				if (session.turn?.status === "running") throw new HttpError(409, "当前会话正在执行，不能导出");
-				return json(200, exportSession(session));
+				return json(200, exportSession({ ...session, messages: fullHistory(session) }));
 			}
 			if (req.method === "POST" && action === "fork") {
 				const body = await readJson(req);
+				if ("beforeMessageId" in body) {
+					const messages = fullHistory(session);
+					const index =
+						body.beforeMessageId === null
+							? messages.length
+							: messages.findIndex((message) => historyMessageId(message) === body.beforeMessageId);
+					if (index < 0) throw new HttpError(400, "分叉边界消息不存在");
+					return json(201, forkSession(session, index, body.title, true));
+				}
 				if (typeof body.messageIndex !== "number") throw new HttpError(400, "messageIndex 需要指向有效的用户消息");
 				return json(201, forkSession(session, body.messageIndex, body.title));
+			}
+			if (action === "tree" && (req.method === "GET" || req.method === "POST")) {
+				if (session.kind !== "root") throw new HttpError(409, "子会话不能切换分支");
+				if (req.method === "GET") {
+					return json(200, sessionTree(store.readTree(session.id)));
+				}
+				const body = await readJson(req);
+				if (session.turn?.status === "running") throw new HttpError(409, "当前会话正在执行，不能切换分支");
+				const tree = store.readTree(session.id);
+				const selected = tree.nodes.find((node) =>
+					"entryId" in body ? node.id === body.entryId : historyMessageId(node.message) === body.messageId,
+				);
+				if (!selected) throw new HttpError(400, "会话树节点不存在");
+				const leafId = selected.message.role === "user" ? selected.parentId : selected.id;
+				const path = treePath(tree, leafId);
+				const messages = path.map((node) => structuredClone(node.message));
+				for (const [index, message] of messages.entries()) entryIds.set(message, path[index].id);
+				if (!completeToolHistory(messages)) throw new HttpError(409, "不能切换到未完成的工具调用");
+				const previous = { ...session };
+				session.tree = { leafId, nodes: [] };
+				session.historyLoaded = true;
+				session.agent = undefined;
+				session.messages = messages;
+				session.turn = undefined;
+				session.compaction = undefined;
+				session.transferBase = undefined;
+				session.transferBaseMessageCount = undefined;
+				session.updatedAt = Date.now();
+				try {
+					persist(session);
+				} catch (error) {
+					Object.assign(session, previous);
+					throw error;
+				}
+				publish(session, "snapshot");
+				const displayed = displayAgentMessages([selected.message])[0];
+				return json(200, {
+					session: snapshot(session),
+					selectedText: selected.message.role === "user" && displayed ? contentText(displayed.content) : "",
+				});
 			}
 			if (req.method === "PUT" && action === "import") {
 				if (session.kind === "subagent") throw new HttpError(409, "子会话不能导入历史");
@@ -1066,12 +1225,14 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				const importedMessages = transferToAgentMessages(transfer);
 				const previous = {
 					agent: session.agent,
+					historyLoaded: session.historyLoaded,
 					astronSessionId: session.astronSessionId,
 					title: session.title,
 					workspacePath: session.workspacePath,
 					createdAt: session.createdAt,
 					updatedAt: session.updatedAt,
 					messages: session.messages,
+					tree: session.tree,
 					activities: session.activities,
 					compaction: session.compaction,
 					transferBase: session.transferBase,
@@ -1085,18 +1246,20 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				session.createdAt = transfer.createdAt ?? session.createdAt;
 				session.updatedAt = transfer.updatedAt ?? Date.now();
 				session.messages = importedMessages;
+				session.historyLoaded = true;
+				session.tree = undefined;
 				session.activities = [];
 				session.compaction = undefined;
 				session.transferBase = structuredClone(transfer.transcript);
 				session.transferBaseMessageCount = importedMessages.length;
 				session.modelOverride = transfer.modelOverride ?? null;
 				try {
-					persist(session);
+					persist(session, true);
 				} catch (error) {
 					Object.assign(session, previous);
 					throw error;
 				}
-				const result: SessionTransfer = exportSession(session);
+				const result: SessionTransfer = exportSession({ ...session, messages: fullHistory(session) });
 				return json(200, { session: snapshot(session), transfer: result });
 			}
 			if (req.method === "PUT" && action === "model-override") {
@@ -1217,6 +1380,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				const requestId = optionalRequestId(body);
 				const messageIdentity = optionalMessageIdentity(body);
 				const configuration = resolveTurnConfiguration(session, body);
+				loadHistory(session);
 				const oldAgent = session.agent;
 				const oldSavedMessages = session.messages;
 				const oldMessages = oldAgent?.state.messages ?? oldSavedMessages;
@@ -1278,6 +1442,7 @@ export function createCoreServer(env: NodeJS.ProcessEnv = process.env) {
 				try {
 					persist(session);
 				} catch (error) {
+					agent.state.messages = oldMessages;
 					session.agent = oldAgent;
 					session.messages = oldSavedMessages;
 					session.assistant = oldAssistant;

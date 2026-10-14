@@ -43,7 +43,7 @@ type CompactionOptions = {
 		request: CompactionSummaryRequest,
 		signal?: AbortSignal,
 	) => Promise<string | { summary: string; usage?: Usage }>;
-	onCompacted: (compaction: ContextCompaction) => void;
+	onCompacted: (compaction: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => void;
 	report?: (event: CompactionEvent) => void;
 };
 
@@ -135,13 +135,24 @@ function buildSummaryPrompt(messages: AgentMessage[], previousSummary?: string):
 	return `${conversation}\n\n<previous-summary>\n${previousSummary}\n</previous-summary>\n\n${UPDATE_INSTRUCTIONS}`;
 }
 
-function compactedContext(messages: AgentMessage[], compaction: ContextCompaction): AgentMessage[] {
-	return [
+export function isContextCheckpoint(message: AgentMessage): boolean {
+	return Reflect.get(message, "contextCheckpoint") === true;
+}
+
+export function checkpointMessage(compaction: ContextCompaction): AgentMessage {
+	return Object.assign(
 		{
-			role: "user",
+			role: "user" as const,
 			content: `<context-checkpoint>\n${compaction.summary}\n</context-checkpoint>\nContinue from this checkpoint and the recent messages below.`,
 			timestamp: compaction.compactedAt,
 		},
+		{ contextCheckpoint: true },
+	);
+}
+
+function compactedContext(messages: AgentMessage[], compaction: ContextCompaction): AgentMessage[] {
+	return [
+		checkpointMessage(compaction),
 		...(compaction.turnStartIndex === undefined ? [] : [messages[compaction.turnStartIndex]]),
 		...messages.slice(compaction.firstKeptMessage),
 	];
@@ -169,12 +180,15 @@ export function createCompactionTransform(options: CompactionOptions) {
 		budget: RequestBudget = {},
 	): Promise<AgentMessage[]> => {
 		signal?.throwIfAborted();
-		const active = current ? compactedContext(messages, current) : messages;
+		const materialized = Boolean(messages[0] && isContextCheckpoint(messages[0]));
+		const active = current && !materialized ? compactedContext(messages, current) : messages;
 		const firstUsageIndex = current
-			? current.messageCount === undefined
-				? active.findIndex((message) => message.timestamp > current!.compactedAt)
-				: (current.turnStartIndex === undefined ? 1 : 2) +
-					Math.max(0, current.messageCount - current.firstKeptMessage)
+			? materialized && current.workingMessageCount !== undefined
+				? current.workingMessageCount
+				: current.messageCount === undefined
+					? active.findIndex((message) => message.timestamp > current!.compactedAt)
+					: (current.turnStartIndex === undefined ? 1 : 2) +
+						Math.max(0, current.messageCount - current.firstKeptMessage)
 			: 0;
 		const tokensBefore = Math.max(
 			estimateContextTokens(active, firstUsageIndex < 0 ? active.length : firstUsageIndex),
@@ -184,7 +198,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 		const reason = budget.force ? "overflow" : "threshold";
 		options.report?.({ type: "compaction.started", reason });
 		try {
-			const boundary = current?.firstKeptMessage ?? 0;
+			const boundary = materialized ? 1 : (current?.firstKeptMessage ?? 0);
 			let firstKeptMessage = findFirstKeptMessage(messages, boundary, settings.keepRecentTokens);
 			if (budget.force && firstKeptMessage === undefined) {
 				for (let index = messages.length - 1; index > boundary; index--) {
@@ -197,7 +211,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 			if (firstKeptMessage === undefined)
 				throw new Error("上下文超限且没有可压缩的历史；请缩短当前输入、工具输出或附件。");
 			let turnStartIndex: number | undefined;
-			for (let index = messages.length - 1; index >= 0; index--) {
+			for (let index = messages.length - 1; index >= boundary; index--) {
 				if (messages[index].role === "user") {
 					if (index < firstKeptMessage) turnStartIndex = index;
 					break;
@@ -231,10 +245,11 @@ export function createCompactionTransform(options: CompactionOptions) {
 				usage: typeof result === "string" ? undefined : result.usage,
 			};
 			const projected = compactedContext(messages, next);
+			next.workingMessageCount = projected.length;
 			next.estimatedTokensAfter = requestTokens(projected, budget);
 			if (next.estimatedTokensAfter > threshold)
 				throw new Error("压缩后上下文仍超出预算；当前输入、工具输出或附件过大。");
-			options.onCompacted(next);
+			options.onCompacted(next, messages, projected);
 			current = next;
 			options.report?.({ type: "compaction.finished", reason, status: "completed" });
 			return projected;
@@ -260,6 +275,7 @@ export function createCompactionStream(
 		let lastMessage: AssistantMessage | undefined;
 		void (async () => {
 			let messages = await transform(context.messages, request?.signal, context);
+			context.messages = messages;
 			for (let attempt = 0; attempt < 2; attempt++) {
 				const pending: AssistantMessageEvent[] = [];
 				let visible = false;
@@ -287,6 +303,7 @@ export function createCompactionStream(
 							isRecoverableLength(lastMessage, request?.maxTokens ?? model.maxTokens))
 					) {
 						messages = await transform(context.messages, request?.signal, { ...context, force: true });
+						context.messages = messages;
 						recover = true;
 						break;
 					}

@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Pie Core · Prompt 历史</title>
+	<style>
+		:root { color-scheme: light; font-family: "Segoe UI", "Microsoft YaHei", sans-serif; color: #24312e; background: #f7f8f5; --line: #e0e5df; --muted: #65746d; --green: #255d49; }
+		* { box-sizing: border-box; }
+		body { margin: 0; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; }
+		button, input, select { font: inherit; }
+		button { border: 1px solid var(--line); border-radius: 7px; background: white; padding: 8px 12px; cursor: pointer; color: inherit; }
+		button:hover { background: #edf3ec; }
+		button:disabled { cursor: default; opacity: .5; }
+		button.primary { color: white; background: var(--green); border-color: var(--green); }
+		:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+		input, select { min-width: 0; border: 1px solid var(--line); background: white; border-radius: 7px; padding: 9px 10px; color: inherit; }
+		#requests-tools { margin: 0 0 16px; }
+		#request-select { max-width: 100%; }
+		input[type="search"] { width: 100%; }
+		label { font-size: 13px; color: var(--muted); }
+		header { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 18px; border-bottom: 1px solid var(--line); padding: 20px 26px; background: white; }
+		h1 { font-size: 20px; letter-spacing: -.5px; margin: 0 0 4px; }
+		h1 span { color: var(--muted); font-weight: 400; }
+		p { margin: 0; }
+		.small { color: var(--muted); font-size: 12px; line-height: 1.6; }
+		.actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+		.connection { flex-shrink: 0; padding: 12px 26px; border-bottom: 1px solid var(--line); background: #fafbf8; }
+		.connection summary { cursor: pointer; font-size: 13px; }
+		.settings { display: flex; align-items: end; gap: 10px; flex-wrap: wrap; padding-top: 12px; }
+		.settings label { display: grid; gap: 5px; }
+		.settings input { width: 270px; }
+		#status { flex-shrink: 0; padding: 10px 26px; font-size: 12px; border-bottom: 1px solid var(--line); min-height: 36px; overflow-wrap: anywhere; }
+		#status.error { color: #9b342d; background: #fff2ee; }
+		.layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: 0; flex: 1; }
+		aside { border-right: 1px solid var(--line); background: white; padding: 20px 14px; overflow-y: auto; }
+		.filters { display: grid; gap: 10px; margin-bottom: 16px; }
+		.filter-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+		#session-list { display: grid; gap: 6px; }
+		.session { text-align: left; border-color: transparent; padding: 12px; overflow: hidden; }
+		.session[aria-current="true"] { background: #eaf1e8; border-color: #b8cebd; }
+		.session strong { display: block; font-size: 14px; margin-bottom: 6px; overflow-wrap: anywhere; }
+		.session .small { display: block; }
+		main { padding: 26px 32px; min-width: 0; overflow-y: auto; }
+		.empty { max-width: 530px; margin: 90px auto; text-align: center; }
+		.empty h2 { font-size: 22px; font-weight: 500; margin: 0 0 10px; }
+		h2 { margin: 0; font-size: 22px; overflow-wrap: anywhere; }
+		#metadata { margin-top: 8px; overflow-wrap: anywhere; }
+		.notice { margin-top: 18px; padding: 12px 14px; background: #f0f2e9; border: 1px solid #e1e5d5; border-radius: 8px; font-size: 12px; line-height: 1.7; color: #586349; }
+		.tabs { display: flex; flex-wrap: wrap; gap: 5px; margin: 22px 0 16px; }
+		.tabs button[aria-pressed="true"] { background: var(--green); border-color: var(--green); color: white; }
+		.content-tools { display: flex; gap: 10px; align-items: center; margin-bottom: 20px; }
+		.content-tools input { flex: 1; }
+		#result-count { white-space: nowrap; }
+		#content { display: grid; gap: 14px; }
+		.card { background: white; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+		.card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; background: #fcfdfb; border-bottom: 1px solid var(--line); padding: 10px 16px; }
+		.card-head strong { font-size: 12px; color: var(--green); }
+		.card-head button { padding: 4px 9px; font-size: 12px; }
+		pre { margin: 0; padding: 18px; white-space: pre-wrap; overflow-wrap: anywhere; font: 13px/1.8 Consolas, "Microsoft YaHei", monospace; tab-size: 2; }
+		.part + .part { border-top: 1px dashed var(--line); }
+		.part-label { color: var(--muted); font-size: 11px; padding: 12px 18px 0; }
+		.part-label + pre { padding-top: 6px; }
+		.image-note { padding: 14px 18px; font-size: 12px; color: var(--muted); }
+		details.raw { border-top: 1px solid var(--line); padding: 10px 16px; font-size: 12px; color: var(--muted); }
+		details.raw pre { padding: 12px 0 0; color: #24312e; }
+		[hidden] { display: none !important; }
+		@media (max-width: 760px) { body { height: auto; overflow: auto; } header { padding: 16px; align-items: start; flex-direction: column; } .connection, #status { padding-left: 16px; padding-right: 16px; } .layout { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid var(--line); } #session-list { max-height: 230px; overflow-y: auto; } main { padding: 22px 16px; } .settings input { width: min(270px, 80vw); } }
+	</style>
+</head>
+<body>
+	<header>
+		<div><h1>Pie Core <span>/ Prompt 历史</span></h1><p class="small">本地只读查看器 · 不调用模型 · 不修改会话</p></div>
+		<div class="actions">
+			<button id="refresh" type="button">刷新历史</button>
+			<button id="import" type="button">导入 JSON</button>
+			<button id="export" type="button" disabled>导出当前会话</button>
+			<input id="file" type="file" accept=".json,application/json" multiple hidden>
+		</div>
+	</header>
+	<details class="connection" id="connection">
+		<summary id="source">数据源：尚未连接</summary>
+		<div class="settings">
+			<label>Core 地址（留空自动发现）<input id="core-url" type="url" placeholder="http://127.0.0.1:4318" autocomplete="off"></label>
+			<label>访问令牌（可选，不保存）<input id="token" type="password" autocomplete="off" placeholder="PI_SERVER_TOKEN"></label>
+			<button id="connect" class="primary" type="button">连接</button>
+			<p class="small">在线连接请通过 npm run prompts 启动。直接打开此 HTML 可导入以前导出的 JSON。</p>
+		</div>
+	</details>
+	<div id="status" role="status" aria-live="polite">正在读取会话…</div>
+	<div class="layout">
+		<aside aria-label="历史会话">
+			<div class="filters">
+				<label for="session-search">搜索会话标题 / ID / 助手</label>
+				<input id="session-search" type="search" placeholder="搜索历史会话…">
+				<div class="filter-row"><span id="session-count" class="small">0 个会话</span><label><input id="subagents" type="checkbox"> 显示子会话</label></div>
+			</div>
+			<nav id="session-list" aria-label="选择会话"></nav>
+		</aside>
+		<main>
+			<div id="empty" class="empty"><h2>选择一个历史会话</h2><p class="small">查看实际模型请求、用户 prompt 和消息上下文。<br>也可导入请求或会话 JSON，离线查阅。</p></div>
+			<section id="detail" hidden aria-label="会话详情">
+				<h2 id="title"></h2><p id="metadata" class="small"></p>
+				<div class="notice" id="notice"></div>
+				<div class="tabs" role="group" aria-label="查看内容">
+					<button type="button" data-tab="requests" aria-pressed="true">实际模型请求</button>
+					<button type="button" data-tab="user" aria-pressed="false">用户 Prompt</button>
+					<button type="button" data-tab="system" aria-pressed="false">已保存系统指令</button>
+					<button type="button" data-tab="all" aria-pressed="false">完整消息</button>
+					<button type="button" data-tab="json" aria-pressed="false">会话 JSON</button>
+				</div>
+				<div id="requests-tools" class="actions" hidden>
+					<label for="request-select">选择模型调用</label><select id="request-select" aria-label="选择模型调用"></select>
+					<button id="request-export" type="button" disabled>导出本次完整请求</button>
+				</div>
+				<div class="content-tools"><input id="prompt-search" type="search" aria-label="筛选当前内容" placeholder="筛选当前内容…"><span class="small" id="result-count"></span></div>
+				<div id="content"></div>
+			</section>
+		</main>
+	</div>
+	<script>
+		const element = (id) => document.getElementById(id);
+		const state = { sessions: [], current: undefined, tab: "requests", imported: new Map(), offline: location.protocol === "file:", request: 0, loading: false, traces: [], currentTrace: undefined, traceRequest: 0, traceLoading: false, traceError: "" };
+		const date = (value) => Number.isFinite(value) ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "时间未知";
+		const text = (value) => typeof value === "string" ? value : JSON.stringify(value, null, 2) ?? "";
+		function status(message, error = false) {
+			element("status").textContent = message;
+			element("status").classList.toggle("error", error);
+		}
+		function make(tag, value, className) {
+			const node = document.createElement(tag);
+			if (value !== undefined) node.textContent = value;
+			if (className) node.className = className;
+			return node;
+		}
+		async function api(path) {
+			const url = new URL(path, location.href);
+			if (element("core-url").value.trim()) url.searchParams.set("core", element("core-url").value.trim());
+			const response = await fetch(url, { headers: element("token").value ? { "X-Pie-Token": element("token").value } : {}, signal: AbortSignal.timeout(15000) });
+			const body = await response.json();
+			if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+			return body;
+		}
+		function renderSessions() {
+			const query = element("session-search").value.toLowerCase();
+			const sessions = state.sessions.filter((session) => (element("subagents").checked || session.kind !== "subagent") && [session.title, session.id, session.assistantId].join(" ").toLowerCase().includes(query));
+			element("session-count").textContent = `${sessions.length} / ${state.sessions.length} 个会话`;
+			const buttons = sessions.map((session) => {
+				const button = make("button", undefined, "session");
+				button.type = "button";
+				button.setAttribute("aria-current", String(state.current?.id === session.id));
+				button.append(make("strong", session.title || "未命名会话"), make("span", `${session.kind === "subagent" ? "子会话 · " : ""}${date(session.updatedAt)}`, "small"), make("span", session.assistantId || session.id, "small"));
+				button.addEventListener("click", () => selectSession(session.id));
+				return button;
+			});
+			element("session-list").replaceChildren(...buttons);
+			if (!sessions.length) element("session-list").append(make("p", "没有匹配的历史会话。", "small"));
+		}
+		function clearDetail() {
+			state.current = undefined;
+			state.traces = [];
+			state.currentTrace = undefined;
+			state.traceError = "";
+			state.traceLoading = false;
+			++state.traceRequest;
+			element("request-select").replaceChildren();
+			element("request-export").disabled = true;
+			element("detail").hidden = true;
+			element("empty").hidden = false;
+			element("export").disabled = true;
+			element("content").replaceChildren();
+		}
+		async function selectSession(id) {
+			const request = ++state.request;
+			clearDetail();
+			renderSessions();
+			status("正在读取会话…");
+			try {
+				const session = state.offline ? state.imported.get(id) : await api(`/api/sessions/${encodeURIComponent(id)}`);
+				if (request !== state.request) return;
+				if (!session || !Array.isArray(session.messages)) throw new Error("会话缺少 messages，无法展示 prompt");
+				state.current = session;
+				element("detail").hidden = false;
+				element("empty").hidden = true;
+				element("export").disabled = false;
+				element("title").textContent = session.title || "未命名会话";
+				element("metadata").textContent = [session.id, session.provider, session.model, `更新 ${date(session.updatedAt)}`, session.workspacePath].filter(Boolean).join(" · ");
+				renderSessions();
+				renderContent();
+				await loadRequests(session, request);
+				if (request === state.request) status(`已读取 ${session.messages.length} 条会话消息 · ${state.traces.length} 次模型调用记录 · 只读`);
+			} catch (error) {
+				if (request === state.request) status(error.message, true);
+			}
+		}
+		async function loadRequests(session, request) {
+			state.traceLoading = true;
+			renderContent();
+			try {
+				const body = state.offline ? { requests: (session.modelRequests || []).map((record) => ({ id: record.id, createdAt: record.createdAt, bytes: new Blob([text(record)]).size })) } : await api(`/api/sessions/${encodeURIComponent(session.id)}/requests`);
+				if (request !== state.request) return;
+				if (!Array.isArray(body.requests)) throw new Error("请求记录列表无效");
+				state.traces = body.requests;
+				element("request-select").replaceChildren(...state.traces.map((record, index) => {
+					const option = make("option", `请求 #${index + 1} · ${date(record.createdAt)} · ${(record.bytes / 1024).toFixed(1)} KiB`);
+					option.value = record.id;
+					return option;
+				}));
+				const latest = state.traces.at(-1);
+				if (latest) { element("request-select").value = latest.id; await selectRequest(latest.id); }
+			} catch (error) { if (request === state.request) state.traceError = error.message; }
+			finally { if (request === state.request) { state.traceLoading = false; renderContent(); } }
+		}
+		async function selectRequest(id) {
+			const request = ++state.traceRequest;
+			const session = state.current;
+			state.currentTrace = undefined;
+			state.traceError = "";
+			state.traceLoading = true;
+			renderContent();
+			try {
+				const record = state.offline ? session.modelRequests?.find((item) => item.id === id) : await api(`/api/sessions/${encodeURIComponent(session.id)}/requests/${encodeURIComponent(id)}`);
+				if (request !== state.traceRequest || session !== state.current) return;
+				if (!record || record.sessionId !== session.id || record.id !== id || !Object.hasOwn(record, "payload")) throw new Error("请求记录身份或内容不匹配");
+				state.currentTrace = record;
+			} catch (error) { if (request === state.traceRequest && session === state.current) state.traceError = error.message; }
+			finally { if (request === state.traceRequest && session === state.current) { state.traceLoading = false; renderContent(); } }
+		}
+		async function copy(value, button) {
+			try {
+				await navigator.clipboard.writeText(value);
+				button.textContent = "已复制";
+				setTimeout(() => { button.textContent = "复制"; }, 1500);
+			} catch { status("浏览器拒绝剪贴板访问，请选中文本后手动复制。", true); }
+		}
+		function card(title, value, time) {
+			const article = make("article", undefined, "card");
+			const head = make("div", undefined, "card-head");
+			const button = make("button", "复制");
+			button.type = "button";
+			button.addEventListener("click", () => copy(value, button));
+			head.append(make("strong", title), make("span", time ? date(time) : "", "small"), button);
+			article.append(head);
+			return article;
+		}
+		function renderContent() {
+			const session = state.current;
+			if (!session) return;
+			for (const button of document.querySelectorAll("[data-tab]")) button.setAttribute("aria-pressed", String(button.dataset.tab === state.tab));
+			element("requests-tools").hidden = state.tab !== "requests";
+			element("notice").textContent = state.tab === "requests"
+				? "这里展示提供商适配器交给模型 SDK 发送前保存的最终请求参数，不是根据会话重建的 prompt 或原始 HTTP 报文。含指令、消息、当时的工具定义和请求参数；不含认证头或代理随后附加的计费字段。发送前记录不代表服务端已收到，也不重复列出 SDK 内部使用相同请求体的网络重试。"
+				: "这里展示持久化的会话消息与最近保存的运行配置，不是逐次模型请求。要看完整发送内容，请切换到「实际模型请求」。";
+			const query = element("prompt-search").value.toLowerCase();
+			const cards = [];
+			if (state.tab === "requests") {
+				element("request-export").disabled = !state.currentTrace;
+				element("request-select").disabled = !state.traces.length;
+				element("result-count").textContent = `${state.traces.length} 次调用`;
+				element("content").replaceChildren();
+				if (state.traceLoading) return element("content").append(make("p", "正在读取完整模型请求…", "small"));
+				if (state.traceError) return element("content").append(make("p", `无法读取请求记录：${state.traceError}`, "notice"));
+				if (!state.currentTrace) return element("content").append(make("p", "此会话尚无完整模型请求记录。升级启用记录的 Pie Core 后，新调用才会保存；旧请求不会用历史消息拼接补造。也可以导入以前导出的完整请求 JSON。", "notice"));
+				const record = state.currentTrace;
+				const payload = text(record.payload);
+				if (!payload.toLowerCase().includes(query)) return element("content").append(make("p", "本次请求没有匹配内容。", "small"));
+				const index = state.traces.findIndex((item) => item.id === record.id);
+				const article = card(`请求 #${index + 1} · ${record.purpose === "compaction" ? "上下文压缩" : "对话"} · ${record.provider || ""} / ${record.model || ""} · ${record.api || ""}`, payload, record.createdAt);
+				article.append(make("pre", payload));
+				return element("content").append(article);
+			}
+			if (state.tab === "system" || state.tab === "json") {
+				const blocks = state.tab === "json" ? [["已保存会话 JSON", text(session)]] : [
+					["已保存 systemPrompt", session.runtime?.systemPrompt ?? session.assistant?.systemPrompt ?? "此会话未保存系统指令。"],
+					...(session.compaction ? [["上下文压缩摘要", session.compaction.summary]] : []),
+					["已保存技能与工具配置（不是发送给模型的工具定义）", text({ toolIds: session.runtime?.toolIds, skills: Array.isArray(session.runtime?.skills) ? session.runtime.skills.filter((skill) => skill && typeof skill === "object").map(({ id, name, description }) => ({ id, name, description })) : [] })],
+				];
+				for (const [title, value] of blocks) {
+					if (!text(value).toLowerCase().includes(query)) continue;
+					const article = card(title, text(value));
+					article.append(make("pre", text(value)));
+					cards.push(article);
+				}
+			} else {
+				let promptNumber = 0;
+				for (const [index, message] of session.messages.entries()) {
+					if (message.role === "user") promptNumber++;
+					if (state.tab === "user" && message.role !== "user") continue;
+					if (!text(message).toLowerCase().includes(query)) continue;
+					const parts = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content : [];
+					const content = parts.map((part) => part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : part.type === "image" ? `[图片附件 · ${part.mimeType || "未知格式"}]` : text(part)).join("\n\n");
+					const role = message.role === "user" ? `USER · Prompt ${String(promptNumber).padStart(2, "0")}` : message.role === "toolResult" ? `TOOL RESULT · ${message.toolName || ""}` : message.role.toUpperCase();
+					const article = card(`${role} · 消息 #${index + 1}`, content, message.timestamp);
+					for (const part of parts) {
+						const block = make("div", undefined, "part");
+						if (part.type === "image") block.append(make("p", `[图片附件 · ${part.mimeType || "未知格式"}，原始数据保留在 JSON 中]`, "image-note"));
+						else {
+							if (part.type !== "text") block.append(make("div", part.type === "thinking" ? "THINKING" : part.type === "toolCall" ? `TOOL CALL · ${part.name}` : part.type, "part-label"));
+							block.append(make("pre", part.type === "text" ? part.text : part.type === "thinking" ? part.thinking : text(part)));
+						}
+						article.append(block);
+					}
+					const raw = make("details", undefined, "raw");
+					raw.append(make("summary", "原始消息 JSON"));
+					raw.addEventListener("toggle", () => { if (raw.open && raw.childElementCount === 1) raw.append(make("pre", text(message))); });
+					article.append(raw);
+					cards.push(article);
+				}
+			}
+			element("result-count").textContent = `${cards.length} 项`;
+			element("content").replaceChildren(...cards);
+			if (!cards.length) element("content").append(make("p", "没有匹配内容。", "small"));
+		}
+		async function refresh() {
+			if (state.loading) return;
+			if (state.offline) { renderSessions(); return status("离线模式：点击导入 JSON 载入历史会话；在线模式请通过 npm run prompts 启动。"); }
+			state.loading = true;
+			for (const id of ["refresh", "connect", "import"]) element(id).disabled = true;
+			const previous = state.current?.id;
+			const request = ++state.request;
+			clearDetail();
+			state.sessions = [];
+			renderSessions();
+			status("正在刷新历史…");
+			try {
+				const source = await api("/api/source");
+				if (request !== state.request) return;
+				element("source").textContent = source.mode === "database" ? `只读数据库：${source.path}` : `在线 Core：${source.url}`;
+				const body = await api("/api/sessions");
+				if (request !== state.request) return;
+				if (!Array.isArray(body.sessions)) throw new Error("Core 未返回会话列表");
+				state.sessions = body.sessions;
+				renderSessions();
+				status(`已加载 ${state.sessions.length} 个会话 · 选择会话查看实际模型请求`);
+				if (previous && state.sessions.some((session) => session.id === previous)) await selectSession(previous);
+			} catch (error) { if (request === state.request) { status(error.message, true); element("connection").open = true; } }
+			finally { state.loading = false; for (const id of ["refresh", "connect", "import"]) element(id).disabled = false; }
+		}
+		element("session-search").addEventListener("input", renderSessions);
+		element("subagents").addEventListener("change", renderSessions);
+		element("prompt-search").addEventListener("input", renderContent);
+		element("request-select").addEventListener("change", () => { if (state.current) selectRequest(element("request-select").value); });
+		for (const button of document.querySelectorAll("[data-tab]")) button.addEventListener("click", () => { state.tab = button.dataset.tab; element("prompt-search").value = ""; renderContent(); });
+		element("refresh").addEventListener("click", refresh);
+		element("connect").addEventListener("click", () => {
+			if (location.protocol === "file:") return status("直接打开 HTML 仅支持离线导入。请运行 npm run prompts 后访问本地查看器。", true);
+			state.offline = false;
+			refresh();
+		});
+		element("import").addEventListener("click", () => element("file").click());
+		element("file").addEventListener("change", async () => {
+			const request = ++state.request;
+			try {
+				const imported = new Map(state.offline ? state.imported : []);
+				for (const file of element("file").files) {
+					const body = JSON.parse(await file.text());
+					const sessions = Array.isArray(body) ? body : Array.isArray(body?.sessions) ? body.sessions : [body];
+					for (const item of sessions) {
+						const session = item?.schemaVersion === 1 && typeof item.sessionId === "string" && Object.hasOwn(item, "payload")
+							? { id: item.sessionId, title: `模型请求 · ${item.sessionId}`, updatedAt: item.createdAt, messages: [], modelRequests: [item] }
+							: item;
+						if (!session || typeof session.id !== "string" || !Array.isArray(session.messages) || session.messages.some((message) => !message || typeof message.role !== "string" || !(typeof message.content === "string" || Array.isArray(message.content)) || (Array.isArray(message.content) && message.content.some((part) => !part || typeof part.type !== "string")))) throw new Error(`${file.name} 不是含有 id 和 messages 的会话快照。请导入本查看器导出的 JSON，不支持 /export 的跨 Core 传输格式。`);
+						if (session.modelRequests !== undefined && (!Array.isArray(session.modelRequests) || session.modelRequests.some((record) => !record || record.schemaVersion !== 1 || typeof record.id !== "string" || record.sessionId !== session.id || !Object.hasOwn(record, "payload")))) throw new Error(`${file.name} 的模型请求记录格式或会话身份不匹配。`);
+						const previous = imported.get(session.id);
+						const modelRequests = [...new Map([...(previous?.modelRequests || []), ...(session.modelRequests || [])].map((record) => [record.id, record])).values()].sort((first, second) => first.createdAt - second.createdAt);
+						imported.set(session.id, { ...(previous && !session.messages.length ? previous : session), modelRequests });
+					}
+				}
+				if (!imported.size || request !== state.request) return;
+				state.offline = true;
+				state.imported = imported;
+				state.sessions = [...imported.values()].sort((first, second) => (second.updatedAt || 0) - (first.updatedAt || 0));
+				clearDetail();
+				element("source").textContent = `离线 JSON · ${imported.size} 个会话（仅保留在内存）`;
+				renderSessions();
+				await selectSession(state.sessions[0].id);
+			} catch (error) { if (request === state.request) status(error.message, true); }
+			finally { element("file").value = ""; }
+		});
+		function downloadJSON(value, name) {
+			const url = URL.createObjectURL(new Blob([text(value)], { type: "application/json" }));
+			const link = make("a");
+			link.href = url;
+			link.download = name;
+			link.click();
+			setTimeout(() => URL.revokeObjectURL(url), 1000);
+		}
+		element("request-export").addEventListener("click", () => {
+			if (!state.currentTrace) return;
+			downloadJSON(state.currentTrace, `pie-request-${state.currentTrace.id.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`);
+			status("已导出本次完整模型请求。文件包含私有输入、历史消息和工具参数，请妥善保管。");
+		});
+		element("export").addEventListener("click", () => {
+			if (!state.current) return;
+			downloadJSON(state.current, `pie-session-${state.current.id.replace(/[^a-zA-Z0-9_-]/g, "_")}.json`);
+			status("已导出。JSON 包含私有会话和运行配置，请妥善保管。");
+		});
+		refresh();
+	</script>
+</body>
+</html>

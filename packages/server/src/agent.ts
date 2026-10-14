@@ -19,6 +19,7 @@ import { type CompactionEvent, createCompactionStream, createCompactionTransform
 import { readCompactionSettings } from "./compaction-settings.ts";
 import { loadExternalTools, parseToolIds } from "./external-tools.ts";
 import { isMcpError, McpManager } from "./mcp.ts";
+import { createModelRequestRecorder } from "./model-requests.ts";
 import { resolveConfiguredModelHeaders } from "./models/provider-composer.ts";
 import { createModelSettings, ModelSettingsError } from "./models/settings.ts";
 import type {
@@ -62,6 +63,7 @@ function oneLineDescription(description: string, fallback: string) {
 
 export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 	env = Object.freeze({ ...env });
+	const recordModelRequest = createModelRequestRecorder(env);
 	const settings = createModelSettings(env);
 	const mcp = new McpManager(env);
 	const catalogTools = systemTools(env);
@@ -276,6 +278,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 												cacheRetention: "none",
 												sessionId: `compaction:${sessionId}`,
 												headers: modelHeaders,
+												onPayload: recordModelRequest(sessionId, "compaction"),
 												maxRetries: 0,
 											},
 										),
@@ -305,6 +308,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				models.streamSimple(model, context, {
 					...options,
 					headers: { ...options?.headers, ...modelHeaders },
+					onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
 				});
 			const compactStream = compactContext
 				? createCompactionStream(realStream, compactContext, { enabled: automation?.compaction.enabled })

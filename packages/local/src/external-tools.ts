@@ -1,32 +1,8 @@
 import { existsSync, readdirSync } from "node:fs";
 import { createRequire } from "node:module";
 import { basename, extname, join, resolve } from "node:path";
-import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { Type } from "@earendil-works/pi-ai";
-import type { InteractionRequest } from "./protocol.ts";
 
-export class ToolConfigError extends Error {}
-
-export type ToolContext = {
-	readonly sessionId: string;
-	readonly directory: string;
-	readonly env: Readonly<NodeJS.ProcessEnv>;
-	readonly Type: typeof Type;
-	readonly ask: (request: Omit<InteractionRequest, "id">, signal?: AbortSignal) => Promise<void>;
-};
-export type ExternalTool = AgentTool & { exposure?: "default" | "deferred" };
-export type ToolFactory = (context: ToolContext) => ExternalTool;
-
-export function parseToolIds(value: unknown, available: readonly string[]): string[] {
-	if (
-		!Array.isArray(value) ||
-		value.length > 128 ||
-		value.some((id) => typeof id !== "string" || !available.includes(id)) ||
-		new Set(value).size !== value.length
-	)
-		throw new ToolConfigError("toolIds 必须为不重复的已注册工具 ID，最多 128 项");
-	return [...value] as string[];
-}
+import { ToolConfigError, type ToolFactory } from "@pie/runtime/tools";
 
 // Modules are trusted host code. Native require supports synchronous ESM and strip-only TS.
 const requireTool = createRequire(process.execPath);

@@ -13,22 +13,13 @@ import {
 	fauxToolCall,
 	Type,
 } from "@earendil-works/pi-ai";
+import { type AgentFactoryOptions, ModelSettingsError } from "./capabilities.ts";
 import { retryAssistantCall } from "./compaction/retry.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction/utils.ts";
 import { type CompactionEvent, createCompactionStream, createCompactionTransform } from "./compaction.ts";
-import { readCompactionSettings } from "./compaction-settings.ts";
-import {
-	type ExternalTool,
-	loadExternalTools,
-	parseToolIds,
-	ToolConfigError,
-	type ToolContext,
-	type ToolFactory,
-} from "./external-tools.ts";
-import { isMcpError, McpManager } from "./mcp.ts";
-import { createModelRequestRecorder } from "./model-requests.ts";
-import { resolveConfiguredModelHeaders } from "./models/provider-composer.ts";
-import { createModelSettings, ModelSettingsError } from "./models/settings.ts";
+import { resolveCompactionSettings } from "./compaction-settings.ts";
+import { BackgroundJobs } from "./jobs.ts";
+import { isMcpError } from "./mcp.ts";
 import type {
 	ContextCompaction,
 	InteractionRequest,
@@ -39,14 +30,10 @@ import type {
 	SkillBinding,
 	SubagentBinding,
 	ToolActivity,
-	ToolInfo,
 } from "./protocol.ts";
-import { createSkillTools } from "./skills.ts";
 import { withToolProgress } from "./tool-progress.ts";
 import { createToolSearch } from "./tool-search.ts";
-import { BackgroundJobs } from "./tools/jobs.ts";
-import { applyPermissionPolicy, type ToolRuntime } from "./tools/runtime.ts";
-import { systemTools } from "./tools.ts";
+import { applyPermissionPolicy, parseToolIds, ToolConfigError, type ToolRuntime } from "./tools.ts";
 
 const SKILL_DESCRIPTION_LIMIT = 160;
 
@@ -69,32 +56,10 @@ function oneLineDescription(description: string, fallback: string) {
 	return summary || fallback;
 }
 
-export type AgentFactoryOptions = {
-	models?: Pick<ReturnType<typeof createModelSettings>, "current">;
-	tools?: {
-		catalog: readonly ToolInfo[];
-		create: (context: ToolContext & ToolRuntime) => ExternalTool[];
-	};
-	skills?: typeof createSkillTools;
-	mcp?: Pick<McpManager, "acquire" | "configure" | "status" | "close">;
-	recordModelRequest?: ReturnType<typeof createModelRequestRecorder>;
-};
-
-export function createAgentFactory(env: NodeJS.ProcessEnv = process.env, options: AgentFactoryOptions = {}) {
-	env = Object.freeze({ ...env });
-	const recordModelRequest = options.recordModelRequest ?? createModelRequestRecorder(env);
-	const settings = options.models ?? createModelSettings(env);
-	const mcp = options.mcp ?? new McpManager(env);
-	const catalogTools = options.tools ? [] : systemTools(env);
-	const external = options.tools
-		? new Map<string, ToolFactory>()
-		: loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
-	const toolCatalog = options.tools
-		? structuredClone([...options.tools.catalog])
-		: [
-				...catalogTools.map((tool) => ({ id: tool.name, label: tool.label })),
-				...[...external.keys()].map((id: string) => ({ id, label: id })),
-			];
+export function createAgentFactory(options: AgentFactoryOptions) {
+	const env = Object.freeze({ ...options.env });
+	const { recordModelRequest, models: settings, mcp } = options;
+	const toolCatalog = structuredClone([...options.tools.catalog]);
 	const toolIds = toolCatalog.map((tool) => tool.id);
 	if (new Set(toolIds).size !== toolIds.length || toolIds.some((id) => ["skill", "task", "tool_search"].includes(id)))
 		throw new ToolConfigError("工具 ID 重复或使用了保留名称");
@@ -128,7 +93,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env, options
 			return {
 				protocolVersion: 1,
 				coreId: "pie",
-				persistence: "sqlite",
+				persistence: "injected",
 				realModel: settings.current.selected,
 				realModelError: settings.current.selected ? undefined : "请在模型设置中配置并选择真实模型。",
 			};
@@ -178,14 +143,10 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env, options
 				jobs: native?.jobs ?? new BackgroundJobs(),
 				notifyBackground: native?.notifyBackground,
 			});
-			const tools = options.tools ? options.tools.create(context) : systemTools(env, context.directory, context);
-			if (options.tools && tools.some((tool) => !toolIds.includes(tool.name)))
+			const tools = options.tools.create(context, runtime.toolIds);
+			if (tools.some((tool) => !toolIds.includes(tool.name)))
 				throw new ToolConfigError("工具实现未在 catalog 中注册");
-			const externalTools = runtime.toolIds.flatMap((id) => {
-				const create = external.get(id);
-				return create ? [create(context)] : [];
-			});
-			const skillTools = (options.skills ?? createSkillTools)(runtime, record);
+			const skillTools = options.skills(runtime, record);
 			const taskParameters = Type.Object(
 				{
 					description: Type.String({ description: "Short description of the delegated task" }),
@@ -247,17 +208,14 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env, options
 							},
 						}
 					: undefined;
-			const { models, config, env: modelEnv, selected: defaultModel } = settings.current;
+			const { models, headers, selected: defaultModel } = settings.current;
 			const choice = selected ?? defaultModel;
 			const realModel = choice ? models.getModel(choice.provider, choice.id) : undefined;
 			if (mode === "real" && !realModel) throw new ModelSettingsError("请先配置并选择有效模型");
 			const faux = fauxProvider({ tokensPerSecond: 45, tokenSize: { min: 1, max: 2 } });
 			const localModels = createModels();
 			localModels.setProvider(faux.provider);
-			const modelHeaders =
-				mode === "real" && realModel
-					? resolveConfiguredModelHeaders(realModel, config.providers[realModel.provider], modelEnv)
-					: undefined;
+			const modelHeaders = mode === "real" && realModel ? headers?.(realModel) : undefined;
 			const selectedNativeTools = new Set(runtime.toolIds);
 			if (taskTool || selectedNativeTools.has("bash")) {
 				selectedNativeTools.add("job_output");
@@ -265,18 +223,19 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env, options
 			}
 			const availableTools = [
 				...tools.filter((tool) => selectedNativeTools.has(tool.name)),
-				...externalTools,
 				...skillTools.tools,
 				...(taskTool ? [taskTool] : []),
 			];
 			const deferredToolNames = [
-				...externalTools.map((tool) => tool.name),
 				...tools.filter((tool) => "exposure" in tool && tool.exposure === "deferred").map((tool) => tool.name),
 			];
 			let toolSearch = createToolSearch(availableTools, deferredToolNames);
 			toolSearch.restoreLoaded(compaction?.current?.loadedToolNames);
 			let checkpoint = compaction?.current;
-			const automation = mode === "real" && realModel ? readCompactionSettings(env, realModel) : undefined;
+			const automation =
+				mode === "real" && realModel
+					? (options.compactionSettings?.(realModel) ?? resolveCompactionSettings({}, realModel))
+					: undefined;
 			const compactContext =
 				mode === "real" && realModel && compaction
 					? createCompactionTransform({

@@ -5,17 +5,17 @@ import { tmpdir } from "node:os";
 import { basename, dirname } from "node:path";
 import { type TestContext, test } from "node:test";
 import { fauxToolCall, validateToolArguments } from "@earendil-works/pi-ai";
-import { BackgroundJobs } from "../src/tools/jobs.ts";
-import type { ToolRuntime } from "../src/tools/runtime.ts";
-import { MAX_BYTES } from "../src/tools/shared.ts";
+import { BackgroundJobs } from "@pie/runtime/jobs";
+import type { ToolRuntime } from "@pie/runtime/tools";
+import { MAX_BYTES } from "../../local/src/tools/shared.ts";
 import {
 	convertHTMLToMarkdown,
 	extractTextFromHTML,
 	MAX_RESPONSE_BYTES,
 	MAX_TIMEOUT_SECONDS,
 	webFetchTool,
-} from "../src/tools/webfetch.ts";
-import { systemTools } from "../src/tools.ts";
+} from "../../local/src/tools/webfetch.ts";
+import { systemTools } from "../../local/src/tools.ts";
 
 function createTool(ask: ToolRuntime["ask"] = async () => {}) {
 	return webFetchTool({ sessionId: "webfetch-test", directory: tmpdir(), jobs: new BackgroundJobs(), ask });

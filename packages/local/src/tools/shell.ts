@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import { type ArtifactOutput, authorizeCommand, authorizePath, type ToolRuntime } from "./runtime.ts";
+import type { ToolRuntime } from "@pie/runtime/tools";
+import { type ArtifactOutput, authorizeCommand, authorizePath } from "./runtime.ts";
 import { findShell, MAX_BYTES, MAX_LINES, resolvePath, runProcess, truncateTail } from "./shared.ts";
 
 const SPOOL_LIMIT_BYTES = 1024 * 1024 * 1024;

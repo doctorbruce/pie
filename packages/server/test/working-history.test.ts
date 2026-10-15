@@ -14,11 +14,12 @@ import {
 	fauxToolCall,
 	Type,
 } from "@earendil-works/pi-ai";
-import { createAgentFactory } from "../src/agent.ts";
-import { checkpointMessage } from "../src/compaction.ts";
-import type { Assistant, ContextCompaction, SessionSnapshot, SessionTransfer } from "../src/protocol.ts";
+import { createAgentFactory } from "@pie/local/agent";
+import { checkpointMessage } from "@pie/runtime/compaction";
+import type { Assistant, ContextCompaction, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
+import type { SavedSession } from "@pie/runtime/runtime-store";
+import { openStore } from "../../local/src/store.ts";
 import { createCoreServer } from "../src/server.ts";
-import { openStore, type SavedSession } from "../src/store.ts";
 
 test("checkpoint tool exposure survives factory and MCP rebuilding without restoring cold discovery messages", async (context) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-working-tools-"));

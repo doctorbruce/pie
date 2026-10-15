@@ -2,9 +2,10 @@ import { randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
 import type { createAgentFactory } from "./agent.ts";
+import type { AssistantSource } from "./capabilities.ts";
 import { checkpointMessage, isContextCheckpoint } from "./compaction.ts";
-import { parseToolIds } from "./external-tools.ts";
-import { type createPlugins, PluginError } from "./plugins.ts";
+import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./config.ts";
+import { type BackgroundJobInfo, BackgroundJobs } from "./jobs.ts";
 import type {
 	ActivityRecord,
 	Assistant,
@@ -28,8 +29,6 @@ import {
 	transferToAgentMessages,
 } from "./session-transfer.ts";
 import { completeToolHistory, historyMessageId, type MessageTree, sessionTree, treePath } from "./session-tree.ts";
-import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./skills.ts";
-import { type BackgroundJobInfo, BackgroundJobs } from "./tools/jobs.ts";
 
 export class RuntimeError extends Error {
 	status: number;
@@ -144,25 +143,16 @@ export type RuntimeOptions = {
 	agents: RuntimeAgents;
 	hostRuntimes?: readonly HostRuntimeDefinition[];
 	saveHostRuntimes?: (definitions: readonly HostRuntimeDefinition[]) => Promise<void>;
-	local?: {
-		assistants: readonly Assistant[];
-		plugins: ReturnType<typeof createPlugins>;
-		saveAssistant: (assistant: Assistant) => Promise<void>;
-		deleteAssistant: (id: string) => Promise<void>;
-	};
+	assistants?: AssistantSource;
 };
 
 async function initializeRuntime(options: RuntimeOptions) {
 	const { agents: factory, store } = options;
-	const plugins = options.local?.plugins;
 	const initial = await store.loadSessions();
 	if (initial.some((session) => session.turn?.status === "running"))
 		throw new RuntimeError(409, "持久会话仍有运行中回合，请由宿主完成归属核对与启动恢复后重试");
 	const instanceId = randomUUID();
 	const jobs = new BackgroundJobs();
-	const assistants = new Map(
-		(options.local?.assistants ?? []).map((assistant) => [assistant.id, structuredClone(assistant)]),
-	);
 	function parseHostRuntimeRegistry(values: readonly unknown[]) {
 		if (values.length > 256) throw new SkillConfigError("runtimes 最多 256 项");
 		const definitions = values.map((value) => parseHostRuntimeDefinition(value, factory.toolIds));
@@ -195,22 +185,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 		);
 	}
 	function localRuntime(assistant: Assistant) {
-		if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地助手配置");
-		return {
-			...plugins.runtime(assistant),
-			subagents: assistant.subagentIds.map((id) => {
-				const target = assistants.get(id);
-				if (!target) throw new PluginError(`可调用助手不存在：${id}`);
-				return {
-					id: `assistant-worker-${target.id}`,
-					name: target.name,
-					description: `调用 ${target.name} 完成独立任务`,
-					assistantId: target.id,
-					assistantRevision: String(target.updatedAt),
-					runtime: plugins.runtime(target),
-				};
-			}),
-		};
+		if (!options.assistants) throw new RuntimeError(405, "当前宿主未启用助手配置");
+		return options.assistants.runtime(assistant);
 	}
 	factory.mcp.configure([...hostRuntimes.values()].map((definition) => definition.runtime.mcp ?? {}));
 	type Session = SavedSession & {
@@ -605,7 +581,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				session.assistantRevision = definition.assistantRevision;
 				session.runtime = hydrateHostRuntime(definition, hostRuntimes);
 			} else {
-				const assistant = assistants.get(session.assistantId);
+				const assistant = options.assistants?.list().find((assistant) => assistant.id === session.assistantId);
 				if (!assistant) throw new RuntimeError(409, "会话引用的助手不存在");
 				session.assistant = structuredClone(assistant);
 				session.assistantRevision = String(assistant.updatedAt);
@@ -629,7 +605,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				runtime: hydrateHostRuntime(definition, hostRuntimes),
 			};
 		}
-		const assistant = assistants.get(session.assistantId);
+		const assistant = options.assistants?.list().find((assistant) => assistant.id === session.assistantId);
 		if (!assistant) throw new RuntimeError(409, "会话引用的助手不存在");
 		return {
 			assistant: structuredClone(assistant),
@@ -900,95 +876,24 @@ async function initializeRuntime(options: RuntimeOptions) {
 		get tools() {
 			return structuredClone(factory.toolCatalog);
 		},
-		listAssistants() {
-			return execute(async () => {
-				return structuredClone([...assistants.values()]);
-			}, false);
-		},
-		listPlugins() {
-			return execute(async () => {
-				if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地插件");
-				return plugins.list();
-			}, false);
-		},
-		importPlugin(body: Record<string, unknown>) {
-			return execute(async () => {
-				if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地插件");
-				try {
-					return plugins.import(body.path);
-				} catch (error) {
-					throw new PluginError(error instanceof Error ? error.message : String(error));
-				}
-			}, true);
-		},
-		deletePlugin(id: string) {
-			return execute(async () => {
-				if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地插件");
-
-				if (!plugins.list().some((plugin) => plugin.id === id)) throw new RuntimeError(404, "插件不存在");
-				if (
-					[...assistants.values()].some((assistant) => assistant.pluginIds.includes(id)) ||
-					[...sessions.values()].some((session) => session.assistant?.pluginIds.includes(id)) ||
-					[...sessions.values()].some((session) =>
-						session.runtime?.skills.some((skill) => skill.source?.pluginId === id),
-					)
-				)
-					throw new RuntimeError(409, "插件仍被助手或会话引用，请先解除助手挂载并删除相关会话");
-				plugins.remove(id);
-				return { deleted: true };
-			}, true);
-		},
-		saveAssistant(body: Record<string, unknown>, id?: string) {
-			return execute(async () => {
-				if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地助手");
-				const existing = id ? assistants.get(id) : undefined;
-				if (id && !existing) throw new RuntimeError(404, "助手不存在");
-				if (typeof body.name !== "string" || !body.name.trim() || body.name.length > 100)
-					throw new RuntimeError(400, "助手名称需要 1–100 个字符");
-				if (typeof body.systemPrompt !== "string" || body.systemPrompt.length > 16000)
-					throw new RuntimeError(400, "提示词需要字符串，最多 16000 个字符");
-				const toolIds = parseToolIds(body.toolIds, factory.toolIds);
-				const pluginIds = plugins.resolve(body.pluginIds ?? []).map((plugin) => plugin.id);
-				const requestedSubagentIds = body.subagentIds ?? [];
-				if (
-					!Array.isArray(requestedSubagentIds) ||
-					requestedSubagentIds.length > 32 ||
-					requestedSubagentIds.some((id) => typeof id !== "string" || !assistants.has(id)) ||
-					new Set(requestedSubagentIds).size !== requestedSubagentIds.length
-				)
-					throw new RuntimeError(400, "subagentIds 需要不重复的有效助手 ID，最多 32 项");
-				const subagentIds = [...requestedSubagentIds] as string[];
-				if (existing && subagentIds.includes(existing.id)) throw new RuntimeError(400, "助手不能调用自己");
-				if (!existing && assistants.size >= 32) throw new RuntimeError(409, "最多 32 个助手");
-				const now = Date.now();
-				const assistant: Assistant = {
-					id: existing?.id ?? randomUUID(),
-					name: body.name.trim(),
-					systemPrompt: body.systemPrompt,
-					toolIds,
-					pluginIds,
-					subagentIds,
-					createdAt: existing?.createdAt ?? now,
-					updatedAt: now,
-				};
-				await options.local!.saveAssistant(assistant);
-				assistants.set(assistant.id, assistant);
-				return assistant;
-			}, true);
-		},
-		deleteAssistant(id: string) {
-			return execute(async () => {
-				if (!options.local) throw new RuntimeError(405, "当前宿主未启用本地助手");
-				if (!assistants.has(id)) throw new RuntimeError(404, "助手不存在");
-				if (assistants.size === 1) throw new RuntimeError(409, "至少保留一个助手");
-				if ([...assistants.values()].some((assistant) => assistant.subagentIds.includes(id)))
-					throw new RuntimeError(409, "请先从其他助手的可调用助手中移除该助手");
-				if ([...sessions.values()].some((session) => session.assistantId === id))
-					throw new RuntimeError(409, "请先删除该助手的会话");
-				await options.local.deleteAssistant(id);
-				assistants.delete(id);
-				return { deleted: true };
-			}, true);
+		listSessionMetadata() {
+			return execute(
+				async () =>
+					structuredClone(
+						[...sessions.values()].map((session) => ({
+							...summary(session),
+							astronSessionId: session.astronSessionId,
+							assistant: session.assistant,
+							revision: session.revision,
+							runtime: session.runtime,
+							activities: session.activities,
+							compaction: session.compaction,
+							transferBaseMessageCount: session.transferBaseMessageCount,
+							leafId: session.tree?.leafId ?? null,
+						})),
+					),
+				false,
+			);
 		},
 		listSessions(filter: { assistantId?: string; includeSubagents?: boolean } = {}) {
 			return execute(async () => {
@@ -1032,10 +937,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 					(typeof body.assistantId !== "string" || !body.assistantId.trim() || body.assistantId.length > 256)
 				)
 					throw new RuntimeError(400, "assistantId 需要 1–256 个字符");
-				const defaultAssistant = assistants.values().next().value as Assistant | undefined;
+				const defaultAssistant = options.assistants?.list()[0];
 				const assistantId = (body.assistantId as string | undefined) ?? defaultAssistant?.id;
 				if (!assistantId) throw new RuntimeError(400, "请选择有效助手");
-				const localAssistant = assistants.get(assistantId);
+				const localAssistant = options.assistants?.list().find((assistant) => assistant.id === assistantId);
 				const hostDefinition = hostRuntimes.get(assistantId);
 				if (!hostDefinition && !localAssistant) throw new RuntimeError(400, "请选择有效助手");
 				const title = body.title ?? "新会话";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SessionEvent, SessionSnapshot, WireMessage } from "@pie/server/protocol";
+import type { SessionEvent, SessionSnapshot, WireMessage } from "@pie/runtime/protocol";
 import { toThreadMessages, updateToolProgress } from "../client/messages.ts";
 
 const assistant: WireMessage = {

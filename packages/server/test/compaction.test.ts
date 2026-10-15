@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { createCompactionTransform } from "../src/compaction.ts";
-import type { ContextCompaction } from "../src/protocol.ts";
+import { createCompactionTransform } from "@pie/runtime/compaction";
+import type { ContextCompaction } from "@pie/runtime/protocol";
 
 function conversation(turns: number, offset = 0): AgentMessage[] {
 	const messages: AgentMessage[] = [];

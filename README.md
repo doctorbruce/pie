@@ -25,7 +25,9 @@ pi-ai                         provider、鉴权、流式响应、模型信息
 | `packages/mcp` | 独立 MCP 协议客户端：stdio、Streamable HTTP、OAuth；产品适配见 [MCP 接入](docs/mcp-integration.md) |
 | `packages/telemetry` | `pi-ai` 使用的观测接口及实现，不自动接入外部平台 |
 | `examples/basic.ts` | 用假模型验证真实 Agent、工具执行和流式输出，无需 API key |
-| `packages/server` | 独立 Node Core 服务：助手、会话、SQLite、提交/取消、HTTP 与 SSE |
+| `packages/runtime` | 共享会话运行时与能力契约：Turn、消息树、压缩、Subagent 和事件 |
+| `packages/local` | SQLite、本机工具、文件配置、Skill / MCP 和本地助手管理 |
+| `packages/server` | 薄本地宿主：装配 Local，映射 HTTP / SSE，保留 CLI / Sidecar 入口 |
 | `apps/web` | 正式 React 客户端：助手、会话、对话、Skill、模型和插件管理 |
 
 Agent 内部保留输入队列和上下文处理钩子；助手、会话持久化、自动上下文压缩和 Plugin / Skill 加载由服务层实现，权限和扩展待规划。没有恢复原版 Harness、CLI、TUI、client/server 或 Chord。
@@ -89,7 +91,7 @@ Astron 已注册官方 `pie` provider，并通过独立 HTTP/SSE adapter 连接 
 
 Core 切换使用统一会话转储：源 Core 导出 canonical transcript，目标 Core 导入并校验后，Astron 才原子更新活动绑定；切回时执行相同流程。两个 Core 保留各自数据库，Astron 会话 ID 不变，原生会话 ID 保存在各自 `coreBindings` 中。Astron 会在首次使用 Pie 时懒启动 sidecar，启动前同步工具和模型提供商，停止、重启和异常拉起也由 adapter 管理；Assistant 的 Skill/Subagent runtime 已按产品配置投影。当前还缺会话工作区隔离和完整产品权限策略。Pie 注册 `read/bash/edit/write/grep/find/ls/webfetch/job_output/job_kill` 十个原生工具，以及挂载 Plugin 后的 `skill`；Astron 业务工具仍通过 `PI_TOOLS_DIR` 提供。默认助手暂不启用任何工具。
 
-`webfetch` 从 Amio/OpenCode 的 `packages/core/src/tool/webfetch.ts` 和有界响应读取逻辑适配，源版本为 `2f62e1b6d8186d2c7268011d29041551fe1928e0`。参数为 `url`、可选 `format`（默认 `markdown`，也支持 `text`、`html`）和 `timeout`（秒，默认 30、最大 120）；只接受 HTTP(S)，响应上限 5 MiB。使用 Pie 原生权限确认和取消信号，长结果返回预览并保存完整文本供 `read` 查看。无需 `PI_TOOLS_DIR`，在助手工具设置中启用即可。原许可保存在 `packages/server/LICENSES/opencode.txt`，Sidecar 发行时包含在 `.LICENSES.txt` 中。
+`webfetch` 从 Amio/OpenCode 的 `packages/core/src/tool/webfetch.ts` 和有界响应读取逻辑适配，源版本为 `2f62e1b6d8186d2c7268011d29041551fe1928e0`。参数为 `url`、可选 `format`（默认 `markdown`，也支持 `text`、`html`）和 `timeout`（秒，默认 30、最大 120）；只接受 HTTP(S)，响应上限 5 MiB。使用 Pie 原生权限确认和取消信号，长结果返回预览并保存完整文本供 `read` 查看。无需 `PI_TOOLS_DIR`，在助手工具设置中启用即可。原许可保存在 `packages/local/LICENSES/opencode.txt`，Sidecar 发行时包含在 `.LICENSES.txt` 中。
 
 页面顶部「插件」可导入 Astron `schemaVersion: 1` 的本地插件目录。在「编辑助手」挂载插件，按需启用系统工具，然后新建真实模型会话使用。可先导入仓库内的 `examples/plugins/hello-skill` 验证加载和脚本执行。Plugin 仅负责组织 Skill，APA/App 命令由 Pie 原生 `bash` 执行；依赖环境需要宿主准备。详见 [Plugin 与 Skill](docs/agent-development.md#plugin-与-skill)。
 

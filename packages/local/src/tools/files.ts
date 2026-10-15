@@ -6,9 +6,10 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
 import { createTwoFilesPatch } from "diff";
 import "pdfjs-dist/legacy/build/pdf.worker.mjs";
+import type { ToolRuntime } from "@pie/runtime/tools";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { collectDiagnostics, type FileDiagnostics, formatDiagnostics } from "./diagnostics.ts";
-import { type ArtifactOutput, type ArtifactRole, authorizePath, type ToolRuntime } from "./runtime.ts";
+import { type ArtifactOutput, type ArtifactRole, authorizePath } from "./runtime.ts";
 import { MAX_BYTES, MAX_LINES, resolvePath, truncateHead, withFileMutationQueue } from "./shared.ts";
 
 export async function readText(path: string, signal?: AbortSignal, truncate = true): Promise<string> {

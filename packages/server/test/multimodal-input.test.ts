@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import type { ImagePart, SessionSnapshot, SessionTransfer } from "../src/protocol.ts";
+import type { ImagePart, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
 type ModelRequest = {

@@ -17,7 +17,7 @@ import type {
 	SessionEvent,
 	SessionSnapshot,
 	SessionSummary,
-} from "../src/protocol.ts";
+} from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
 const shellTool = "bash";

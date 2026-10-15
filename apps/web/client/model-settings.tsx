@@ -4,7 +4,7 @@ import type {
 	ProviderCatalog,
 	ProviderModel,
 	ProviderSettings,
-} from "@pie/server/protocol";
+} from "@pie/runtime/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { request } from "./request.ts";
 

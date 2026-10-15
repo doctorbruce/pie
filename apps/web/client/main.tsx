@@ -21,7 +21,7 @@ import type {
 	SessionSummary,
 	SessionTree,
 	ToolActivity,
-} from "@pie/server/protocol";
+} from "@pie/runtime/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AssistantSettings } from "./assistant-settings.tsx";

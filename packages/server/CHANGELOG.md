@@ -17,6 +17,7 @@
 
 ### Changed
 
+- Split shared runtime contracts and orchestration into `@pie/runtime`, and SQLite, local tools and configuration into `@pie/local`; keep `@pie/server` as the local HTTP/SSE and CLI/Sidecar host. Embedded callers must use `@pie/runtime` and explicitly supply agent capabilities.
 - Replace runtime history with the compacted working window only after its checkpoint and original messages commit; read full snapshots, exports and fork boundaries from storage.
 
 - Store message tree nodes once in SQLite, with transactional legacy migration and incremental appends.

@@ -77,6 +77,7 @@
 		"@earendil-works/pi-telemetry": "0.85.1",
 		"@google/genai": "1.52.0",
 		"@smithy/node-http-handler": "4.7.3",
+		"@smithy/types": "4.19.0",
 		"http-proxy-agent": "7.0.2",
 		"https-proxy-agent": "7.0.6",
 		"openai": "6.40.0",

@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
+import type { ToolRuntime } from "@pie/runtime/tools";
 import { Parser } from "htmlparser2";
 import TurndownService from "turndown";
-import type { ToolRuntime } from "./runtime.ts";
 import { MAX_BYTES, MAX_LINES, truncateHead } from "./shared.ts";
 
 export const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;

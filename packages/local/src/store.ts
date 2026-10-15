@@ -3,11 +3,11 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { Assistant, ContextCompaction, HostRuntimeDefinition } from "./protocol.ts";
-import type { RuntimeStore, SavedSession, SessionMetadata } from "./runtime-store.ts";
-import { type MessageTree, syncMessageTree, treePath } from "./session-tree.ts";
+import type { Assistant, ContextCompaction, HostRuntimeDefinition } from "@pie/runtime/protocol";
+import type { RuntimeStore, SavedSession, SessionMetadata } from "@pie/runtime/runtime-store";
+import { type MessageTree, syncMessageTree, treePath } from "@pie/runtime/session-tree";
 
-export type { SavedSession, SessionMetadata } from "./runtime-store.ts";
+export type { SavedSession, SessionMetadata } from "@pie/runtime/runtime-store";
 
 export function openStore(env: NodeJS.ProcessEnv) {
 	const directory = resolve(env.PI_DATA_DIR || ".pie");

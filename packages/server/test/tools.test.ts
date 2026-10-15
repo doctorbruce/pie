@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fauxToolCall, validateToolArguments } from "@earendil-works/pi-ai";
-import { BackgroundJobs } from "../src/tools/jobs.ts";
-import { applyPermissionPolicy, type ToolRuntime } from "../src/tools/runtime.ts";
-import { systemTools } from "../src/tools.ts";
+import { BackgroundJobs } from "@pie/runtime/jobs";
+import { applyPermissionPolicy, type ToolRuntime } from "@pie/runtime/tools";
+import { systemTools } from "../../local/src/tools.ts";
 
 test("host permission policy allows configured operations but preserves explicit confirmations", async () => {
 	const requested: string[] = [];

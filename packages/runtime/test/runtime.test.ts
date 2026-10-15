@@ -14,9 +14,9 @@ import {
 	type SavedSession,
 	type SessionEvent,
 	type SessionMetadata,
-} from "@pie/server/runtime";
-import type { ExternalTool } from "@pie/server/tools";
-import { type MessageTree, treePath } from "../src/session-tree.ts";
+} from "@pie/runtime";
+import { type MessageTree, treePath } from "@pie/runtime/session-tree";
+import type { ExternalTool } from "@pie/runtime/tools";
 
 function memoryStore() {
 	const sessions = new Map<string, SessionMetadata>();
@@ -101,37 +101,50 @@ function agents(directory: string, onCall: (value: string) => void = () => {}) {
 		confirm: Type.Optional(Type.Boolean()),
 		wait: Type.Optional(Type.Boolean()),
 	});
-	return createAgentFactory(
-		{ PI_DATA_DIR: directory, PI_TOOLS_DIR: join(directory, "missing-tools") },
-		{
-			models: { current: { config: { providers: {} }, selected: undefined, models: createModels(), env: {} } },
-			recordModelRequest: () => async () => undefined,
-			tools: {
-				catalog: [{ id: "sdk_echo", label: "SDK echo" }],
-				create: (context) => {
-					const tool: ExternalTool = {
-						name: "sdk_echo",
-						label: "SDK echo",
-						description: "Echo through a host-provided executor",
-						parameters,
-						async execute(_toolCallId, input, signal, onUpdate) {
-							const args = input as Static<typeof parameters>;
-							if (args.confirm)
-								await context.ask({ type: "confirmation", title: "执行 SDK 工具", message: args.text }, signal);
-							onCall(args.text);
-							onUpdate?.({
-								content: [{ type: "text", text: "SDK running" }],
-								details: { sessionId: context.sessionId },
-							});
-							if (args.wait) await delay(60000, undefined, { signal });
-							return { content: [{ type: "text", text: args.text }], details: { sessionId: context.sessionId } };
-						},
-					};
-					return [tool];
-				},
+	return createAgentFactory({
+		env: { PI_DATA_DIR: directory, PI_TOOLS_DIR: join(directory, "missing-tools") },
+		models: { current: { selected: undefined, models: createModels() } },
+		skills(runtime) {
+			assert.equal(runtime.skills.length, 0);
+			return { tools: [], afterToolCall: async () => undefined };
+		},
+		mcp: {
+			configure(configs) {
+				assert(configs.every((config) => Object.keys(config).length === 0));
+			},
+			status: () => ({ servers: {} }),
+			async acquire(config) {
+				assert.equal(Object.keys(config).length, 0);
+				return { tools: [], instructions: [], release() {} };
+			},
+			async close() {},
+		},
+		recordModelRequest: () => async () => undefined,
+		tools: {
+			catalog: [{ id: "sdk_echo", label: "SDK echo" }],
+			create: (context) => {
+				const tool: ExternalTool = {
+					name: "sdk_echo",
+					label: "SDK echo",
+					description: "Echo through a host-provided executor",
+					parameters,
+					async execute(_toolCallId, input, signal, onUpdate) {
+						const args = input as Static<typeof parameters>;
+						if (args.confirm)
+							await context.ask({ type: "confirmation", title: "执行 SDK 工具", message: args.text }, signal);
+						onCall(args.text);
+						onUpdate?.({
+							content: [{ type: "text", text: "SDK running" }],
+							details: { sessionId: context.sessionId },
+						});
+						if (args.wait) await delay(60000, undefined, { signal });
+						return { content: [{ type: "text", text: args.text }], details: { sessionId: context.sessionId } };
+					},
+				};
+				return [tool];
 			},
 		},
-	);
+	});
 }
 
 const definition: HostRuntimeDefinition = {
@@ -152,6 +165,8 @@ test("embedded runtime uses injected async storage and tools without creating a 
 	});
 	context.after(() => runtime.close());
 	assert.equal("server" in runtime, false);
+	assert.equal("saveAssistant" in runtime, false);
+	assert.equal("importPlugin" in runtime, false);
 	assert.equal(runtime.info.persistence, "test-memory");
 	assert.deepEqual(
 		runtime.tools.map((tool) => tool.id),
@@ -159,6 +174,11 @@ test("embedded runtime uses injected async storage and tools without creating a 
 	);
 	await runtime.registerHostRuntimes([definition]);
 	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const metadata = await runtime.listSessionMetadata();
+	assert.equal(metadata[0].id, session.id);
+	assert.equal("messages" in metadata[0], false);
+	metadata[0].title = "detached metadata";
+	assert.equal((await runtime.getSession(session.id)).title, session.title);
 	let overridden: Promise<unknown> | undefined;
 	memory.beforeSave((saved) => {
 		if (!overridden && saved.messages.some((message) => message.role === "assistant"))

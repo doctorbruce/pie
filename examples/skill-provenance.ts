@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import type { RuntimeConfig, SessionSnapshot } from "../packages/server/src/protocol.ts";
+import type { RuntimeConfig, SessionSnapshot } from "@pie/runtime/protocol";
 
 const base = process.env.PI_SERVER_URL ?? "http://127.0.0.1:4318";
 const directory = fileURLToPath(new URL("./plugins/hello-skill/skills/hello/", import.meta.url));

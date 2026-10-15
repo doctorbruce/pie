@@ -1,4 +1,4 @@
-import type { Assistant, Plugin, ToolId, ToolInfo } from "@pie/server/protocol";
+import type { Assistant, Plugin, ToolId, ToolInfo } from "@pie/runtime/protocol";
 import { useEffect, useRef, useState } from "react";
 import { request } from "./request.ts";
 

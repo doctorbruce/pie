@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionSnapshot, SessionTransfer } from "../src/protocol.ts";
+import type { SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
+import { agentMessagesToTransfer, displayAgentMessages, transferToAgentMessages } from "@pie/runtime/session-transfer";
 import { createCoreServer } from "../src/server.ts";
-import { agentMessagesToTransfer, displayAgentMessages, transferToAgentMessages } from "../src/session-transfer.ts";
 
 async function start(directory: string) {
 	const core = createCoreServer({ PI_DATA_DIR: directory });

@@ -1,6 +1,6 @@
 # Pie Core 服务 v1
 
-用 Node 独立运行的本地服务，不依赖 React、assistant-ui 或 Vite。包内 `src/protocol.ts` 是框架无关的数据类型；原版 `packages/agent` 仍只负责执行内核。
+用 Node 独立运行的薄本地服务，不依赖 React、assistant-ui 或 Vite。`@pie/runtime/protocol` 提供共享数据类型；`@pie/runtime` 负责会话运行，`@pie/local` 提供 SQLite、本机工具与文件配置，原版 `packages/agent` 仍只负责底层执行内核。
 
 主要架构和开发边界统一维护在 [Agent 开发文档](../../docs/agent-development.md)。
 
@@ -78,7 +78,7 @@ npm run serve -- --tools-dir E:/Projects/pie/examples/tools
 
 ```ts
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ToolContext } from "@pie/server/tools";
+import type { ToolContext } from "@pie/runtime/tools";
 
 export default function createTool({ Type, sessionId }: ToolContext) {
   const parameters = Type.Object({ name: Type.String() });
@@ -109,7 +109,7 @@ Web 客户端的助手设置从 `GET /tools` 读取目录，勾选后新建真�
 
 ### 工具按需曝光
 
-移植 Pi v1.1.0 的 `exposure + tool_search` 行为，不引入上游 Harness、CLI 或 Code Mode。外部业务工具默认 `exposure: "deferred"`；可在工厂返回对象上显式设置 `exposure: "default"`，通过 `@pie/server/tools` 的 `ExternalTool` 类型声明该字段。原生基础工具、skill 和 task 保持直接曝光。只在会话有延迟工具时自动加入 `tool_search({ query, limit? })`，它不属于可配置 toolIds，也不出现在 `GET /tools`。
+移植 Pi v1.1.0 的 `exposure + tool_search` 行为，不引入上游 Harness、CLI 或 Code Mode。外部业务工具默认 `exposure: "deferred"`；可在工厂返回对象上显式设置 `exposure: "default"`，通过 `@pie/runtime/tools` 的 `ExternalTool` 类型声明该字段。原生基础工具、skill 和 task 保持直接曝光。只在会话有延迟工具时自动加入 `tool_search({ query, limit? })`，它不属于可配置 toolIds，也不出现在 `GET /tools`。
 
 首轮模型请求不包含延迟工具的完整描述和参数 schema。工具仍在执行注册表中，搜索只扫描当前 runtime 允许且尚未曝光的工具，以 BM25 对 ID、label、描述和 schema 关键词排序，支持英文词和中文二元词组。limit 默认 5，允许 1–20；没有命中不会加载其他工具。搜索不执行业务操作，命中的完整 schema 从下一次模型请求开始发送。同会话已曝光工具继续保留，不影响其他会话。
 
@@ -267,4 +267,4 @@ Web 客户端使用提供商配置接口 `PUT /providers/config`：
 
 API key 和 headers 支持 `$VAR` / `${VAR}`，`$$` 表示字面量 `$`，`$!` 表示字面量 `!`。尚未恢复 OAuth / auth.json / 扩展注册 / 上游后台目录刷新机制；`!command` 和 `oauth` 配置明确拒绝。环境变量在服务启动时取快照。无鉴权本地兼容端点可配置占位 key `local`。自定义 Base URL 限 HTTP(S)，不要把凭据放进 URL。
 
-`src/models/model-config.ts` 的 schema、`provider-composer.ts` 的模型/compat 合成、`resolve-config-value.ts` 的模板解析、`json.ts` 来自 Pi `b2602be` 的 coding-agent，并按上述范围抽取；服务文件存储、HTTP API 和 UI 为本项目实现。pi-ai 源码未改动；Agent loop 仅增加请求间隙的工作历史替换支持，不引入上游 Harness。
+`packages/local/src/models/model-config.ts` 的 schema、`provider-composer.ts` 的模型/compat 合成、`resolve-config-value.ts` 的模板解析、`json.ts` 来自 Pi `b2602be` 的 coding-agent，并按上述范围抽取；服务文件存储、HTTP API 和 UI 为本项目实现。pi-ai 源码未改动；Agent loop 仅增加请求间隙的工作历史替换支持，不引入上游 Harness。

@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { createModels } from "@earendil-works/pi-ai";
-import { parseModelConfig } from "../src/models/model-config.ts";
-import { composeModelProvider } from "../src/models/provider-composer.ts";
+import { parseModelConfig } from "../../local/src/models/model-config.ts";
+import { composeModelProvider } from "../../local/src/models/provider-composer.ts";
 
 test("models.json explicitly supports a keyless local provider without relaxing other providers", async () => {
 	const parsed = parseModelConfig({

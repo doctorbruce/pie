@@ -4,9 +4,11 @@
 
 ## 入口与现有行为
 
-- `pie/runtime` 或 `@pie/server/runtime` 导出 `createRuntime`、`createAgentFactory` 和接入类型；这是源码入口，需要能解析 Pie workspace 依赖，并使用 `node --conditions=source`。发布产物与 Cloud workspace 接入尚待实施。
+- `@pie/runtime`（根仓库也导出 `pie/runtime`）提供 `createRuntime`、`createAgentFactory` 和接入类型；这是源码入口，需要能解析 Pie workspace 依赖，并使用 `node --conditions=source`。不再从 `@pie/server/runtime` 导入。Cloud 只接入 `packages/pie/{runtime,agent,ai,telemetry,mcp}` 五个共享包，由外层 workspace 统一管理，不保留本地包或整仓外壳；发布产物与生产宿主装配仍待实施。
 - `await createRuntime({ store, agents })` 不创建 HTTP 服务，也不默认打开 SQLite、扫描插件或注册本机工具；这些由注入的实现决定。
-- `createCoreServer` 继续为本地装配 SQLite、本地模型配置、原生 / 外部工具与插件，再将 HTTP / SSE 转成同一份运行时调用。本地 CLI 和 Sidecar 的启动方式不变。
+- `@pie/local` 的 `createLocalHost` 装配 SQLite、本地模型配置、原生 / 外部工具、Skill、MCP 与助手管理；`@pie/server` 的 `createCoreServer` 调用它并映射 HTTP / SSE。本地 CLI 和 Sidecar 的启动方式不变。
+
+依赖方向为 `server → local → runtime → agent / ai`，`server` 可直接读取共享协议。Runtime 不导入 Local 或 Server，也不提供本地助手 / 插件的写入接口。云端 `agent-service` 直接使用 Runtime 并装配云端能力，不依赖 Local，不启动另一层 Pie HTTP 服务。本轮采用函数注入，不增加插件扫描或热更新框架。
 
 ## 双方开发范围
 
@@ -27,15 +29,15 @@ import {
   createRuntime,
   type AgentFactoryOptions,
   type RuntimeStore,
-} from "pie/runtime";
+} from "@pie/runtime";
 
 export async function createCloudRuntime(
   store: RuntimeStore,
-  capabilities: Required<AgentFactoryOptions>,
+  capabilities: AgentFactoryOptions,
 ) {
   return createRuntime({
     store,
-    agents: createAgentFactory({}, capabilities),
+    agents: createAgentFactory(capabilities),
   });
 }
 ```
@@ -73,13 +75,15 @@ await runtime.close();
 
 ## 能力注入要求
 
-`createAgentFactory(env, options)` 的默认值服务于本地。云端不能只传数据库后沿用所有默认值；应显式提供以下五项，这也是示例使用 `Required<AgentFactoryOptions>` 的原因：
+`@pie/runtime` 的 `createAgentFactory(options)` 要求显式提供以下五项，不再隐式使用本地实现。`@pie/local` 的工厂保留本地默认装配；不要在云端导入它：
 
-- `models`：提供当前模型快照，包含 `models` 注册对象、默认模型、模型配置与限定作用域的凭据环境。创建 Agent 时读取快照；同一模型 ID 的端点或凭据变化，应更新宿主的有效 `assistantRevision`，使下一个 Turn 重建 Agent，不改写在途配置。不得靠改写 `process.env` 切租户；云端模型管理由宿主实现，不需要实现本地 `models.json` 写入接口。
-- `tools`：提供 `catalog` 和 `create(context)`。返回现有 `AgentTool` 实现，`execute(toolCallId, params, signal, onUpdate)` 内调用 tools-sdk；通过 `context.ask` 请求确认。注入后不会再注册本机原生工具或扫描 `PI_TOOLS_DIR`。参数校验、工具结果与过程更新继续走原 Loop。
-- `skills`：提供技能工具装配与工具后处理；默认实现会读取本地目录。尚未实现云端资源读取时，必须拒绝非空技能配置，而不是把云端路径当成本机目录。
-- `mcp`：提供当前执行范围的 MCP 生命周期能力；默认实现可能启动本机进程。未实现云端 MCP 时，应明确拒绝非空配置，不得静默落到 `agent-service` 主机执行。
-- `recordModelRequest`：提供宿主自己的请求记录策略；默认实现会将完整模型请求写入本机目录。宿主应处理敏感数据、保存权限和保留时间，不要默认将云端请求写到共享 `.pie` 目录。
+- `models`：`current` 返回 `models` 注册对象、默认选择 `selected` 与可选的 `headers(model)` 解析函数。凭据、端点与 header 解析由宿主限定作用域，不要求本地 `models.json` 结构。创建 Agent 时读取快照；同一模型 ID 的端点或凭据变化，应更新宿主的有效 `assistantRevision`，使下一个 Turn 重建 Agent，不改写在途配置。不得靠改写 `process.env` 切租户。
+- `tools`：提供 `catalog` 和 `create(context, enabledToolIds)`。返回现有 `AgentTool` 实现，可用 `exposure: "deferred"` 参与工具发现；`execute(toolCallId, params, signal, onUpdate)` 内调用 tools-sdk，通过 `context.ask` 请求确认。Runtime 不注册本机工具或扫描 `PI_TOOLS_DIR`；参数校验、结果与进度继续走原 Loop。
+- `skills`：提供技能工具装配与工具后处理。尚未实现云端资源读取时，应明确拒绝非空技能配置，而不是把云端路径当成本机目录；读取本地目录的实现在 Local。
+- `mcp`：提供当前执行范围的配置、状态、连接取得与关闭能力。未实现云端 MCP 时，应明确拒绝非空配置；可能启动本机进程的连接实现在 Local。
+- `recordModelRequest`：提供宿主自己的请求记录策略，可以显式不记录。完整请求写文件的实现在 Local；云端宿主自行处理敏感数据、保存权限和保留时间。
+
+`env` 为可选的工厂环境快照，Runtime 不默认读取 `process.env`。`compactionSettings(model)` 可选；省略时仅使用纯计算的预算默认值，不读文件。本地工厂注入文件配置读取实现。
 
 目前 Skill 绑定仍采用目录字段；对象存储引用、Worker 路径映射和跨环境资源协议尚未实现。这是后续接入工作，不要用虚构路径绕过它。
 
@@ -105,10 +109,10 @@ await runtime.close();
 
 ## 骨架验收
 
-在 `packages/server` 执行：
+在仓库根目录执行：
 
 ```sh
-node --conditions=source --test test/runtime.test.ts
+npm run test:runtime
 ```
 
 使用延迟存储替身、注入工具与 faux 模型，覆盖无 HTTP / SQLite 的工具循环、进度、历史恢复、并发提交拒绝、写入失败、用户确认和取消。不使用真实云端服务或付费模型；这不替代第二阶段的云端闭环验收。

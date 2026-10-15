@@ -18,10 +18,10 @@ import {
 	type Message,
 	Type,
 } from "@earendil-works/pi-ai";
-import { createAgentFactory } from "../src/agent.ts";
-import { withToolProgress } from "../src/tool-progress.ts";
-import { jobTools } from "../src/tools/job.ts";
-import { BackgroundJobs } from "../src/tools/jobs.ts";
+import { createAgentFactory } from "@pie/local/agent";
+import { BackgroundJobs } from "@pie/runtime/jobs";
+import { withToolProgress } from "@pie/runtime/tool-progress";
+import { jobTools } from "../../local/src/tools/job.ts";
 
 function deferred<Value>() {
 	let resolve!: (value: Value) => void;

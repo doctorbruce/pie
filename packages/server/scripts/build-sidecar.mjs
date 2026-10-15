@@ -50,9 +50,9 @@ try {
 		"MCP TypeScript SDK OAuth implementation:",
 		readFileSync(join(repositoryRoot, "packages/mcp/LICENSES/modelcontextprotocol-typescript-sdk.txt"), "utf8"),
 		"Amio/OpenCode webfetch implementation:",
-		readFileSync(join(repositoryRoot, "packages/server/LICENSES/opencode.txt"), "utf8"),
+		readFileSync(join(repositoryRoot, "packages/local/LICENSES/opencode.txt"), "utf8"),
 		"Webfetch HTML conversion dependencies:",
-		readFileSync(join(repositoryRoot, "packages/server/LICENSES/webfetch-dependencies.txt"), "utf8"),
+		readFileSync(join(repositoryRoot, "packages/local/LICENSES/webfetch-dependencies.txt"), "utf8"),
 	].join("\n\n"));
 	if (process.platform === "darwin") run("codesign", ["--remove-signature", output]);
 	const postjectArguments = [

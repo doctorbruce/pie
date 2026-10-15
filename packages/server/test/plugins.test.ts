@@ -5,11 +5,18 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout } from "node:timers/promises";
 import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
-import { createAgentFactory } from "../src/agent.ts";
-import { createPlugins } from "../src/plugins.ts";
-import type { Assistant, Plugin, RuntimeConfig, SessionEvent, SessionSnapshot, ToolActivity } from "../src/protocol.ts";
+import { createAgentFactory } from "@pie/local/agent";
+import type {
+	Assistant,
+	Plugin,
+	RuntimeConfig,
+	SessionEvent,
+	SessionSnapshot,
+	ToolActivity,
+} from "@pie/runtime/protocol";
+import { createPlugins } from "../../local/src/plugins.ts";
+import { systemTools } from "../../local/src/tools.ts";
 import { createCoreServer } from "../src/server.ts";
-import { systemTools } from "../src/tools.ts";
 
 const shellName = "bash";
 

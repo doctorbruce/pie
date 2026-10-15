@@ -11,7 +11,7 @@ import type {
 	SessionSnapshot,
 	SessionTransfer,
 	SessionTree,
-} from "../src/protocol.ts";
+} from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
 async function start(directory: string) {

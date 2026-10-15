@@ -3,9 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { createAgentFactory } from "../src/agent.ts";
-import type { HostRuntimeDefinition, RuntimeConfig, ToolActivity } from "../src/protocol.ts";
-import { hydrateHostRuntime } from "../src/skills.ts";
+import { createAgentFactory } from "@pie/local/agent";
+import { hydrateHostRuntime } from "@pie/runtime/config";
+import type { HostRuntimeDefinition, RuntimeConfig, ToolActivity } from "@pie/runtime/protocol";
 
 test("host subagents keep the target runtime language for their skill index", () => {
 	const definition: HostRuntimeDefinition = {

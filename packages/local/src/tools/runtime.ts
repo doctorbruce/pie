@@ -1,6 +1,5 @@
 import { resolve, sep } from "node:path";
-import type { InteractionRequest, PermissionPolicy } from "../protocol.ts";
-import type { BackgroundJobs } from "./jobs.ts";
+import type { ToolRuntime } from "@pie/runtime/tools";
 
 export type ArtifactRole = "final" | "intermediate" | "temporary";
 
@@ -8,24 +7,6 @@ export type ArtifactOutput = {
 	path: string;
 	artifactRole: ArtifactRole;
 };
-
-export type ToolAsk = (request: Omit<InteractionRequest, "id">, signal?: AbortSignal) => Promise<void>;
-
-export type ToolRuntime = {
-	sessionId: string;
-	directory: string;
-	ask: ToolAsk;
-	jobs: BackgroundJobs;
-	notifyBackground?: (message: string) => Promise<void>;
-};
-
-export function applyPermissionPolicy(policy: PermissionPolicy | undefined, ask: ToolAsk): ToolAsk {
-	return async (request, signal) => {
-		const permission = request.metadata?.permission;
-		if (typeof permission === "string" && (policy?.[permission] ?? policy?.["*"]) === "allow") return;
-		await ask(request, signal);
-	};
-}
 
 export function containsPath(root: string, target: string): boolean {
 	const base = resolve(root);

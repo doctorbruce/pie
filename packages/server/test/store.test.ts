@@ -5,11 +5,12 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionSnapshot, SessionTransfer } from "../src/protocol.ts";
+import type { SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
+import type { SavedSession, SessionMetadata } from "@pie/runtime/runtime-store";
+import { exportSession, transferToAgentMessages } from "@pie/runtime/session-transfer";
+import { type MessageTree, syncMessageTree } from "@pie/runtime/session-tree";
+import { openStore } from "../../local/src/store.ts";
 import { createCoreServer } from "../src/server.ts";
-import { exportSession, transferToAgentMessages } from "../src/session-transfer.ts";
-import { type MessageTree, syncMessageTree } from "../src/session-tree.ts";
-import { openStore, type SavedSession, type SessionMetadata } from "../src/store.ts";
 
 function user(content: string, timestamp = 1): AgentMessage {
 	return { role: "user", content, timestamp };

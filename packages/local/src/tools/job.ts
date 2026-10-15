@@ -2,8 +2,8 @@ import { type FileHandle, open } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import type { BackgroundJobInfo } from "./jobs.ts";
-import type { ToolRuntime } from "./runtime.ts";
+import type { BackgroundJobInfo } from "@pie/runtime/jobs";
+import type { ToolRuntime } from "@pie/runtime/tools";
 
 const parameters = Type.Object(
 	{

@@ -1,7 +1,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import { ModelSettingsError } from "./models/settings.ts";
+import { ModelSettingsError } from "./capabilities.ts";
 import type { SessionTransfer, TransferContentPart, TransferMessage } from "./protocol.ts";
-import type { SavedSession } from "./store.ts";
+import type { SavedSession } from "./runtime-store.ts";
 
 const EMPTY_USAGE = {
 	input: 0,

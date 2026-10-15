@@ -11,8 +11,8 @@ import {
 	rmSync,
 } from "node:fs";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import type { Assistant, Plugin, RuntimeConfig, Skill } from "@pie/runtime/protocol";
 import { parse } from "yaml";
-import type { Assistant, Plugin, RuntimeConfig, Skill } from "./protocol.ts";
 
 export class PluginError extends Error {}
 

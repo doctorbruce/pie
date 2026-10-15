@@ -1,4 +1,4 @@
-import type { SessionTree } from "@pie/server/protocol";
+import type { SessionTree } from "@pie/runtime/protocol";
 
 export function SessionTreeDialog({
 	tree,

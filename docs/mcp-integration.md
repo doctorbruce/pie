@@ -4,7 +4,7 @@
 
 协议客户端来自上游 Pi 提交 `4270522473e677ddba7b093caa0064a3df51d459` 的 `packages/mcp`，包含未发布的 OAuth issuer 校验修复。保留原客户端测试、根 MIT 许可及 MCP TypeScript SDK OAuth 第三方许可；未升级 Pie 的 Agent/AI 核心。
 
-产品适配在 `packages/server/src/mcp.ts`；Astron 配置投影在 `adapters/pie/runtime_config.py`，状态回传通过 Core 的 MCP_STATUS port。浏览器设置页继续经 local-router 调用 Astron，不直连 Pie。
+共享配置校验与生命周期契约在 `packages/runtime/src/mcp.ts`；本地连接、OAuth、权限和工具适配在 `packages/local/src/mcp.ts`。运行包只消费注入的 MCP 实现，不默认启动本机进程。Astron 配置投影在 `adapters/pie/runtime_config.py`，状态回传通过 Core 的 MCP_STATUS port。浏览器设置页继续经 local-router 调用 Astron，不直连 Pie。
 
 ## 配置注册
 

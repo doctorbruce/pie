@@ -7,8 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { type TestContext, test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Api, ImageContent, Model } from "@earendil-works/pi-ai";
-import { createModelRequestRecorder, type ModelRequestRecord } from "../src/model-requests.ts";
-import type { Assistant, SessionSnapshot } from "../src/protocol.ts";
+import type { Assistant, SessionSnapshot } from "@pie/runtime/protocol";
+import { createModelRequestRecorder, type ModelRequestRecord } from "../../local/src/model-requests.ts";
 import { createCoreServer } from "../src/server.ts";
 
 const model: Model<Api> = {

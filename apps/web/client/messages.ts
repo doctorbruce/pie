@@ -1,5 +1,5 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
-import type { SessionEvent, SessionSnapshot } from "@pie/server/protocol";
+import type { SessionEvent, SessionSnapshot } from "@pie/runtime/protocol";
 
 export function updateToolProgress(
 	current: ReadonlyMap<string, string>,

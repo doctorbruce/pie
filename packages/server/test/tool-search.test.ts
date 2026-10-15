@@ -8,10 +8,10 @@ import { setTimeout } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { contentText, Type } from "@earendil-works/pi-ai";
-import type { ExternalTool } from "../src/external-tools.ts";
-import type { SessionSnapshot } from "../src/protocol.ts";
+import type { SessionSnapshot } from "@pie/runtime/protocol";
+import { createToolSearch } from "@pie/runtime/tool-search";
+import type { ExternalTool } from "@pie/runtime/tools";
 import { createCoreServer } from "../src/server.ts";
-import { createToolSearch } from "../src/tool-search.ts";
 
 async function request(base: string, path: string, body?: unknown, method = "POST") {
 	const response = await fetch(`${base}${path}`, {

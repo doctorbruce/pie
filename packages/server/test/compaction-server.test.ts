@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout } from "node:timers/promises";
-import type { Assistant, SessionSnapshot } from "../src/protocol.ts";
+import type { Assistant, SessionSnapshot } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
 async function listen(core: ReturnType<typeof createCoreServer>) {

@@ -1,7 +1,7 @@
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import { type Context, contentText, Type } from "@earendil-works/pi-ai";
-import type { ExternalTool } from "./external-tools.ts";
 import type { McpServerInstructions } from "./mcp.ts";
+import type { ExternalTool } from "./tools.ts";
 
 const STOP_WORDS = new Set(["a", "an", "and", "for", "in", "of", "or", "the", "to", "with"]);
 

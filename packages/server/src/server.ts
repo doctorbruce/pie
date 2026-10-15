@@ -1,16 +1,15 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
-import { createAgentFactory } from "./agent.ts";
-import { ToolConfigError } from "./external-tools.ts";
-import { McpConfigError } from "./mcp.ts";
-import { createModelSettings, ModelSettingsError } from "./models/settings.ts";
-import { createPlugins, PluginError } from "./plugins.ts";
-import type { HostRuntimeDefinition, SessionEvent } from "./protocol.ts";
-import { type CreateSessionInput, createRuntime, type PieRuntime, RuntimeError, type TurnInput } from "./runtime.ts";
-import { historyMessageId } from "./session-tree.ts";
-import { SkillConfigError } from "./skills.ts";
-import { createSqliteRuntimeStore, openStore } from "./store.ts";
+import { createLocalHost } from "@pie/local";
+import { PluginError } from "@pie/local/plugins";
+import { type CreateSessionInput, type PieRuntime, RuntimeError, type TurnInput } from "@pie/runtime";
+import { ModelSettingsError } from "@pie/runtime/capabilities";
+import { SkillConfigError } from "@pie/runtime/config";
+import { McpConfigError } from "@pie/runtime/mcp";
+import type { HostRuntimeDefinition, SessionEvent } from "@pie/runtime/protocol";
+import { historyMessageId } from "@pie/runtime/session-tree";
+import { ToolConfigError } from "@pie/runtime/tools";
 
 const HOST_RUNTIME_REQUEST_LIMIT = 4 * 1024 * 1024;
 const TURN_REQUEST_LIMIT = 32 * 1024 * 1024;
@@ -147,22 +146,7 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 
 export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 	const env = Object.freeze({ ...environment });
-	const settings = createModelSettings(env);
-	const factory = createAgentFactory(env, { models: settings });
-	const plugins = createPlugins(env);
-	const store = openStore(env);
-	const ready = createRuntime({
-		agents: factory,
-		store: createSqliteRuntimeStore(store),
-		hostRuntimes: store.hostRuntimes,
-		saveHostRuntimes: async (definitions) => store.replaceHostRuntimes(definitions),
-		local: {
-			assistants: store.assistants,
-			plugins,
-			saveAssistant: async (assistant) => store.saveAssistant(assistant),
-			deleteAssistant: async (id) => store.deleteAssistant(id),
-		},
-	});
+	const { settings, agents: factory, ready } = createLocalHost(env);
 	void ready.catch(() => {});
 	let closing = false;
 	let closePromise: Promise<void> | undefined;

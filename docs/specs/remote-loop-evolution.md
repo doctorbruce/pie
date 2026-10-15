@@ -1,7 +1,7 @@
 
 # Pie 本地 / 云端统一 Loop 演进
 
-状态：进行中，第一阶段源码接入骨架已落地；云端实现待服务端开发。更新日期：2026-10-15。
+状态：进行中，第一阶段源码骨架、runtime / local / server 包级拆分与 Cloud 五包源码接入已完成；发行与真实云端宿主装配、后续云端实现待完成。更新日期：2026-10-15。
 
 ## 问题与目标
 
@@ -15,8 +15,8 @@ Session、Turn、上下文、模型调用、Subagent 和 Loop 只维护一份实
 
 ## 当前基础与差距
 
-- `packages/agent` 继续负责底层 Loop；`packages/server/src/runtime.ts` 现在承载可直接调用的会话运行逻辑，经 `pie/runtime` / `@pie/server/runtime` 导出。原有根入口仍导出 Agent Core，嵌入宿主应使用 runtime 子入口。
-- 本地 `server.ts` 已改为依赖装配和 HTTP / SSE 转换；运行层通过异步 `RuntimeStore` 访问会话，`store.ts` 保留 SQLite 并提供适配。`agent.ts` 可注入模型、工具、技能、MCP 与请求记录能力；这些接口的真实云端实现仍待开发。
+- `packages/agent` 继续负责底层 Loop；`packages/runtime` 承载可直接调用的会话运行逻辑与能力契约，通过 `@pie/runtime`（或根仓库 `pie/runtime`）导出。根入口仍导出 Agent Core，不再从 Server 导入运行模块。
+- `packages/local` 装配 SQLite、本机工具、文件模型配置、Skill / MCP 和本地助手管理；`packages/server` 只做 HTTP / SSE、CLI / Sidecar。本地默认值和数据格式保留，Runtime 不依赖这两个包；异步 `RuntimeStore` 与模型 / 工具 / Skill / MCP / 请求记录的真实云端实现仍待开发。
 - `cowork3/cloud` 已有 Fastify `agent-service` 入口与 `Svc` 装配位置；`tools-sdk`、`protocol`、`tools-service` 和 `vm-worker` 目前只有包配置，不能当作已可用的调用链。
 - SQLite 本身也是数据库；这里的存储演进是从本机文件数据库，变成可替换的服务数据库实现，不是简单把 SQLite SQL 换个地址。
 
@@ -29,7 +29,7 @@ Web / IM / API → agent-service    → Pie 包调用         → Pie Runtime
 
 cloud/
   apps/agent-service：云端产品宿主，相当于本地 astronverse-agent
-  packages/pie：拟议的共享运行时接入位置，不是另一套产品服务
+  packages/pie：五个共享能力包，不是另一套产品服务
   packages/tools-sdk：工具定义、校验、可信服务端工具及执行端调用能力
   apps/tools-service / vm-worker：按工具和环境需要承担实际执行
   packages/protocol：跨进程消息；不承载 Loop 或业务状态
@@ -106,9 +106,12 @@ cloud/
 
 第一阶段用现有回归和替身依赖验证装配边界；第二阶段才要求真实云端数据库与 SDK / Worker 链路，不能用健康检查或模拟工具代替云端闭环验收。数据库选型在该阶段明确，不提前绑定。
 
-## 本轮范围与不做
+## 包级拆分范围与不做
 
-- 本轮先实现可直接调用的运行入口、异步会话存储契约与本地适配，以及工具 / 模型能力的注入位置；本地 HTTP 继续复用同一套运行逻辑。补充无付费模型的嵌入与本地回归验证，并给服务端明确接入说明。
+- 本轮完成包级拆分：`@pie/runtime` 只包含运行语义与能力契约；`@pie/local` 提供 SQLite、本机工具、文件配置、Skill / MCP 与产品助手管理；`@pie/server` 只装配本地依赖并映射 HTTP / SSE，保留现有 CLI / Sidecar 命令。
+- 运行包不得反向导入 local / server，也不得默认打开数据库、扫描工具目录或读取本地配置；宿主显式传入模型、工具、技能、MCP 与请求记录，可选提供压缩配置解析，省略时只做纯计算。本地适配保留原默认值和数据格式。
+- 更新源码入口、workspace 依赖、Web / 示例及定向测试；不保留旧的 server/runtime、server/protocol、server/tools 转发入口。本轮不搬入 cloud，不增加热更新插件框架，不改底层 Loop，也不覆盖已有流式控制与工具结果改动。
+- 验收覆盖独立运行包的依赖边界与嵌入测试、本地 HTTP / SQLite / 工具 / MCP / Skill / 分支 / 压缩回归、`npm run check`、锁文件一致性和 `git diff --check`；实际结果见实施记录。发行构建不在本轮范围。
 - 不搬仓库，不实现云端数据库、tools-sdk、认证与租户平台，不提前宣称云端已可交付；云端 Skill 资源引用与执行端协议仍待后续细化。
 - 不重写 Agent Loop，不为云端复制一套 Pie，不把整套桌面 UI 搬到云端，不为接口化拆出大量微服务或通用插件框架。
 - 不预先选择数据库、ORM、消息队列、持久执行框架或沙箱供应商；先证明嵌入与执行解耦，再按真实负载演进。
@@ -123,3 +126,24 @@ cloud/
 - `runtime.test.ts` 用延迟存储替身与注入工具验证无 HTTP / SQLite 的执行、并发写入、事件顺序、确认、取消、失败与重启读取；新增入口和测试已接入包导出与测试命令。服务端开发分工、装配示例、存储语义和默认本机能力风险见 [嵌入接入说明](../runtime-embedding.md)。
 - 骨架验收：在 `packages/server` 执行 `node --expose-gc --conditions=source --test test/runtime.test.ts test/server.test.ts test/fork.test.ts test/compaction-server.test.ts test/auto-compaction-server.test.ts test/store.test.ts test/working-history.test.ts test/agent.test.ts test/external-tools.test.ts test/plugins.test.ts test/mcp.test.ts test/tool-progress.test.ts test/tool-search.test.ts test/model-requests.test.ts test/model-override.test.ts test/multimodal-input.test.ts test/compaction.test.ts test/auto-compaction.test.ts test/tools.test.ts`，108 项全部通过；仅使用 faux 模型及本地模拟端点。`npm run check` 通过，含 Biome、服务与 Web 类型检查、模型数据校验；`git diff --check` 通过。未运行发行构建或付费模型。
 - 相对原方案：先增加“可嵌入与本地等价”前置阶段；本轮交付其源码骨架，不搬入 Cloud workspace、不实现云端数据库 / SDK / 认证 / 多租户或对象存储资源协议。源码骨架已验证不等于云端可交付；第一阶段发行与 Cloud 装配验收、第二至第四阶段仍待完成。
+
+### 2026-10-15 包级拆分：已完成
+
+- 实际结构：`packages/runtime/src/runtime.ts`、`agent.ts`、`capabilities.ts`、`runtime-store.ts`、`config.ts`、`tools.ts`、`mcp.ts` 负责共享运行语义和契约；压缩、消息树、工具发现与通用作业状态也归 Runtime。`packages/local/src/runtime.ts`、`agent.ts` 装配 SQLite、模型文件、工具 / Skill / MCP、请求记录与本地助手 / Plugin 管理。`packages/server/src/server.ts`、`cli.ts`、`sidecar.ts` 保留本地传输和启动入口，底层 `packages/agent` 未改动。
+- `createAgentFactory(options)` 的共享入口必须注入五类能力，本地工厂保留原默认装配；模型 header 解析和压缩文件读取不再泄漏到 Runtime。保留原生工具、外部工具的默认 / 延迟曝光、确认、取消与错误语义；本地资源引用检查使用不含正文的 `listSessionMetadata`。
+- 更新 workspace、锁文件、Web 类型和示例导入；不保留旧 Server 子路径转发。第三方许可随工具移至 `packages/local/LICENSES`，内容哈希不变；Bun / SEA 构建脚本继续携带 `.LICENSES.txt`。接入说明见 [嵌入接入文档](../runtime-embedding.md) 与两个新包 README。
+- 验证：`npm run test:server` 134 项通过；额外执行 `node --expose-gc --conditions=source --test packages/server/test/agent.test.ts packages/server/test/model-override.test.ts packages/server/test/multimodal-input.test.ts packages/server/test/provider-composer.test.ts`，12 项通过。包含 Runtime 独立嵌入 / 依赖边界、HTTP / SQLite 重启、消息树、压缩、Subagent、工具、MCP、Skill、模型请求及 Web 展示回归，不使用收费模型。
+- 全目录定向回归额外发现 `session-transfer.test.ts` 的旧会话迁移用例仍提交已不支持的内联 runtime，期望 201 而得到 400；在拆分前源文件快照上独立复现同一失败，其余三个迁移用例通过。本轮不改协议或修复这项已有测试偏差；拆分新增的外部工具曝光回归已修正并通过原请求断言。
+- `npm run check` 通过；锁文件已使用 `npm install --package-lock-only --ignore-scripts --no-audit --no-fund` 刷新；`git diff --check` 通过。29 份纯迁移实现 / 测试排除导入路径和格式差异后与拆分前一致，包含原有全局流、Shell 和 webfetch 未提交改动。
+- 偏差与未完成：采用静态函数装配，不建设通用插件框架；本地 CLI / Sidecar 命令与 SQLite 格式不变。本轮未搬入 `cowork3/cloud`、未构建或部署 Sidecar，发行与 Cloud workspace 消费方式、真实数据库 / tools-sdk、资源引用和多租户验收仍待后续阶段；未提交或推送。
+
+### 2026-10-15 Cloud 共享包接入：已完成
+
+- 目标与范围：只将当前工作树的 Runtime / Agent / AI / Telemetry / MCP 五个包放在 `cowork3/cloud/packages/pie/{runtime,agent,ai,telemetry,mcp}`，保留包内源码、测试、许可与模型目录数据，以及必要的共享配置和接入说明；不保留整仓外壳、Local / Server / Web、仓库文档和示例。不移动或裁剪原 Pie 仓库，不复制 `.git`、密钥、会话、依赖、缓存或构建产物。
+- 实现：五个能力包由 Cloud workspace 统一管理，内部依赖强制使用本地 workspace；同步调整包内配置相对路径。`agent-service` 依赖 Runtime 和 MCP，承担宿主装配，不另建 Server 包或动态插件系统。通过包解析、干净目录断言、嵌入与 MCP 协议回归验证，不向 `Svc` 注入假的数据库或工具。MCP 纳入可消费能力，不默认启用 Local 的进程启动、OAuth 文件凭据或输出落盘。
+- 关键文件：Cloud 的 `pnpm-workspace.yaml`、`pnpm-lock.yaml`、`tsconfig.pie.json`、`apps/agent-service/package.json` 与 `tests/pie.test.mjs`；五包来源、装配边界和验证入口记录在 `packages/pie/README.md`。四个包的构建配置改为引用同级容器的基础配置，AI 模型目录导出路径随布局调整。
+- 验收：Cloud `pnpm install --ignore-scripts --frozen-lockfile`、`pnpm typecheck:pie`、`pnpm --filter @astron-cloud/agent-service typecheck` 与 `node packages/pie/ai/scripts/check-model-data.ts` 通过；`pnpm test:pie` 6 项通过，含目录与依赖来源断言；`pnpm test:mcp` 42 项通过、1 项原有 Windows 条件跳过；`pnpm --filter @astron-cloud/agent-service test` 2 项通过。未调用收费模型。
+- 一致性：五包源码及公开模型数据与原工作树一致，差异限于布局配置和接入文档；逐文件核对 468 份源文件 / 资源 / 共享配置，另有两个容器说明文件，四个包配置均能解析。Git 可见 40 份公开模型 JSON；没有额外整仓目录或外部仓库链接。原 Pie 的 `npm run check` 与双方 `git diff --check` 通过，已有无关改动保留。
+- 相对原方案：撤回最初的整仓复制，改为五包选择性接入；不保留多余的根清单、锁文件、文档、Local / Server / Web。严格依赖隔离发现 AI 缺少直接声明的 `@smithy/types`，在原仓库与 Cloud 同步补充固定版本 `4.19.0` 并刷新锁文件。源码安装可能提示未构建的 `pi-ai` CLI 入口，未通过删除 CLI 或擅自构建来掩盖；不影响已验证的源码消费。
+- 提交验收：按用户要求分别提交原 Pie 拆分与 Cloud 五包接入，包含必要的 workspace 锁文件。原 Pie 提交排除拆分前已有的 Shell、webfetch 和全局流实验，只保留包迁移与本次装配改动；原工作树内容不回退。在隔离的待提交快照上执行 `npm run check`、`npm run test:server`（125 项通过），以及 Agent / 模型覆盖 / 多模态 / Provider 的四文件定向回归（12 项通过）。
+- 不做：本轮只交付可消费的五包源码，不实现会话 HTTP API、云端数据库、tools-sdk 适配、租户平台或动态插件框架，不构建 / 部署 Sidecar，不推送。

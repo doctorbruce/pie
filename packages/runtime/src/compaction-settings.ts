@@ -1,10 +1,7 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
 import type { RetryPolicy } from "./compaction/retry.ts";
 import type { CompactionSettings } from "./compaction.ts";
-import { stripJsonComments } from "./models/json.ts";
 
-type CompactionModel = { provider: string; id: string; contextWindow: number; maxTokens: number };
+export type CompactionModel = { provider: string; id: string; contextWindow: number; maxTokens: number };
 
 function object(value: unknown, field: string): Record<string, unknown> {
 	if (value === undefined) return {};
@@ -64,16 +61,4 @@ export function resolveCompactionSettings(
 			maxAgentDelayMs: integer(retry.maxAgentDelayMs, 60000, "retry.maxAgentDelayMs"),
 		},
 	};
-}
-
-export function readCompactionSettings(env: NodeJS.ProcessEnv, model: CompactionModel) {
-	const path = resolve(env.PI_DATA_DIR ?? ".pie", "settings.json");
-	let content: string;
-	try {
-		content = readFileSync(path, "utf8");
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return resolveCompactionSettings({}, model);
-		throw error;
-	}
-	return resolveCompactionSettings(JSON.parse(stripJsonComments(content)), model);
 }

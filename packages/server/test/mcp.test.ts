@@ -6,8 +6,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { McpManager, parseMcpServers } from "../src/mcp.ts";
-import type { McpServerConfig, SessionSnapshot } from "../src/protocol.ts";
+import { parseMcpServers } from "@pie/runtime/mcp";
+import type { McpServerConfig, SessionSnapshot } from "@pie/runtime/protocol";
+import { McpManager } from "../../local/src/mcp.ts";
 import { createCoreServer } from "../src/server.ts";
 
 async function httpFixture() {

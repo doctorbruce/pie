@@ -5,8 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createAgentFactory } from "../src/agent.ts";
-import type { Assistant, InteractionRequest, SessionEvent, SessionSnapshot, ToolInfo } from "../src/protocol.ts";
+import { createAgentFactory } from "@pie/local/agent";
+import type { Assistant, InteractionRequest, SessionEvent, SessionSnapshot, ToolInfo } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
 async function request(base: string, path: string, body?: unknown) {

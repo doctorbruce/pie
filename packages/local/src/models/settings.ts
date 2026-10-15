@@ -3,14 +3,13 @@ import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node
 import { dirname, resolve } from "node:path";
 import { createModels } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import type { ModelCatalog, ModelSelection, ProviderCatalog, ProviderSettings } from "../protocol.ts";
+import { ModelSettingsError } from "@pie/runtime/capabilities";
+import type { ModelCatalog, ModelSelection, ProviderCatalog, ProviderSettings } from "@pie/runtime/protocol";
 import { discoverModels, endpointUrl } from "./discovery.ts";
 import { stripJsonComments } from "./json.ts";
 import { type ModelsJson, parseModelConfig } from "./model-config.ts";
 import { composeModelProvider } from "./provider-composer.ts";
 import { getConfigValueEnvVarNames } from "./resolve-config-value.ts";
-
-export class ModelSettingsError extends Error {}
 
 function selection(value: unknown): ModelSelection {
 	if (

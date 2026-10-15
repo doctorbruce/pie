@@ -6,7 +6,7 @@
 	"dependencies": {
 		"@assistant-ui/react": "0.15.19",
 		"@assistant-ui/react-markdown": "0.14.15",
-		"@pie/server": "0.0.1",
+		"@pie/runtime": "0.0.1",
 		"react": "19.3.0",
 		"react-dom": "19.3.0"
 	},

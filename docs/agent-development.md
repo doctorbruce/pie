@@ -338,17 +338,20 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 
 | 文件 | 修改场景 |
 | --- | --- |
-| `packages/server/src/protocol.ts` | HTTP/SSE 类型和公开概念 |
-| `packages/server/src/server.ts` | 助手/父子会话 API、task 派发、并发准入、事件发布和结算 |
-| `packages/server/src/store.ts` | SQLite、消息落盘与中断恢复 |
-| `packages/server/src/agent.ts` | 助手配置转换、注册工具、真实模型调用和测试 provider |
-| `packages/server/src/compaction.ts` | 上下文预算、切分点、摘要生成输入和压缩后模型上下文 |
-| `packages/server/src/plugins.ts` | Astron manifest 的 Skill 索引、本地导入与卸载 |
-| `packages/server/src/skills.ts` | 运行配置校验、skill、来源与加载结果 |
-| `packages/server/src/tools.ts`、`tools/` | 十个内置工具的 Core 适配、文件操作、网页抓取、搜索、系统命令和后台作业管理 |
-| `packages/server/src/external-tools.ts` | 工具文件加载、ToolContext、工具 ID 和定义校验 |
+| `packages/runtime/src/protocol.ts` | HTTP/SSE 类型和公开概念 |
+| `packages/server/src/server.ts` | 本地宿主装配与 HTTP / SSE 映射，不承载另一套 Loop |
+| `packages/runtime/src/runtime.ts` | 父子会话、task 派发、并发准入、事件发布和结算 |
+| `packages/runtime/src/capabilities.ts`、`runtime-store.ts` | 模型、工具、Skill / MCP、请求记录与异步会话存储契约 |
+| `packages/local/src/runtime.ts`、`agent.ts` | 本地能力装配与助手 / Plugin 管理 |
+| `packages/local/src/store.ts` | SQLite、消息落盘与中断恢复 |
+| `packages/runtime/src/agent.ts` | 使用注入能力构造 Agent、工具发现、模型调用和测试 provider |
+| `packages/runtime/src/compaction.ts` | 上下文预算、切分点、摘要生成输入和压缩后模型上下文 |
+| `packages/local/src/plugins.ts` | Astron manifest 的 Skill 索引、本地导入与卸载 |
+| `packages/runtime/src/config.ts`、`packages/local/src/skills.ts` | 共享运行配置校验与本地 Skill 读取、来源和加载结果 |
+| `packages/local/src/tools.ts`、`tools/` | 十个内置工具的 Core 适配、文件操作、网页抓取、搜索、系统命令和后台作业管理 |
+| `packages/local/src/external-tools.ts`、`packages/runtime/src/tools.ts` | 本地工具文件加载、共享 ToolContext、工具 ID 和定义校验 |
 | `examples/tools/memory-manage.ts` | Astron 记忆工具适配示例，可复制到外部目录 |
-| `packages/server/src/models/` | 上游模型配置抽取和提供商管理 |
+| `packages/local/src/models/` | 上游模型配置抽取和提供商管理 |
 | `apps/web/client/main.tsx` | 助手选择、会话列表/切换、SSE、聊天和会话详情 |
 | `apps/web/client/assistant-settings.tsx` | 助手配置表单 |
 | `packages/agent/src/agent.ts`、`agent-loop.ts` | 原版执行内核，当前保持 `b2602be` 基线 |

@@ -1,0 +1,26 @@
+{
+	"name": "@pie/local",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./*": "./src/*.ts"
+	},
+	"dependencies": {
+		"@pie/runtime": "0.0.1",
+		"@earendil-works/pi-mcp": "1.1.0",
+		"@earendil-works/pi-agent-core": "0.85.1",
+		"@earendil-works/pi-ai": "0.85.1",
+		"diff": "8.0.2",
+		"htmlparser2": "8.0.2",
+		"pdfjs-dist": "6.3.289",
+		"turndown": "7.2.0",
+		"typebox": "1.3.7",
+		"typescript": "5.9.3",
+		"yaml": "2.9.0"
+	},
+	"devDependencies": {
+		"@types/turndown": "5.0.5"
+	}
+}

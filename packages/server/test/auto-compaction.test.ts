@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { createAssistantMessageEventStream, fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { isContextOverflow } from "../src/compaction/overflow.ts";
-import { retryAssistantCall } from "../src/compaction/retry.ts";
-import { createCompactionStream, createCompactionTransform, estimateContextTokens } from "../src/compaction.ts";
-import { resolveCompactionSettings } from "../src/compaction-settings.ts";
-import type { ContextCompaction } from "../src/protocol.ts";
+import { createCompactionStream, createCompactionTransform, estimateContextTokens } from "@pie/runtime/compaction";
+import { isContextOverflow } from "@pie/runtime/compaction/overflow";
+import { retryAssistantCall } from "@pie/runtime/compaction/retry";
+import { resolveCompactionSettings } from "@pie/runtime/compaction-settings";
+import type { ContextCompaction } from "@pie/runtime/protocol";
 
 const model = { provider: "local", id: "tiny", contextWindow: 1000, maxTokens: 100 };
 const policy = { enabled: true, maxRetries: 2, baseDelayMs: 1 };

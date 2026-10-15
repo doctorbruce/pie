@@ -1,5 +1,5 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import type { ToolContext } from "@pie/server/tools";
+import type { ToolContext } from "@pie/runtime/tools";
 
 // Adapted from Astron's adapters/opencode/tools/tool_assets/memory-manage.ts.
 export default function createMemoryTool({ Type, sessionId, env }: ToolContext) {

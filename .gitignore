@@ -15,6 +15,7 @@ packages/ai/src/providers/.model-generation-*/
 # Environment
 .env
 .pie/
+.bun-cache
 
 # Editor files
 .vscode/

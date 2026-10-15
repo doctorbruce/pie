@@ -173,6 +173,155 @@ test("Cloudflare challenges retry once with the Amio user agent; other failures 
 	assert.equal(agents.length, 5);
 });
 
+test("Bilibili 412 falls back to the approved public mobile video page in all formats", async (context) => {
+	const agents: string[] = [];
+	const html = "<h1>视频标题</h1><p>作者和简介</p>";
+	const base = await serve(context, (request, response) => {
+		agents.push(request.headers["user-agent"] ?? "");
+		response.writeHead(request.url === "/desktop" ? 412 : 200, { "content-type": "text/html" });
+		response.end(request.url === "/desktop" ? "blocked" : html);
+	});
+	const originalFetch = globalThis.fetch;
+	const requests: string[] = [];
+	const signals: (AbortSignal | null | undefined)[] = [];
+	const blocked: Response[] = [];
+	const transport: typeof fetch = async (input, init) => {
+		requests.push(String(input));
+		signals.push(init?.signal);
+		assert.equal(new Headers(init?.headers).has("cookie"), false);
+		const mobile = requests.length % 2 === 0;
+		const response = await originalFetch(`${base}/${mobile ? "mobile" : "desktop"}`, init);
+		if (!mobile) blocked.push(response);
+		return response;
+	};
+	context.mock.method(globalThis, "fetch", transport);
+	const approvals: string[] = [];
+	const tool = createTool(async (request) => {
+		assert.equal(approvals.length, requests.length);
+		approvals.push(String(request.metadata?.url));
+		assert.deepEqual(request.metadata?.resources, [request.metadata?.url]);
+		if (approvals.length % 2 === 0) assert.equal(blocked.at(-1)?.bodyUsed, true);
+	});
+	for (const [url, sourceUrl, format] of [
+		["https://www.bilibili.com/video/BV12Gah67EZk/?p=2", "https://m.bilibili.com/video/BV12Gah67EZk?p=2", "markdown"],
+		["https://bilibili.com/video/av12345/", "https://m.bilibili.com/video/av12345", "text"],
+		["https://m.bilibili.com/video/BV12Gah67EZk/", "https://m.bilibili.com/video/BV12Gah67EZk", "html"],
+	] as const) {
+		const result = await tool.execute("mobile", { url, format });
+		assert.equal(result.details.url, url);
+		assert.equal(result.details.sourceUrl, sourceUrl);
+		assert.equal(result.details.contentType, "text/html");
+		assert.deepEqual(requests.slice(-2), [url, sourceUrl]);
+		assert.deepEqual(approvals.slice(-2), [url, sourceUrl]);
+		assert.equal(signals.at(-1), signals.at(-2));
+		assert.match(agents.at(-2) ?? "", /Windows NT/);
+		assert.match(agents.at(-1) ?? "", /iPhone.*Mobile/);
+		assert(result.content[0].type === "text");
+		if (format === "html") assert.equal(result.content[0].text, html);
+		else {
+			assert(result.content[0].text.includes(sourceUrl));
+			assert.match(result.content[0].text, /not a video transcript/);
+			assert.match(result.content[0].text, /视频标题/);
+		}
+	}
+});
+
+test("Bilibili mobile fallback excludes unrelated hosts, ports, paths and statuses", async (context) => {
+	let status = 412;
+	const transport: typeof fetch = async () => new Response("response", { status });
+	const mocked = context.mock.method(globalThis, "fetch", transport);
+	const tool = createTool();
+	for (const url of [
+		"https://example.com/video/BV12Gah67EZk/",
+		"https://www.bilibili.com.example.com/video/BV12Gah67EZk/",
+		"https://other.bilibili.com/video/BV12Gah67EZk/",
+		"https://www.bilibili.com:444/video/BV12Gah67EZk/",
+		"https://www.bilibili.com/read/cv12345/",
+		"https://www.bilibili.com/video/not-a-video/",
+	]) {
+		const before = mocked.mock.callCount();
+		await assert.rejects(tool.execute("unrelated", { url }), /status code: 412/);
+		assert.equal(mocked.mock.callCount(), before + 1);
+	}
+	for (status of [200, 403, 404]) {
+		const before = mocked.mock.callCount();
+		const pending = tool.execute("status", { url: "https://www.bilibili.com/video/BV12Gah67EZk/" });
+		if (status === 200) await pending;
+		else await assert.rejects(pending, new RegExp(`status code: ${status}`));
+		assert.equal(mocked.mock.callCount(), before + 1);
+	}
+});
+
+test("Bilibili fallback retries only once and never returns an unsuccessful mobile page", async (context) => {
+	const responses: Response[] = [];
+	const transport: typeof fetch = async () => {
+		const response = new Response("blocked", { status: 412 });
+		responses.push(response);
+		return response;
+	};
+	context.mock.method(globalThis, "fetch", transport);
+	await assert.rejects(
+		createTool().execute("blocked", { url: "https://www.bilibili.com/video/BV12Gah67EZk/" }),
+		/status code: 412/,
+	);
+	assert.equal(responses.length, 2);
+	assert(responses.every((response) => response.bodyUsed));
+});
+
+test("denying or cancelling Bilibili mobile permission prevents the fallback request", async (context) => {
+	const transport: typeof fetch = async () => new Response("blocked", { status: 412 });
+	const mocked = context.mock.method(globalThis, "fetch", transport);
+	for (const mode of ["deny", "cancel"]) {
+		const controller = new AbortController();
+		const before = mocked.mock.callCount();
+		let approvals = 0;
+		const tool = createTool(async (_request, signal) => {
+			approvals++;
+			if (approvals === 1) return;
+			assert(signal);
+			if (mode === "deny") throw new Error("mobile denied");
+			controller.abort();
+			assert.equal(signal.aborted, true);
+		});
+		const pending = tool.execute(
+			"permission",
+			{ url: "https://www.bilibili.com/video/BV12Gah67EZk/" },
+			controller.signal,
+		);
+		await assert.rejects(pending, mode === "deny" ? /mobile denied/ : { name: "AbortError" });
+		assert.equal(approvals, 2);
+		assert.equal(mocked.mock.callCount(), before + 1);
+	}
+});
+
+test("Bilibili fallback keeps response limits and the original timeout", async (context) => {
+	const base = await serve(context, (request, response) => {
+		response.writeHead(200, {
+			"content-type": "text/html",
+			...(request.url === "/large" ? { "content-length": MAX_RESPONSE_BYTES + 1 } : {}),
+		});
+		response.write("partial");
+	});
+	const originalFetch = globalThis.fetch;
+	let path = "/large";
+	let attempts = 0;
+	const signals: (AbortSignal | null | undefined)[] = [];
+	const transport: typeof fetch = async (_input, init) => {
+		attempts++;
+		signals.push(init?.signal);
+		return attempts % 2 === 1 ? new Response("blocked", { status: 412 }) : originalFetch(`${base}${path}`, init);
+	};
+	context.mock.method(globalThis, "fetch", transport);
+	for (path of ["/large", "/timeout"]) {
+		await assert.rejects(
+			createTool().execute("bounded", { url: "https://www.bilibili.com/video/BV12Gah67EZk/", timeout: 0.2 }),
+			path === "/large" ? /Response too large/ : /Request timed out/,
+		);
+		assert.equal(signals.at(-1), signals.at(-2));
+	}
+	assert.equal(attempts, 4);
+});
+
 test("declared and streamed response sizes are bounded, and binary content is rejected", async (context) => {
 	const base = await serve(context, (request, response) => {
 		if (request.url === "/declared") {

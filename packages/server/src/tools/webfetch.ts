@@ -35,6 +35,7 @@ const parameters = Type.Object(
 
 type WebFetchDetails = {
 	url: string;
+	sourceUrl?: string;
 	contentType: string;
 	format: "text" | "markdown" | "html";
 	truncated: boolean;
@@ -45,7 +46,7 @@ export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters,
 	return {
 		name: "webfetch",
 		label: "抓取网页",
-		description: `Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default. Use a more targeted tool when one is available. This tool is read-only. Requests default to ${DEFAULT_TIMEOUT_SECONDS} seconds, with a maximum of ${MAX_TIMEOUT_SECONDS} seconds and ${MAX_RESPONSE_BYTES / 1024 / 1024} MiB per response. Large text results are replaced with a preview while the complete output is saved to a file that can be inspected with read.`,
+		description: `Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default. Use a more targeted tool when one is available. This tool is read-only. Bilibili public video pages blocked with HTTP 412 may fall back to the same video's official mobile page; page text is not a video transcript. Requests default to ${DEFAULT_TIMEOUT_SECONDS} seconds, with a maximum of ${MAX_TIMEOUT_SECONDS} seconds and ${MAX_RESPONSE_BYTES / 1024 / 1024} MiB per response. Large text results are replaced with a preview while the complete output is saved to a file that can be inspected with read.`,
 		parameters,
 		async execute(_id, { url, format = "markdown", timeout = DEFAULT_TIMEOUT_SECONDS }, signal) {
 			signal?.throwIfAborted();
@@ -76,12 +77,40 @@ export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters,
 				"Accept-Language": "en-US,en;q=0.9",
 			};
 			let response: Response | undefined;
+			let sourceUrl: string | undefined;
 			try {
 				response = await fetch(url, { headers, signal: requestSignal });
 				if (response.status === 403 && response.headers.get("cf-mitigated") === "challenge") {
 					await response.body?.cancel();
 					headers["User-Agent"] = "opencode";
 					response = await fetch(url, { headers, signal: requestSignal });
+				}
+				if (
+					response.status === 412 &&
+					["bilibili.com", "www.bilibili.com", "m.bilibili.com"].includes(parsed.hostname) &&
+					!parsed.port &&
+					/^\/video\/(?:BV[0-9A-Za-z]{10}|av\d+)\/?$/.test(parsed.pathname)
+				) {
+					await response.body?.cancel();
+					const mobileUrl = new URL(url);
+					mobileUrl.protocol = "https:";
+					mobileUrl.hostname = "m.bilibili.com";
+					mobileUrl.pathname = mobileUrl.pathname.replace(/\/$/, "");
+					mobileUrl.hash = "";
+					sourceUrl = mobileUrl.href;
+					await runtime.ask(
+						{
+							type: "confirmation",
+							title: "访问网页",
+							message: `原网页返回 HTTP 412，改读同一视频的官方移动页：\n${sourceUrl}`,
+							metadata: { permission: "webfetch", resources: [sourceUrl], url: sourceUrl, format, timeout },
+						},
+						requestSignal,
+					);
+					requestSignal.throwIfAborted();
+					headers["User-Agent"] =
+						"Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+					response = await fetch(sourceUrl, { headers, signal: requestSignal });
 				}
 				if (!response.ok) throw new Error(`Request failed with status code: ${response.status}`);
 				const contentType = response.headers.get("content-type") || "";
@@ -128,7 +157,7 @@ export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters,
 				}
 				requestSignal.throwIfAborted();
 				const content = new TextDecoder().decode(body.subarray(0, size));
-				const output =
+				const converted =
 					mime === "text/html"
 						? format === "markdown"
 							? convertHTMLToMarkdown(content)
@@ -136,6 +165,10 @@ export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters,
 								? extractTextFromHTML(content)
 								: content
 						: content;
+				const output =
+					sourceUrl && format !== "html"
+						? `Source: ${sourceUrl}\n[Public mobile page text only; not a video transcript.]\n\n${converted}`
+						: converted;
 				const limited = truncateHead(output);
 				let text = limited.content;
 				let outputPath: string | undefined;
@@ -149,7 +182,14 @@ export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters,
 				requestSignal.throwIfAborted();
 				return {
 					content: [{ type: "text", text }],
-					details: { url, contentType, format, truncated: limited.truncated, outputPath },
+					details: {
+						url,
+						...(sourceUrl ? { sourceUrl } : {}),
+						contentType,
+						format,
+						truncated: limited.truncated,
+						outputPath,
+					},
 				};
 			} catch (error) {
 				requestSignal.throwIfAborted();

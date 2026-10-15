@@ -24,6 +24,7 @@
 
 ### Fixed
 
+- Read the same public Bilibili video's official mobile page after HTTP 412, with a separate permission check and explicit source attribution.
 - Use the same assistant message identity in live events and historical snapshots.
 - Preserve imported message identities, attachment metadata and tool results across forks and tree navigation.
 

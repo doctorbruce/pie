@@ -43,8 +43,8 @@ type CompactionOptions = {
 		request: CompactionSummaryRequest,
 		signal?: AbortSignal,
 	) => Promise<string | { summary: string; usage?: Usage }>;
-	onCompacted: (compaction: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => void;
-	report?: (event: CompactionEvent) => void;
+	onCompacted: (compaction: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => unknown;
+	report?: (event: CompactionEvent) => unknown;
 };
 
 type RequestBudget = Pick<Context, "systemPrompt" | "tools"> & { force?: boolean };
@@ -196,7 +196,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 		);
 		if (settings.enabled === false || (!budget.force && tokensBefore <= threshold)) return active;
 		const reason = budget.force ? "overflow" : "threshold";
-		options.report?.({ type: "compaction.started", reason });
+		await options.report?.({ type: "compaction.started", reason });
 		try {
 			const boundary = materialized ? 1 : (current?.firstKeptMessage ?? 0);
 			let firstKeptMessage = findFirstKeptMessage(messages, boundary, settings.keepRecentTokens);
@@ -249,12 +249,12 @@ export function createCompactionTransform(options: CompactionOptions) {
 			next.estimatedTokensAfter = requestTokens(projected, budget);
 			if (next.estimatedTokensAfter > threshold)
 				throw new Error("压缩后上下文仍超出预算；当前输入、工具输出或附件过大。");
-			options.onCompacted(next, messages, projected);
+			await options.onCompacted(next, messages, projected);
 			current = next;
-			options.report?.({ type: "compaction.finished", reason, status: "completed" });
+			await options.report?.({ type: "compaction.finished", reason, status: "completed" });
 			return projected;
 		} catch (error) {
-			options.report?.({
+			await options.report?.({
 				type: "compaction.finished",
 				reason,
 				status: signal?.aborted || (error instanceof Error && error.name === "AbortError") ? "cancelled" : "failed",

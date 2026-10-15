@@ -4,6 +4,7 @@
 
 ### Added
 
+- Add an embeddable runtime with asynchronous session storage and host-provided model, tool, skill, MCP and request-recording capabilities; reuse it in the local HTTP service.
 - Record complete provider request payloads for each session, including context compaction calls, without changing the prompt or recording authentication headers.
 
 - Add durable same-session conversation trees with upstream `/tree` navigation semantics and Web branch selection.

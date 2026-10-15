@@ -277,7 +277,7 @@ export type SessionEvent = {
 export type ServerInfo = {
 	protocolVersion: 1;
 	coreId: "pie";
-	persistence: "sqlite";
+	persistence: string;
 	realModel?: { provider: string; id: string };
 	realModelError?: string;
 };

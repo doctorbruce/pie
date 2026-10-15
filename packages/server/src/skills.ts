@@ -179,7 +179,7 @@ async function sampleSkillFiles(directory: string, signal?: AbortSignal): Promis
 	return files;
 }
 
-export function createSkillTools(runtime: RuntimeConfig, record: (activity: ToolActivity) => void) {
+export function createSkillTools(runtime: RuntimeConfig, record: (activity: ToolActivity) => unknown) {
 	type SkillDetails = { activity: ToolActivity; files: string[]; directory: string };
 	const completed = new Map<string, SkillDetails>();
 	const loadParameters = Type.Object(
@@ -206,7 +206,7 @@ export function createSkillTools(runtime: RuntimeConfig, record: (activity: Tool
 			try {
 				signal?.throwIfAborted();
 				// Persist admission before reading the skill.
-				record(structuredClone(activity));
+				await record(structuredClone(activity));
 				const body = await readText(join(binding.directory, "SKILL.md"), signal, false);
 				const files = await sampleSkillFiles(binding.directory, signal);
 				activity.contentHash = createHash("sha256").update(body).digest("hex");
@@ -225,7 +225,7 @@ export function createSkillTools(runtime: RuntimeConfig, record: (activity: Tool
 				activity = { ...activity, status: "succeeded", finishedAt: Date.now() };
 				const details = { activity, files, directory: binding.directory };
 				completed.set(toolCallId, details);
-				record(structuredClone(activity));
+				await record(structuredClone(activity));
 				return { content: [{ type: "text" as const, text: output }], details };
 			} catch (error) {
 				activity = {
@@ -235,7 +235,7 @@ export function createSkillTools(runtime: RuntimeConfig, record: (activity: Tool
 					error: (error instanceof Error ? error.message : String(error)).slice(0, 2048),
 				};
 				completed.set(toolCallId, { activity, files: [], directory: binding.directory });
-				record(structuredClone(activity));
+				await record(structuredClone(activity));
 				throw error;
 			}
 		},

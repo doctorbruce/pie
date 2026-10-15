@@ -17,7 +17,14 @@ import { retryAssistantCall } from "./compaction/retry.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction/utils.ts";
 import { type CompactionEvent, createCompactionStream, createCompactionTransform } from "./compaction.ts";
 import { readCompactionSettings } from "./compaction-settings.ts";
-import { loadExternalTools, parseToolIds } from "./external-tools.ts";
+import {
+	type ExternalTool,
+	loadExternalTools,
+	parseToolIds,
+	ToolConfigError,
+	type ToolContext,
+	type ToolFactory,
+} from "./external-tools.ts";
 import { isMcpError, McpManager } from "./mcp.ts";
 import { createModelRequestRecorder } from "./model-requests.ts";
 import { resolveConfiguredModelHeaders } from "./models/provider-composer.ts";
@@ -32,6 +39,7 @@ import type {
 	SkillBinding,
 	SubagentBinding,
 	ToolActivity,
+	ToolInfo,
 } from "./protocol.ts";
 import { createSkillTools } from "./skills.ts";
 import { withToolProgress } from "./tool-progress.ts";
@@ -61,14 +69,35 @@ function oneLineDescription(description: string, fallback: string) {
 	return summary || fallback;
 }
 
-export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
+export type AgentFactoryOptions = {
+	models?: Pick<ReturnType<typeof createModelSettings>, "current">;
+	tools?: {
+		catalog: readonly ToolInfo[];
+		create: (context: ToolContext & ToolRuntime) => ExternalTool[];
+	};
+	skills?: typeof createSkillTools;
+	mcp?: Pick<McpManager, "acquire" | "configure" | "status" | "close">;
+	recordModelRequest?: ReturnType<typeof createModelRequestRecorder>;
+};
+
+export function createAgentFactory(env: NodeJS.ProcessEnv = process.env, options: AgentFactoryOptions = {}) {
 	env = Object.freeze({ ...env });
-	const recordModelRequest = createModelRequestRecorder(env);
-	const settings = createModelSettings(env);
-	const mcp = new McpManager(env);
-	const catalogTools = systemTools(env);
-	const external = loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
-	const toolIds = [...catalogTools.map((tool) => tool.name), ...external.keys()];
+	const recordModelRequest = options.recordModelRequest ?? createModelRequestRecorder(env);
+	const settings = options.models ?? createModelSettings(env);
+	const mcp = options.mcp ?? new McpManager(env);
+	const catalogTools = options.tools ? [] : systemTools(env);
+	const external = options.tools
+		? new Map<string, ToolFactory>()
+		: loadExternalTools(env, [...catalogTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
+	const toolCatalog = options.tools
+		? structuredClone([...options.tools.catalog])
+		: [
+				...catalogTools.map((tool) => ({ id: tool.name, label: tool.label })),
+				...[...external.keys()].map((id: string) => ({ id, label: id })),
+			];
+	const toolIds = toolCatalog.map((tool) => tool.id);
+	if (new Set(toolIds).size !== toolIds.length || toolIds.some((id) => ["skill", "task", "tool_search"].includes(id)))
+		throw new ToolConfigError("工具 ID 重复或使用了保留名称");
 	const composeSystemPrompt = (runtime: RuntimeConfig, turnSystemPrompt?: string) => {
 		const systemPrompt = [
 			...(turnSystemPrompt?.trim() && turnSystemPrompt !== runtime.systemPrompt ? [turnSystemPrompt] : []),
@@ -94,10 +123,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 		mcp,
 		toolIds,
 		composeSystemPrompt,
-		toolCatalog: [
-			...catalogTools.map((tool) => ({ id: tool.name, label: tool.label })),
-			...[...external.keys()].map((id) => ({ id, label: id })),
-		],
+		toolCatalog,
 		get info(): ServerInfo {
 			return {
 				protocolVersion: 1,
@@ -113,7 +139,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 			configInput: RuntimeConfig,
 			selected?: ModelSelection,
 			messages: AgentMessage[] = [],
-			record: (activity: ToolActivity) => void = () => {},
+			record: (activity: ToolActivity) => unknown = () => {},
 			ask: (request: Omit<InteractionRequest, "id">, signal?: AbortSignal) => Promise<void> = async () => {
 				throw new Error("当前运行时不支持工具交互");
 			},
@@ -135,8 +161,8 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 			>,
 			compaction?: {
 				current?: ContextCompaction;
-				update: (next: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => void;
-				report?: (event: CompactionEvent) => void;
+				update: (next: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => unknown;
+				report?: (event: CompactionEvent) => unknown;
 			},
 			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground">,
 		) {
@@ -152,12 +178,14 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				jobs: native?.jobs ?? new BackgroundJobs(),
 				notifyBackground: native?.notifyBackground,
 			});
-			const tools = systemTools(env, context.directory, context);
+			const tools = options.tools ? options.tools.create(context) : systemTools(env, context.directory, context);
+			if (options.tools && tools.some((tool) => !toolIds.includes(tool.name)))
+				throw new ToolConfigError("工具实现未在 catalog 中注册");
 			const externalTools = runtime.toolIds.flatMap((id) => {
 				const create = external.get(id);
 				return create ? [create(context)] : [];
 			});
-			const skillTools = createSkillTools(runtime, record);
+			const skillTools = (options.skills ?? createSkillTools)(runtime, record);
 			const taskParameters = Type.Object(
 				{
 					description: Type.String({ description: "Short description of the delegated task" }),
@@ -241,10 +269,11 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 				...skillTools.tools,
 				...(taskTool ? [taskTool] : []),
 			];
-			let toolSearch = createToolSearch(
-				availableTools,
-				externalTools.map((tool) => tool.name),
-			);
+			const deferredToolNames = [
+				...externalTools.map((tool) => tool.name),
+				...tools.filter((tool) => "exposure" in tool && tool.exposure === "deferred").map((tool) => tool.name),
+			];
+			let toolSearch = createToolSearch(availableTools, deferredToolNames);
 			toolSearch.restoreLoaded(compaction?.current?.loadedToolNames);
 			let checkpoint = compaction?.current;
 			const automation = mode === "real" && realModel ? readCompactionSettings(env, realModel) : undefined;
@@ -254,9 +283,9 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 							contextWindow: realModel.contextWindow,
 							initial: compaction.current,
 							settings: automation?.compaction,
-							onCompacted: (next, source, projected) => {
+							onCompacted: async (next, source, projected) => {
 								next.loadedToolNames = toolSearch.loadedToolNames;
-								compaction.update(next, source, projected);
+								await compaction.update(next, source, projected);
 								checkpoint = next;
 								sessionAgent.replaceMessages(projected);
 								source.length = 0;
@@ -285,14 +314,15 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 									automation?.retry,
 									signal,
 									{
-										onRetryScheduled: (attempt, maxAttempts, delayMs, error) =>
-											compaction.report?.({
+										onRetryScheduled: async (attempt, maxAttempts, delayMs, error) => {
+											await compaction.report?.({
 												type: "compaction.retry",
 												attempt,
 												maxAttempts,
 												delayMs,
 												error,
-											}),
+											});
+										},
 									},
 								);
 								if (response.stopReason === "aborted") throw new DOMException("上下文摘要已取消", "AbortError");
@@ -390,7 +420,7 @@ export function createAgentFactory(env: NodeJS.ProcessEnv = process.env) {
 					]);
 					toolSearch = createToolSearch(
 						[...availableTools, ...lease.tools],
-						[...externalTools.map((tool) => tool.name), ...lease.tools.map((tool) => tool.name)],
+						[...deferredToolNames, ...lease.tools.map((tool) => tool.name)],
 						lease.instructions,
 					);
 					toolSearch.restoreLoaded(checkpoint?.loadedToolNames);

@@ -3,33 +3,11 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type {
-	ActivityRecord,
-	Assistant,
-	ContextCompaction,
-	HostRuntimeDefinition,
-	RuntimeConfig,
-	SessionSummary,
-	TransferMessage,
-} from "./protocol.ts";
+import type { Assistant, ContextCompaction, HostRuntimeDefinition } from "./protocol.ts";
+import type { RuntimeStore, SavedSession, SessionMetadata } from "./runtime-store.ts";
 import { type MessageTree, syncMessageTree, treePath } from "./session-tree.ts";
 
-export type SavedSession = SessionSummary & {
-	astronSessionId?: string;
-	assistant?: Assistant;
-	revision: number;
-	messages: AgentMessage[];
-	tree?: MessageTree;
-	runtime?: RuntimeConfig;
-	activities?: ActivityRecord[];
-	compaction?: ContextCompaction;
-	transferBase?: TransferMessage[];
-	transferBaseMessageCount?: number;
-};
-
-export type SessionMetadata = Omit<SavedSession, "messages" | "tree" | "transferBase"> & {
-	leafId: string | null;
-};
+export type { SavedSession, SessionMetadata } from "./runtime-store.ts";
 
 export function openStore(env: NodeJS.ProcessEnv) {
 	const directory = resolve(env.PI_DATA_DIR || ".pie");
@@ -294,7 +272,7 @@ export function openStore(env: NodeJS.ProcessEnv) {
 				`)
 					.all(id, leafId, id, id, beforeSeq, limit + 1);
 				const entries = rows.slice(0, limit).reverse().map(parseEntry);
-				return { entries, nextBeforeSeq: rows.length > limit ? entries[0].seq : null };
+				return { entries, nextBeforeSeq: rows.length > limit ? entries[0].seq! : null };
 			},
 			replaceHostRuntimes(definitions: readonly HostRuntimeDefinition[]) {
 				db.exec("BEGIN IMMEDIATE");
@@ -335,4 +313,19 @@ export function openStore(env: NodeJS.ProcessEnv) {
 		db.close();
 		throw error;
 	}
+}
+
+export function createSqliteRuntimeStore(store: ReturnType<typeof openStore>): RuntimeStore {
+	return {
+		persistence: "sqlite",
+		loadSessions: async () => store.sessions,
+		saveSession: async (...args) => store.saveSession(...args),
+		readPath: async (...args) => store.readPath(...args),
+		readPathIds: async (...args) => store.readPathIds(...args),
+		readWorkingPath: async (...args) => store.readWorkingPath(...args),
+		readTree: async (...args) => store.readTree(...args),
+		readHistory: async (...args) => store.readHistory(...args),
+		deleteSession: async (...args) => store.deleteSession(...args),
+		close: async () => store.close(),
+	};
 }

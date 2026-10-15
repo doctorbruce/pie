@@ -4,6 +4,8 @@
 
 主要架构和开发边界统一维护在 [Agent 开发文档](../../docs/agent-development.md)。
 
+可嵌入运行时入口与云端适配分工见 [运行时嵌入接入](../../docs/runtime-embedding.md)。HTTP 服务和直接包调用复用同一份会话运行逻辑；云端实现仍待接入。
+
 从仓库根目录执行 `npm run serve -- --port 4318`。仅监听 `127.0.0.1`；`--port 0` 自动分配端口。启动后 stdout 输出 `{"type":"ready","url":"http://127.0.0.1:实际端口"}`。
 
 ## HTTP

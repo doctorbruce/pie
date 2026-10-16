@@ -32,6 +32,7 @@ import type {
 	ToolActivity,
 } from "./protocol.ts";
 import { withToolProgress } from "./tool-progress.ts";
+import { toolRepetitionReminder } from "./tool-repetition.ts";
 import { createToolSearch } from "./tool-search.ts";
 import { applyPermissionPolicy, parseToolIds, ToolConfigError, type ToolRuntime } from "./tools.ts";
 
@@ -305,7 +306,16 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			const sessionAgent = new Agent({
 				sessionId,
 				afterToolCall: async (context) => {
-					const skillResult = await skillTools.afterToolCall(context);
+					let skillResult = await skillTools.afterToolCall(context);
+					const reminder = toolRepetitionReminder(context, runtime.language);
+					if (reminder)
+						skillResult = {
+							...skillResult,
+							content: [
+								...(skillResult?.content ?? context.result.content ?? []),
+								{ type: "text", text: reminder },
+							],
+						};
 					return context.toolCall.name.startsWith("mcp__") && isMcpError(context.result.details)
 						? { ...skillResult, isError: true }
 						: skillResult;

@@ -25,6 +25,8 @@
 
 ### Fixed
 
+- Expose webfetch HTTP status, final URL, body size and empty-content boundaries without guessing application success from response text.
+- Report shell exit status consistently in foreground results, background notifications and job output without treating ordinary nonzero exits as tool execution errors.
 - Read the same public Bilibili video's official mobile page after HTTP 412, with a separate permission check and explicit source attribution.
 - Use the same assistant message identity in live events and historical snapshots.
 - Preserve imported message identities, attachment metadata and tool results across forks and tree navigation.

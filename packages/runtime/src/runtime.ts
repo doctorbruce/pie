@@ -10,6 +10,7 @@ import type {
 	ActivityRecord,
 	Assistant,
 	ContextCompaction,
+	GlobalSessionEvent,
 	HostRuntimeDefinition,
 	ImagePart,
 	InteractionRequest,
@@ -129,11 +130,21 @@ export type TurnInput = {
 	userMessageId?: string;
 	triggerTaskId?: string;
 };
-type RuntimeSubscriber = { next: (event: SessionEvent) => void; close: () => void };
-function closeSubscriber(subscriber: RuntimeSubscriber) {
+type RuntimeSubscriber<Event = SessionEvent> = { next: (event: Event) => void; close: () => void };
+function closeSubscriber(subscriber: { close: () => void }) {
 	try {
 		subscriber.close();
 	} catch {}
+}
+function notifySubscribers<Event>(listeners: Set<RuntimeSubscriber<Event>>, packet: Event) {
+	for (const listener of listeners) {
+		try {
+			listener.next(structuredClone(packet));
+		} catch {
+			listeners.delete(listener);
+			closeSubscriber(listener);
+		}
+	}
 }
 export type RuntimeAgents = Omit<ReturnType<typeof createAgentFactory>, "settings"> & {
 	settings: { readonly current: { selected?: { provider: string; id: string } } };
@@ -271,7 +282,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		}
 		return { tree, identities };
 	}
-	const globalClients = new Set<RuntimeSubscriber>();
+	const globalClients = new Set<RuntimeSubscriber<GlobalSessionEvent>>();
 	let storageFailed = false;
 	let closing = false;
 	let closePromise: Promise<void> | undefined;
@@ -641,26 +652,17 @@ async function initializeRuntime(options: RuntimeOptions) {
 	) {
 		const pending = (session.publishPromise ?? Promise.resolve()).then(async () => {
 			session.revision++;
-			// ponytail: full snapshots simplify reconnects for short test sessions; use deltas for long histories.
-			const packet: SessionEvent = {
+			const packet: GlobalSessionEvent = {
 				type,
 				sessionId: session.id,
 				turnId: session.turn?.id,
 				event,
 				activity,
 				interaction,
-				snapshot: await snapshot(session),
+				snapshot: { instanceId, revision: session.revision, turn: session.turn },
 			};
-
-			for (const listeners of [session.clients, globalClients])
-				for (const listener of listeners) {
-					try {
-						listener.next(structuredClone(packet));
-					} catch {
-						listeners.delete(listener);
-						closeSubscriber(listener);
-					}
-				}
+			if (session.clients.size) notifySubscribers(session.clients, { ...packet, snapshot: await snapshot(session) });
+			notifySubscribers(globalClients, packet);
 		});
 		session.publishPromise = pending.catch(() => {});
 		await pending;
@@ -1384,7 +1386,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				listeners.delete(subscriber);
 			};
 		},
-		subscribeAll(next: (event: SessionEvent) => void, onClose: () => void = () => {}) {
+		subscribeAll(next: (event: GlobalSessionEvent) => void, onClose: () => void = () => {}) {
 			if (closing) throw new RuntimeError(503, "运行时正在关闭");
 			const subscriber = { next, close: onClose };
 			globalClients.add(subscriber);

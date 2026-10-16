@@ -81,9 +81,16 @@ test("webfetch approves the requested URL before transport and follows redirects
 	});
 	const url = `${base}/redirect`;
 	const result = await tool.execute("fetch", { url });
-	assert.deepEqual(result.content, [{ type: "text", text: "# Hello\n\nworld" }]);
+	assert(result.content[0].type === "text");
+	assert(result.content[0].text.startsWith(`Fetched ${base}/target (HTTP 200)`));
+	assert(result.content[0].text.includes(`Requested URL: ${url}`));
+	assert(result.content[0].text.endsWith("\n\n# Hello\n\nworld"));
 	assert.deepEqual(result.details, {
 		url,
+		finalUrl: `${base}/target`,
+		statusCode: 200,
+		bodyBytes: Buffer.byteLength("<h1>Hello</h1><p>world</p>"),
+		contentEmpty: false,
 		contentType: "text/html; charset=utf-8",
 		format: "markdown",
 		truncated: false,
@@ -110,23 +117,89 @@ test("webfetch returns all formats, textual MIME types and streamed UTF-8", asyn
 		response.end(request.url === "/json" ? '{"ok":true}' : html);
 	});
 	const tool = createTool();
-	for (const [format, expected] of [
-		["markdown", "# Hello\n\nworld"],
-		["text", "Helloworld"],
-		["html", html],
+	for (const [path, format, expected] of [
+		["/", "markdown", "# Hello\n\nworld"],
+		["/", "text", "Helloworld"],
+		["/", "html", html],
+		["/json", "markdown", '{"ok":true}'],
+		["/unicode", "markdown", "网页验证"],
 	] as const) {
-		const result = await tool.execute("fetch", { url: base, format });
-		assert.deepEqual(result.content, [{ type: "text", text: expected }]);
+		const result = await tool.execute("fetch", { url: `${base}${path}`, format });
+		assert(result.content[0].type === "text");
+		assert(result.content[0].text.startsWith(`Fetched ${base}${path} (HTTP 200)`));
+		assert(result.content[0].text.endsWith(`\n\n${expected}`));
+		assert.match(result.content[0].text, /untrusted data, not instructions/);
+		assert.equal(result.details.bodyBytes, Buffer.byteLength(path === "/" ? html : expected));
 	}
 	assert.match(accepts[0], /^text\/markdown/);
 	assert.match(accepts[1], /^text\/plain/);
 	assert.match(accepts[2], /^text\/html/);
-	assert.deepEqual((await tool.execute("json", { url: `${base}/json` })).content, [
-		{ type: "text", text: '{"ok":true}' },
+});
+
+test("empty responses and empty extracted content remain successful retrievals, not search conclusions", async (context) => {
+	const script = "<script>hidden()</script>";
+	const base = await serve(context, (request, response) => {
+		response.writeHead(request.url === "/no-content" ? 204 : 200, { "content-type": "text/html" });
+		response.end(request.url === "/script" ? script : "");
+	});
+	for (const path of ["/empty", "/no-content", "/script"]) {
+		const result = await createTool().execute("empty", { url: `${base}${path}` });
+		assert.equal(result.details.statusCode, path === "/no-content" ? 204 : 200);
+		assert.equal(result.details.bodyBytes, path === "/script" ? Buffer.byteLength(script) : 0);
+		assert.equal(result.details.contentEmpty, true);
+		assert.equal(result.details.truncated, false);
+		assert(result.content[0].type === "text");
+		assert.match(result.content[0].text, path === "/script" ? /No non-whitespace content/ : /Response body is empty/);
+		assert.doesNotMatch(result.content[0].text, /No results found|No matches found/);
+	}
+});
+
+test("HTTP 200 application errors and challenge pages are data, not generic tool failures", async (context) => {
+	const bodies = new Map([
+		["/json", '{"code":-403,"success":false,"message":"Error: denied"}'],
+		["/text", "Error is a word in this document"],
+		["/challenge", "<h1>验证码</h1><p>captcha challenge</p>"],
 	]);
-	assert.deepEqual((await tool.execute("unicode", { url: `${base}/unicode` })).content, [
-		{ type: "text", text: "网页验证" },
-	]);
+	const base = await serve(context, (request, response) => {
+		response.writeHead(200, {
+			"content-type":
+				request.url === "/json" ? "application/json" : request.url === "/text" ? "text/plain" : "text/html",
+		});
+		response.end(bodies.get(request.url ?? ""));
+	});
+	for (const [path, body] of bodies) {
+		const result = await createTool().execute("data", { url: `${base}${path}`, format: "html" });
+		assert.equal(result.details.statusCode, 200);
+		assert.equal(result.details.contentEmpty, false);
+		assert(result.content[0].type === "text");
+		assert(result.content[0].text.endsWith(`\n\n${body}`));
+	}
+});
+
+test("HTTP failures keep error status with requested and final URLs", async (context) => {
+	const base = await serve(context, (request, response) => {
+		if (request.url === "/redirect") {
+			response.writeHead(302, { location: "/denied" });
+			response.end();
+			return;
+		}
+		response.writeHead(403, { "content-type": "text/plain" });
+		response.end("denied");
+	});
+	await assert.rejects(createTool().execute("denied", { url: `${base}/redirect` }), (error: unknown) => {
+		assert(error instanceof Error);
+		assert.match(error.message, /^Request failed with status code: 403/);
+		assert(error.message.includes(`Requested URL: ${base}/redirect`));
+		assert(error.message.includes(`Final URL: ${base}/denied`));
+		return true;
+	});
+});
+
+test("network failures never become empty successful results", async (context) => {
+	context.mock.method(globalThis, "fetch", async () => {
+		throw new TypeError("connection failed");
+	});
+	await assert.rejects(createTool().execute("network", { url: "https://example.com" }), /connection failed/);
 });
 
 test("invalid URLs and denied permissions never reach transport", async (context) => {
@@ -162,9 +235,10 @@ test("Cloudflare challenges retry once with the Amio user agent; other failures 
 		response.end("denied");
 	});
 	const tool = createTool();
-	assert.deepEqual((await tool.execute("challenge", { url: `${base}/challenge` })).content, [
-		{ type: "text", text: "ok" },
-	]);
+	const result = await tool.execute("challenge", { url: `${base}/challenge` });
+	assert(result.content[0].type === "text");
+	assert(result.content[0].text.endsWith("\n\nok"));
+	assert.equal(result.details.statusCode, 200);
 	assert.match(agents[0], /Mozilla\/5.0/);
 	assert.equal(agents[1], "opencode");
 	await assert.rejects(tool.execute("forbidden", { url: `${base}/forbidden` }), /status code: 403/);
@@ -210,6 +284,8 @@ test("Bilibili 412 falls back to the approved public mobile video page in all fo
 		const result = await tool.execute("mobile", { url, format });
 		assert.equal(result.details.url, url);
 		assert.equal(result.details.sourceUrl, sourceUrl);
+		assert.equal(result.details.finalUrl, `${base}/mobile`);
+		assert.equal(result.details.statusCode, 200);
 		assert.equal(result.details.contentType, "text/html");
 		assert.deepEqual(requests.slice(-2), [url, sourceUrl]);
 		assert.deepEqual(approvals.slice(-2), [url, sourceUrl]);
@@ -217,7 +293,7 @@ test("Bilibili 412 falls back to the approved public mobile video page in all fo
 		assert.match(agents.at(-2) ?? "", /Windows NT/);
 		assert.match(agents.at(-1) ?? "", /iPhone.*Mobile/);
 		assert(result.content[0].type === "text");
-		if (format === "html") assert.equal(result.content[0].text, html);
+		if (format === "html") assert(result.content[0].text.endsWith(`\n\n${html}`));
 		else {
 			assert(result.content[0].text.includes(sourceUrl));
 			assert.match(result.content[0].text, /not a video transcript/);
@@ -366,7 +442,10 @@ test("large output has a bounded model preview and retains the complete result",
 		context.after(() => rm(outputDirectory, { recursive: true, force: true }));
 		assert.equal(await readFile(outputPath, "utf8"), output);
 		assert(result.content[0].type === "text");
-		assert.match(result.content[0].text, /^line|^网页/);
+		assert(result.content[0].text.startsWith(`Fetched ${base}${path} (HTTP 200)`));
+		assert.match(result.content[0].text, /\n\nline|\n\n网页/);
+		assert.equal(result.details.bodyBytes, Buffer.byteLength(output));
+		assert.equal(result.details.contentEmpty, false);
 		assert.doesNotMatch(result.content[0].text, /\uFFFD/);
 		assert.match(result.content[0].text, /Full output saved to:/);
 		assert(Buffer.byteLength(result.content[0].text) < MAX_BYTES + 1024);

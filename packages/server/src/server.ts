@@ -7,7 +7,7 @@ import { type CreateSessionInput, type PieRuntime, RuntimeError, type TurnInput 
 import { ModelSettingsError } from "@pie/runtime/capabilities";
 import { SkillConfigError } from "@pie/runtime/config";
 import { McpConfigError } from "@pie/runtime/mcp";
-import type { HostRuntimeDefinition, SessionEvent } from "@pie/runtime/protocol";
+import type { GlobalSessionEvent, HostRuntimeDefinition, SessionEvent } from "@pie/runtime/protocol";
 import { historyMessageId } from "@pie/runtime/session-tree";
 import { ToolConfigError } from "@pie/runtime/tools";
 
@@ -91,7 +91,7 @@ function globalAgentEvent(event: SessionEvent["event"]) {
 	}
 }
 
-function projectGlobalPacket(packet: SessionEvent) {
+function projectGlobalPacket(packet: GlobalSessionEvent) {
 	const { type, sessionId, turnId, snapshot, interaction, event } = packet;
 	const base = { type, sessionId, turnId, instanceId: snapshot.instanceId, revision: snapshot.revision };
 	if (type === "agent.event") {
@@ -106,8 +106,8 @@ function projectGlobalPacket(packet: SessionEvent) {
 
 async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?: string) {
 	let initialized = false;
-	const pending: SessionEvent[] = [];
-	const write = (packet: SessionEvent) => {
+	const pending: GlobalSessionEvent[] = [];
+	const write = (packet: GlobalSessionEvent) => {
 		if (!initialized) {
 			pending.push(packet);
 			return;

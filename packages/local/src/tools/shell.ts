@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
+import { formatJobStatus } from "@pie/runtime/jobs";
 import type { ToolRuntime } from "@pie/runtime/tools";
 import { type ArtifactOutput, authorizeCommand, authorizePath } from "./runtime.ts";
 import { findShell, MAX_BYTES, MAX_LINES, resolvePath, runProcess, truncateTail } from "./shared.ts";
@@ -119,7 +120,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 	const tool: AgentTool<typeof parameters, ShellDetails> = {
 		name: "bash",
 		label: "Bash",
-		description: `Execute a command using ${shell.name} on ${process.platform}. This is the only native command tool. Always set description to a short user-visible action phrase in the user's language. Supports workdir, permission confirmation, declared artifacts, a ${defaultTimeoutMs}ms foreground timeout, automatic backgrounding after ${defaultYieldMs}ms, incremental job output, and cancellation. timeout and yieldMs use milliseconds. Foreground output keeps the last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB.`,
+		description: `Execute a command using ${shell.name} on ${process.platform}. This is the only native command tool. Always set description to a short user-visible action phrase in the user's language. Supports workdir, permission confirmation, declared artifacts, a ${defaultTimeoutMs}ms foreground timeout, automatic backgrounding after ${defaultYieldMs}ms, incremental job output, and cancellation. timeout and yieldMs use milliseconds. Foreground output keeps the last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB. Results report command status and exit code even for nonzero exits; inspect these rather than inferring success or failure from output text.`,
 		parameters,
 		async execute(_id, { command, description, workdir, timeout, yieldMs, outputs }, signal, onUpdate) {
 			const cwd = resolvePath(workdir ?? ".", runtime.directory);
@@ -224,9 +225,8 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 				async onSettled(job) {
 					if (!detached || !runtime.notifyBackground) return;
 					const tail = truncateTail(job.output).content || "(no output)";
-					const exit = job.details?.exit;
 					await runtime.notifyBackground(
-						`<background_job id="${job.id}" type="bash" state="${job.status}">\n${tail}\n\nexit=${typeof exit === "number" || exit === null ? exit : "unknown"}\noutput=${outputPath}\n</background_job>`,
+						`<background_job id="${job.id}" type="bash" state="${job.status}">\n${formatJobStatus(job)}\n\n${tail}\n\noutput=${outputPath}\n</background_job>`,
 					);
 				},
 			});
@@ -241,9 +241,10 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 				if (job.status === "running") {
 					detached = true;
 					const text = [
+						formatJobStatus(job),
+						"",
 						preview || "(no output yet)",
 						"",
-						`Background job ${job.id}: the command is still running after ${Date.now() - startedAt}ms.`,
 						`Full output: ${outputPath}`,
 						"Use job_output to read new output or wait, and job_kill to stop it. Completion is reported automatically.",
 					].join("\n");
@@ -272,15 +273,9 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 				if (truncated) text = `...output truncated...\n\nFull output saved to: ${outputPath}\n\n${text}`;
 				if (warnings.length) text += `\n\nArtifact warnings:\n${warnings.join("\n")}`;
 				const exit = typeof jobDetails.exit === "number" || jobDetails.exit === null ? jobDetails.exit : undefined;
-				if (exit !== undefined && exit !== 0)
-					text += `\n\n<shell_metadata>Command exited with code ${exit}</shell_metadata>`;
-				if (job.status !== "completed") {
-					if (!truncated) await rm(outputDirectory, { recursive: true, force: true });
-					throw new Error(
-						`${text}\n\n${job.error ?? `Command ${job.status}`}${truncated ? `\nFull output: ${outputPath}` : ""}`,
-					);
-				}
+				text = `${formatJobStatus(job)}\n\n${text}`;
 				if (!truncated) await rm(outputDirectory, { recursive: true, force: true });
+				if (job.error !== undefined || job.status === "cancelled") throw new Error(text);
 				return {
 					content: [{ type: "text", text }],
 					details: {

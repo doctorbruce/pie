@@ -274,6 +274,9 @@ export type SessionEvent = {
 	interaction?: InteractionRequest;
 	snapshot: SessionSnapshot;
 };
+export type GlobalSessionEvent = Omit<SessionEvent, "snapshot"> & {
+	snapshot: Pick<SessionSnapshot, "instanceId" | "revision" | "turn">;
+};
 export type ServerInfo = {
 	protocolVersion: 1;
 	coreId: "pie";

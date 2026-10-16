@@ -143,6 +143,10 @@ test("upstream tool set performs file, listing and search operations", async (t)
 		JSON.stringify(await grep.execute("grep", { pattern: "second", path: ".", description: "查找更新内容" })),
 		/example\.txt/,
 	);
+	assert.match(
+		JSON.stringify(await grep.execute("grep-empty", { pattern: "missing-text", path: "nested/example.txt" })),
+		/No matches found/,
+	);
 	const found = await find.execute("find", { pattern: "**/*.txt", path: "." });
 	const foundText = found.content[0];
 	assert(foundText.type === "text");
@@ -201,4 +205,121 @@ test("bash applies permission policy before spawning and job_kill stops an immed
 	assert(jobId);
 	const stopped = await normal.get("job_kill")!.execute("kill", { job_id: jobId });
 	assert.match(JSON.stringify(stopped.details), /"status":"cancelled"/);
+	assert.doesNotMatch(JSON.stringify(stopped.details), /"exit":0/);
+	assert.match(JSON.stringify(stopped.content), /aborted/);
+});
+
+test("shell job completion follows exit codes without changing task completion", async () => {
+	const jobs = new BackgroundJobs();
+	const runtime: ToolRuntime = {
+		sessionId: "exit-status-test",
+		directory: process.cwd(),
+		jobs,
+		async ask() {},
+	};
+	const output = systemTools({}, runtime.directory, runtime).find((tool) => tool.name === "job_output");
+	assert(output);
+	for (const entry of [
+		{ type: "shell", exit: 0, status: "completed" },
+		{ type: "shell", exit: 7, status: "failed" },
+		{ type: "shell", exit: null, status: "failed" },
+		{ type: "shell", exit: undefined, status: "failed" },
+		{ type: "task", exit: 7, status: "completed" },
+	] as const) {
+		const started = jobs.start({
+			ownerSessionId: "exit-status-test",
+			type: entry.type,
+			title: "exit status",
+			async run() {
+				return { details: { exit: entry.exit } };
+			},
+		});
+		const completed = await jobs.wait(started.id);
+		assert.equal(completed?.status, entry.status);
+		assert.equal(completed?.details?.exit, entry.exit);
+		assert.equal(completed?.error, undefined);
+		const result = await output.execute("poll", { job_id: started.id });
+		const details = result.details as { status?: string; exit?: number | null };
+		assert.equal(details.status, entry.status);
+		assert.equal(details.exit, entry.type === "shell" ? entry.exit : undefined);
+		if (entry.type === "task") assert.doesNotMatch(JSON.stringify(result.content), /Process exited/);
+		else if (entry.exit === null || entry.exit === undefined)
+			assert.match(JSON.stringify(result.content), /Process ended without an exit code/);
+	}
+});
+
+test("foreground bash reports command failure without throwing or scanning output", async () => {
+	const tools = new Map(systemTools({}).map((tool) => [tool.name, tool]));
+	const shell = tools.get("bash");
+	assert(shell);
+	for (const entry of [
+		{ exit: 0, status: "completed", output: "Error is just output" },
+		{ exit: 7, status: "failed", output: "" },
+	]) {
+		const command =
+			process.platform === "win32"
+				? `Write-Output '${entry.output}'; exit ${entry.exit}`
+				: `printf '%s\n' '${entry.output}'; exit ${entry.exit}`;
+		const result = await shell.execute("exit", { command, yieldMs: 10_000, timeout: 5_000 });
+		const details = result.details as { status?: string; exit?: number };
+		assert.equal(details.status, entry.status);
+		assert.equal(details.exit, entry.exit);
+		const content = result.content[0];
+		assert(content.type === "text");
+		assert.match(content.text, new RegExp(`^\\[status: ${entry.status}\\]`));
+		assert.match(content.text, new RegExp(`Process exited with code ${entry.exit}`));
+		assert(content.text.includes(entry.output));
+	}
+});
+
+test("background bash notification and polling retain the same failed exit", async (testContext) => {
+	const jobs = new BackgroundJobs();
+	testContext.after(() => jobs.close());
+	const notifications: string[] = [];
+	const runtime: ToolRuntime = {
+		sessionId: "background-exit-test",
+		directory: process.cwd(),
+		jobs,
+		async ask() {},
+		async notifyBackground(message) {
+			notifications.push(message);
+		},
+	};
+	const tools = new Map(systemTools({}, runtime.directory, runtime).map((tool) => [tool.name, tool]));
+	const shell = tools.get("bash");
+	const output = tools.get("job_output");
+	assert(shell && output);
+	const started = await shell.execute("start", { command: "exit 7", yieldMs: 0, timeout: 5_000 });
+	const initial = started.details as { jobId?: string; status?: string; exit?: number };
+	assert(initial.jobId);
+	assert.equal(initial.status, "running");
+	assert.equal(initial.exit, undefined);
+	assert.match(JSON.stringify(started.content), /Process running with job ID/);
+	for (let poll = 0; poll < 2; poll++) {
+		const result = await output.execute("poll", { job_id: initial.jobId, wait_ms: 5_000 });
+		const details = result.details as { status?: string; exit?: number };
+		assert.equal(details.status, "failed");
+		assert.equal(details.exit, 7);
+		assert.match(JSON.stringify(result.content), /Process exited with code 7/);
+		if (poll === 1) assert.match(JSON.stringify(result.content), /no new output/);
+	}
+	assert.equal(jobs.get(initial.jobId)?.status, "failed");
+	assert.equal(notifications.length, 1);
+	assert.match(notifications[0], /state="failed"/);
+	assert.match(notifications[0], /Process exited with code 7/);
+});
+
+test("bash retains timeout and process startup failures as execution errors", async () => {
+	const shell = systemTools({}).find((tool) => tool.name === "bash");
+	assert(shell);
+	const command = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
+	await assert.rejects(
+		shell.execute("timeout", { command, timeout: 25, yieldMs: 5_000 }),
+		/Command timed out after 25ms/,
+	);
+	const missing = systemTools({ PI_SHELL: join(tmpdir(), "pie-nonexistent-shell", "missing.exe") }).find(
+		(tool) => tool.name === "bash",
+	);
+	assert(missing);
+	await assert.rejects(missing.execute("missing", { command: "exit 0", timeout: 5_000, yieldMs: 5_000 }), /ENOENT/);
 });

@@ -2,7 +2,7 @@ import { type FileHandle, open } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Type } from "@earendil-works/pi-ai";
-import type { BackgroundJobInfo } from "@pie/runtime/jobs";
+import { type BackgroundJobInfo, formatJobStatus } from "@pie/runtime/jobs";
 import type { ToolRuntime } from "@pie/runtime/tools";
 
 const parameters = Type.Object(
@@ -23,6 +23,7 @@ const parameters = Type.Object(
 type JobDetails = {
 	jobId: string;
 	status: BackgroundJobInfo["status"];
+	exit?: number | null;
 	wallTimeMs: number;
 };
 
@@ -63,16 +64,13 @@ async function readFileDelta(path: string, settled: boolean): Promise<string | u
 	}
 }
 
-function status(job: BackgroundJobInfo): string {
-	const wallTimeMs = (job.finishedAt ?? Date.now()) - job.startedAt;
-	return `[status: ${job.status}] [wall time: ${wallTimeMs}ms]${job.error ? `\n[error: ${job.error}]` : ""}`;
-}
-
 function details(job: BackgroundJobInfo): JobDetails {
+	const exit = job.type === "shell" ? job.details?.exit : undefined;
 	return {
 		jobId: job.id,
 		status: job.status,
 		wallTimeMs: (job.finishedAt ?? Date.now()) - job.startedAt,
+		...(typeof exit === "number" || exit === null ? { exit } : {}),
 	};
 }
 
@@ -110,25 +108,25 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 			if (fileDelta !== undefined) {
 				if (fileDelta)
 					return {
-						content: [{ type: "text", text: `${fileDelta}\n${status(job)}` }],
+						content: [{ type: "text", text: `${formatJobStatus(job)}\n\n${fileDelta}` }],
 						details: details(job),
 					};
 				if (job.status !== "running" && !delivered.has(job.id)) {
 					delivered.add(job.id);
 					return {
-						content: [{ type: "text", text: `${job.output || "(no output)"}\n${status(job)}` }],
+						content: [{ type: "text", text: `${formatJobStatus(job)}\n\n${job.output || "(no output)"}` }],
 						details: details(job),
 					};
 				}
 				return {
-					content: [{ type: "text", text: `(no new output)\n${status(job)}` }],
+					content: [{ type: "text", text: `${formatJobStatus(job)}\n\n(no new output)` }],
 					details: details(job),
 				};
 			}
 			const read = runtime.jobs.read(job_id);
 			if (!read) throw unknownJob(runtime, job_id);
 			return {
-				content: [{ type: "text", text: `${read.delta || "(no new output)"}\n${status(read.job)}` }],
+				content: [{ type: "text", text: `${formatJobStatus(read.job)}\n\n${read.delta || "(no new output)"}` }],
 				details: details(read.job),
 			};
 		},
@@ -144,13 +142,18 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 			if (current.ownerSessionId !== runtime.sessionId) throw new Error("后台任务属于其他会话");
 			if (current.status !== "running")
 				return {
-					content: [{ type: "text", text: `后台任务 ${current.id} 已经是 ${current.status}\n${status(current)}` }],
+					content: [
+						{
+							type: "text",
+							text: `${formatJobStatus(current)}\n\n后台任务 ${current.id} 已经是 ${current.status}`,
+						},
+					],
 					details: details(current),
 				};
 			runtime.jobs.cancel(job_id);
 			const job = (await runtime.jobs.wait(job_id, 5_000)) ?? current;
 			return {
-				content: [{ type: "text", text: `已请求停止后台任务 ${job.id}\n${status(job)}` }],
+				content: [{ type: "text", text: `${formatJobStatus(job)}\n\n已请求停止后台任务 ${job.id}` }],
 				details: details(job),
 			};
 		},

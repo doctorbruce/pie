@@ -15,6 +15,22 @@ export type BackgroundJobInfo = {
 	details?: Record<string, unknown>;
 };
 
+export function formatJobStatus(job: BackgroundJobInfo): string {
+	const wallTimeMs = (job.finishedAt ?? Date.now()) - job.startedAt;
+	const lines = [`[status: ${job.status}] [wall time: ${wallTimeMs}ms]`];
+	if (job.type === "shell") {
+		if (job.status === "running") lines.push(`Process running with job ID ${job.id}`);
+		else {
+			const exit = job.details?.exit;
+			lines.push(
+				typeof exit === "number" ? `Process exited with code ${exit}` : "Process ended without an exit code",
+			);
+		}
+	}
+	if (job.error !== undefined) lines.push(`[error: ${job.error}]`);
+	return lines.join("\n");
+}
+
 type MutableJob = BackgroundJobInfo & {
 	controller: AbortController;
 	readOffset: number;
@@ -82,7 +98,11 @@ export class BackgroundJobs {
 			.then((result) => {
 				if (result.output && !job.output.endsWith(result.output)) append(result.output);
 				job.details = { ...input.details, ...result.details };
-				job.status = controller.signal.aborted ? "cancelled" : "completed";
+				job.status = controller.signal.aborted
+					? "cancelled"
+					: job.type === "shell" && job.details.exit !== 0
+						? "failed"
+						: "completed";
 			})
 			.catch((error: unknown) => {
 				job.error = error instanceof Error ? error.message : String(error);

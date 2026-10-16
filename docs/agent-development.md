@@ -51,7 +51,7 @@ Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以�
 5. 已有 Agent 保留创建时的模型调用配置。Assistant/runtime 变化或服务重启导致重建时，使用会话保存的 `provider/model` 从当前 `models.json` 重新解析端点、凭据和模型参数。
 6. 模型被移除或配置失效时，历史仍可查看；继续执行明确报错，不悄悄切换到其他模型。修好配置后可以再次提交。
 
-助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `skill`。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供 server 层确认型交互和工作区边界检查，尚无进程沙箱或 MCP。
+助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `skill`。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供确认型交互、工作区边界检查和 MCP，尚无进程沙箱。MCP 通过宿主 runtime 注册，配置、权限与生命周期见 [MCP 接入说明](mcp-integration.md)。
 
 ## Plugin 与 Skill
 
@@ -360,4 +360,4 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 
 自动压缩位于服务层，不修改 `agent-loop.ts`。真实模型每次调用前，`transformContext` 根据最后一次有效模型 usage 加尾部消息估算 token；超过模型窗口减去保留预算时，用同一模型生成结构化摘要，并把“摘要 + 最近消息”作为本次模型上下文。切分点不会落在 `toolResult`，后续压缩会把新历史合并进旧摘要。摘要记录随会话持久化，完整消息数组保持不变，因此页面和恢复仍能看到原始历史。摘要请求失败时回退到原上下文。
 
-当前仍限制 32 个助手和 32 个会话（含子会话），完整历史载入内存；每 Session SSE 推全量快照，全局 `/events` 只推增量事件，适合开发验证。长历史分页和持久 Turn 列表仍是后续能力。
+当前本地助手最多 32 个，插件最多 32 个，每个助手的 `subagentIds` 最多 32 项；根会话和子会话均未设置固定数量上限。每 Session SSE 仍推全量快照，全局 `/events` 只推增量事件，适合开发验证。长历史的 HTTP/前端分页和持久 Turn 列表仍是后续能力。

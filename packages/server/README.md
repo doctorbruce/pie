@@ -50,7 +50,7 @@
 
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
-`400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或助手/会话达到各自 32 的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明" }`。
+`400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或本地助手达到 32 个的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明" }`。
 
 助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
@@ -195,7 +195,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 这是便于二次开发的首版服务。Astron adapter 已映射当前所需的 Core contract 子集；未声明的能力仍应明确失败。
 
-- 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、确认型工具交互和前台单层 Subagent；不实现 MCP、后台 Subagent 或递归派发。
+- 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、MCP、确认型工具交互和前台/后台单层 Subagent；不支持递归派发。MCP 配置、权限与生命周期见 [MCP 接入说明](../../docs/mcp-integration.md)。
 - Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_SHELL`（或平台默认的 `PI_BASH`/`PI_POWERSHELL`）、`PI_BASH_TIMEOUT_MS`、`PI_BASH_YIELD_MS` 和 `PI_RG` 配置可执行文件与超时。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
 - 事件的 `event` 字段保留 Pi 原始格式。Astron adapter 将其转换为 `CoreEvent`；其他宿主也应在 adapter 边界转换，不要将 Pi 原始结构传入产品服务。
 - 自动压缩在 checkpoint 与原文事务提交后替换 Agent、执行 loop 和 Session 的工作历史，保留摘要、必要的当前输入和近期消息，解除冷正文引用；完整原文仍在 SQLite，摘要不成为原始消息节点。请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片保留。摘要失败、取消、提交失败或压缩后仍超预算时不裁剪工作历史，明确结束本轮。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)，正文回收见 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。

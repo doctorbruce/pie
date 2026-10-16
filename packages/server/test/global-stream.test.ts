@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createAgentFactory } from "@pie/local";
 import { createRuntime, type SessionEvent } from "@pie/runtime";
+import { applySessionEvent } from "@pie/runtime/session-events";
 import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
 
 test("global streaming does not read full history and permits cancellation followed by a new session", async (context) => {
@@ -66,6 +67,7 @@ test("global streaming does not read full history and permits cancellation follo
 	assert(completedSessions.has(next.id));
 	assert.equal(globalHistoryIncluded, false);
 	assert.equal(globalMutationLeaked, false);
+	const baseline = await runtime.getSession(session.id);
 	const fullPackets: SessionEvent[] = [];
 	runtime.subscribe(session.id, (packet) => fullPackets.push(packet));
 	await runtime.submitTurn(session.id, { text: "hello again" });
@@ -73,9 +75,16 @@ test("global streaming does not read full history and permits cancellation follo
 	assert.equal(completed.turn?.status, "completed");
 	const settled = fullPackets.find((packet) => packet.type === "turn.settled");
 	assert(settled);
-	assert.deepEqual(settled.snapshot.messages, completed.messages);
+	assert(fullPackets.every((packet) => !packet.snapshot));
+	let reconstructed = baseline;
+	for (const packet of fullPackets) {
+		const next = applySessionEvent(reconstructed, packet);
+		assert(next);
+		reconstructed = next;
+	}
+	assert.deepEqual(reconstructed.messages, completed.messages);
 	assert(
-		settled.snapshot.messages.some(
+		reconstructed.messages.some(
 			(message) =>
 				message.role === "user" &&
 				Array.isArray(message.content) &&

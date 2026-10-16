@@ -1,11 +1,12 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
 import type { SessionEvent, SessionSnapshot } from "@pie/runtime/protocol";
+import { messageIdentity } from "@pie/runtime/session-events";
 
 export function updateToolProgress(
 	current: ReadonlyMap<string, string>,
 	packet: SessionEvent,
 ): ReadonlyMap<string, string> {
-	if (packet.snapshot.turn?.status !== "running") return current.size ? new Map() : current;
+	if ((packet.turn ?? packet.snapshot?.turn)?.status !== "running") return current.size ? new Map() : current;
 	const event = packet.event;
 	if (typeof event?.toolCallId !== "string") return current;
 	if (event.type === "tool_execution_start" || event.type === "tool_execution_end") {
@@ -40,9 +41,9 @@ export function toThreadMessages(
 	if (!snapshot) return [];
 	const messages = snapshot.streamingMessage ? [...snapshot.messages, snapshot.streamingMessage] : snapshot.messages;
 	const results = new Map(messages.filter((m) => m.role === "toolResult").map((m) => [m.toolCallId, m]));
-	return messages.flatMap((message, index): ThreadMessageLike[] => {
+	return messages.flatMap((message): ThreadMessageLike[] => {
 		if (message.role === "toolResult") return [];
-		const id = `${snapshot.id}:${index}`;
+		const id = `${snapshot.id}:${messageIdentity(message)}`;
 		if (message.role === "user") {
 			return [
 				{
@@ -63,7 +64,7 @@ export function toThreadMessages(
 				type: "tool-call",
 				toolCallId: part.id,
 				toolName: part.name,
-				argsText: JSON.stringify(part.arguments),
+				argsText: part.argumentsText ?? JSON.stringify(part.arguments),
 				result: result?.content.map((c) => (c.type === "text" ? c.text : "[图片结果]")).join("\n"),
 				isError: result?.isError,
 				artifact: !result && snapshot.turn?.status === "running" ? toolProgress?.get(part.id) : undefined,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Session SSE bootstraps with the latest 50 messages and then emits revisioned deltas rather than full snapshots; the Pie Web client consumes increments and pages older history. Global `/events` and explicit full-session reads remain unchanged.
+
 ### Added
 
 - Add an embeddable runtime with asynchronous session storage and host-provided model, tool, skill, MCP and request-recording capabilities; reuse it in the local HTTP service.

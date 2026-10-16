@@ -16,6 +16,7 @@ import {
 	type SessionEvent,
 	type SessionMetadata,
 } from "@pie/runtime";
+import { applySessionEvent } from "@pie/runtime/session-events";
 import { type MessageTree, treePath } from "@pie/runtime/session-tree";
 import type { ExternalTool } from "@pie/runtime/tools";
 
@@ -318,7 +319,7 @@ test("host subscriptions can approve and cancel SDK tools without an HTTP transp
 	let approved: Promise<unknown> | undefined;
 	const revisions: number[] = [];
 	runtime.subscribe(session.id, (packet) => {
-		revisions.push(packet.snapshot.revision);
+		revisions.push(packet.revision);
 		if (packet.type === "interaction.requested" && packet.interaction)
 			approved = runtime.replyInteraction(session.id, packet.interaction.id, { approved: true });
 	});
@@ -697,3 +698,130 @@ test("cold import, fork and branch selection preserve history without retaining 
 	assert.equal((await runtime.waitForTurn(session.id)).messages.length, 4);
 	assert.equal(memory.trees.get(session.id)!.nodes.length, 6);
 });
+
+test("long-history session events never read full history and bounded views use cursor pages", async (context) => {
+	const memory = memoryStore();
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused"),
+		sessionRetention: "release-after-turn",
+	});
+	context.after(() => runtime.close());
+	await runtime.registerHostRuntimes([definition]);
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	await runtime.importSession(session.id, {
+		schemaVersion: 1,
+		source: { astronSessionId: "source", coreId: "test", sessionId: "source" },
+		transcript: Array.from({ length: 60 }, (_, index) => ({
+			role: "user",
+			createdAt: index + 1,
+			content: [{ type: "text", text: `cold-${index}-${"x".repeat(4096)}` }],
+		})),
+	});
+	let fullReads = 0;
+	const readPath = memory.store.readPath;
+	memory.store.readPath = async (...args) => {
+		fullReads++;
+		return readPath(...args);
+	};
+	const view = await runtime.getSession(session.id, { limit: 2 });
+	assert.equal(view.messages.length, 2);
+	assert(view.history?.nextBeforeSeq);
+	const older = await runtime.readHistory(session.id, {
+		limit: 2,
+		beforeSeq: view.history.nextBeforeSeq,
+		leafId: view.history.leafId,
+	});
+	assert.equal(older.entries.length, 2);
+	assert.equal(fullReads, 0);
+	const packets: SessionEvent[] = [];
+	const readsAtPublication: number[] = [];
+	runtime.subscribe(session.id, (packet) => {
+		packets.push(packet);
+		readsAtPublication.push(fullReads);
+	});
+	await runtime.submitTurn(session.id, { text: "continue" });
+	await runtime.waitForTurn(session.id);
+	assert.equal(fullReads, 1, "only explicit waitForTurn reads a complete snapshot");
+	assert(readsAtPublication.every((count) => count === 0));
+	assert(packets.some((packet) => packet.event?.type === "message_update"));
+	assert(packets.some((packet) => packet.type === "turn.settled"));
+	assert(packets.every((packet) => packet.snapshot === undefined));
+	assert(!JSON.stringify(packets).includes("cold-"));
+	assert(!JSON.stringify(packets).includes('"partial":'));
+	for (const limit of [0, 201, NaN, 1.5]) await assert.rejects(runtime.getSession(session.id, { limit }), /历史分页/);
+});
+
+test(
+	"a paged bootstrap pins its history leaf and revision while newer events are buffered",
+	{ timeout: 10000 },
+	async (context) => {
+		const memory = memoryStore();
+		let toolStarted: () => void = () => {};
+		let releaseTool: () => void = () => {};
+		let resume: () => void = () => {};
+		const toolEntered = new Promise<void>((resolve) => {
+			toolStarted = resolve;
+		});
+		const toolBlocked = new Promise<void>((resolve) => {
+			releaseTool = resolve;
+		});
+		const runtime = await createRuntime({
+			store: memory.store,
+			agents: agents("unused", async () => {
+				toolStarted();
+				await toolBlocked;
+			}),
+		});
+		context.after(async () => {
+			resume();
+			releaseTool();
+			await runtime.close();
+		});
+		await runtime.registerHostRuntimes([definition]);
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		await runtime.importSession(session.id, {
+			schemaVersion: 1,
+			source: { astronSessionId: "source", coreId: "test", sessionId: "source" },
+			transcript: Array.from({ length: 4 }, (_, index) => ({
+				role: "user",
+				createdAt: index + 1,
+				content: [{ type: "text", text: `older-${index}` }],
+			})),
+		});
+		await runtime.submitTurn(session.id, { text: '调用工具 sdk_echo {"text":"race"}' });
+		await toolEntered;
+		const baseline = await runtime.getSession(session.id, { limit: 2 });
+		let started: () => void = () => {};
+		const entered = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			resume = resolve;
+		});
+		const readHistory = memory.store.readHistory;
+		memory.store.readHistory = async (...args) => {
+			started();
+			await blocked;
+			return readHistory(...args);
+		};
+		const packets: SessionEvent[] = [];
+		runtime.subscribe(session.id, (packet) => packets.push(packet));
+		const pending = runtime.getSession(session.id, { limit: 2 });
+		await entered;
+		releaseTool();
+		const completed = await runtime.waitForTurn(session.id);
+		resume();
+		let current = await pending;
+		assert.equal(current.messages.length, 2);
+		assert.deepEqual(current.messages, baseline.messages);
+		assert(current.revision < completed.revision);
+		for (const packet of packets) {
+			const next = applySessionEvent(current, packet);
+			assert(next);
+			current = next;
+		}
+		assert.equal(current.revision, completed.revision);
+		assert.deepEqual(current.messages, completed.messages.slice(4));
+	},
+);

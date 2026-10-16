@@ -106,13 +106,13 @@ function projectGlobalPacket(packet: GlobalSessionEvent) {
 
 async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?: string) {
 	let initialized = false;
-	const pending: GlobalSessionEvent[] = [];
-	const write = (packet: GlobalSessionEvent) => {
+	const pending: (GlobalSessionEvent | SessionEvent)[] = [];
+	const write = (packet: GlobalSessionEvent | SessionEvent) => {
 		if (!initialized) {
 			pending.push(packet);
 			return;
 		}
-		const value = sessionId ? packet : projectGlobalPacket(packet);
+		const value = sessionId ? packet : projectGlobalPacket(packet as GlobalSessionEvent);
 		if (value === undefined) return;
 		if (res.writableLength > 1024 * 1024) res.destroy();
 		else res.write(`data: ${JSON.stringify(value)}\n\n`);
@@ -126,7 +126,7 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 		unsubscribe();
 	});
 	try {
-		const snapshot = sessionId ? await runtime.getSession(sessionId) : undefined;
+		const snapshot = sessionId ? await runtime.getSession(sessionId, { limit: 50 }) : undefined;
 		if (res.destroyed) return;
 		res.writeHead(200, {
 			"content-type": "text/event-stream",
@@ -134,9 +134,14 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 			"x-accel-buffering": "no",
 		});
 		if (snapshot)
-			res.write(`data: ${JSON.stringify({ type: "snapshot", sessionId, turnId: snapshot.turn?.id, snapshot })}\n\n`);
+			res.write(
+				`data: ${JSON.stringify({ type: "snapshot", sessionId, turnId: snapshot.turn?.id, instanceId: snapshot.instanceId, revision: snapshot.revision, turn: snapshot.turn, snapshot })}\n\n`,
+			);
 		initialized = true;
-		for (const packet of pending) if (!snapshot || packet.snapshot.revision > snapshot.revision) write(packet);
+		for (const packet of pending)
+			if (!snapshot || ("revision" in packet ? packet.revision : packet.snapshot.revision) > snapshot.revision)
+				write(packet);
+		pending.length = 0;
 		heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15000);
 	} catch (error) {
 		unsubscribe();
@@ -221,13 +226,33 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (path === "/sessions" && req.method === "POST")
 				return json(201, await runtime.createSession((await readJson(req)) as CreateSessionInput));
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|turns|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|history|turns|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			if (!match) throw new RuntimeError(404, "会话或接口不存在");
 			const [, id, action, interactionId] = match;
-			if (req.method === "GET" && !action) return json(200, await runtime.getSession(id));
+			if (req.method === "GET" && !action)
+				return json(
+					200,
+					await runtime.getSession(
+						id,
+						url.searchParams.has("limit") ? { limit: Number(url.searchParams.get("limit")) } : undefined,
+					),
+				);
 			if (req.method === "GET" && action === "events") return streamEvents(runtime, res, id);
+			if (req.method === "GET" && action === "history")
+				return json(
+					200,
+					await runtime.readHistory(id, {
+						limit: Number(url.searchParams.get("limit") ?? "50"),
+						...(url.searchParams.has("beforeSeq")
+							? { beforeSeq: Number(url.searchParams.get("beforeSeq")) }
+							: {}),
+						...(url.searchParams.has("leafId")
+							? { leafId: url.searchParams.get("leafId") === "null" ? null : url.searchParams.get("leafId") }
+							: {}),
+					}),
+				);
 			if (req.method === "GET" && action === "export") return json(200, await runtime.exportSession(id));
 			if (req.method === "POST" && action === "fork")
 				return json(201, await runtime.forkSession(id, await readJson(req)));

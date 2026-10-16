@@ -7,6 +7,7 @@
 - 本地实现位于 `@pie/local`；云端 `agent-service` 应自行装配数据库与 tools-sdk，不依赖本地适配包。
 - `createRuntime` 的 `sessionRetention` 默认 `"retain"`，继续复用内存；云端可选 `"release-after-turn"`，回合可靠提交并收尾后卸载 Agent / 工作正文，下次通过注入的 `RuntimeStore` 按 checkpoint 重建。运行中、待确认、排队消息和后台任务阻止卸载，写入失败保留内存；不删除持久历史或关闭共享资源。
 - 单次用户输入后，连续三次及以上使用相同 JSON 参数调用同一工具时，最终工具结果追加模型可见提醒；对象键顺序不影响判断。提醒不阻止必要的轮询或重试，不修改工具成功/失败状态，也不限制步数。检测覆盖当前工作窗口内的跨轮次调用；新用户输入或不同调用打断计数。
+- 会话订阅只发送 `instanceId`、`revision`、Turn 和消息增量，不再附带完整快照；用 `getSession(id, { limit: 50 })` 获取首屏，再按 `readHistory` 的 seq 游标补旧页。`@pie/runtime/session-events` 提供浏览器可用的增量合并与分页合并；版本缺口或历史切换时重新加载首屏。全局订阅契约和显式 `getSession(id)` 完整读取保持不变，详见[事件与分页 SPEC](../../docs/specs/session-event-stream.md)。
 - 当前为源码 workspace 包，运行时需能解析内部 Agent / AI 依赖，并使用 `node --conditions=source`；发行产物及 Cloud workspace 接入尚待完成。
 
 完整契约与示例见 [嵌入接入说明](../../docs/runtime-embedding.md)。仓库根目录执行 `npm run test:runtime` 验证嵌入调用和依赖边界，不调用真实模型。

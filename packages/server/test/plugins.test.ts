@@ -8,15 +8,16 @@ import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "
 import { createAgentFactory } from "@pie/local/agent";
 import type {
 	Assistant,
+	MaterializedSessionEvent,
 	Plugin,
 	RuntimeConfig,
-	SessionEvent,
 	SessionSnapshot,
 	ToolActivity,
 } from "@pie/runtime/protocol";
 import { createPlugins } from "../../local/src/plugins.ts";
 import { systemTools } from "../../local/src/tools.ts";
 import { createCoreServer } from "../src/server.ts";
+import { createSessionEventReader } from "./event-client.ts";
 
 const shellName = "bash";
 
@@ -208,12 +209,13 @@ async function submit(
 	base: string,
 	sessionId: string,
 	text: string,
-	onPacket?: (packet: SessionEvent) => Promise<void>,
+	onPacket?: (packet: MaterializedSessionEvent) => Promise<void>,
 ) {
 	const response = await fetch(`${base}/sessions/${sessionId}/events`, { signal: AbortSignal.timeout(30000) });
 	assert(response.body);
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
+	const readEvent = createSessionEventReader();
 	let buffer = "";
 	try {
 		assert.equal((await api(base, `/sessions/${sessionId}/turns`, { text })).status, 202);
@@ -226,7 +228,7 @@ async function submit(
 				const line = buffer.slice(0, end);
 				buffer = buffer.slice(end + 2);
 				if (line.startsWith("data: ")) {
-					const packet = JSON.parse(line.slice(6)) as SessionEvent;
+					const packet = readEvent(JSON.parse(line.slice(6)));
 					if (packet.type === "interaction.requested" && packet.interaction)
 						assert.equal(
 							(
@@ -296,7 +298,7 @@ test("shared host bindings preserve distinct provenance through SSE, load failur
 	assert.equal(created.status, 201, await created.clone().text());
 	const session = (await created.json()) as SessionSnapshot;
 	assert.deepEqual(session.runtime?.permissions, runtime.permissions);
-	const updates: SessionEvent[] = [];
+	const updates: MaterializedSessionEvent[] = [];
 	const loadedB = await submit(first.base, session.id, "加载技能 B/pdf", async (packet) => {
 		if (packet.activity) updates.push(packet);
 	});

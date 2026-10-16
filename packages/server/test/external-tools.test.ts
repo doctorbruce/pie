@@ -6,8 +6,15 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createAgentFactory } from "@pie/local/agent";
-import type { Assistant, InteractionRequest, SessionEvent, SessionSnapshot, ToolInfo } from "@pie/runtime/protocol";
+import type {
+	Assistant,
+	InteractionRequest,
+	MaterializedSessionEvent,
+	SessionSnapshot,
+	ToolInfo,
+} from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
+import { createSessionEventReader } from "./event-client.ts";
 
 async function request(base: string, path: string, body?: unknown) {
 	return fetch(`${base}${path}`, {
@@ -29,13 +36,14 @@ async function submit(
 	base: string,
 	sessionId: string,
 	text: string,
-	onPacket?: (packet: SessionEvent) => void | Promise<void>,
+	onPacket?: (packet: MaterializedSessionEvent) => void | Promise<void>,
 ) {
 	const response = await fetch(`${base}/sessions/${sessionId}/events`, { signal: AbortSignal.timeout(15000) });
 	assert(response.body);
 	const reader = response.body.getReader();
 	const decoder = new TextDecoder();
-	const packets: SessionEvent[] = [];
+	const readEvent = createSessionEventReader();
+	const packets: MaterializedSessionEvent[] = [];
 	let buffer = "";
 	try {
 		assert.equal((await request(base, `/sessions/${sessionId}/turns`, { text })).status, 202);
@@ -48,7 +56,7 @@ async function submit(
 				const frame = buffer.slice(0, boundary);
 				buffer = buffer.slice(boundary + 2);
 				if (frame.startsWith("data: ")) {
-					const packet = JSON.parse(frame.slice(6)) as SessionEvent;
+					const packet = readEvent(JSON.parse(frame.slice(6)));
 					packets.push(packet);
 					await onPacket?.(packet);
 					if (packet.type === "turn.settled") return { snapshot: packet.snapshot, packets };

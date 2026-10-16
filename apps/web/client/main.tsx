@@ -17,11 +17,13 @@ import type {
 	ServerInfo,
 	SessionEvent,
 	SessionForkResult,
+	SessionHistoryPage,
 	SessionSnapshot,
 	SessionSummary,
 	SessionTree,
 	ToolActivity,
 } from "@pie/runtime/protocol";
+import { applySessionEvent, messageIdentity, prependHistoryPage } from "@pie/runtime/session-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AssistantSettings } from "./assistant-settings.tsx";
@@ -172,10 +174,12 @@ function ForkPrompt({
 	snapshot: SessionSnapshot;
 	disabled: boolean;
 	onClose: () => void;
-	onFork: (messageIndex: number) => void;
+	onFork: (beforeMessageId: string) => void;
 }) {
-	const candidates = snapshot.messages.flatMap((message, messageIndex) =>
-		message.role === "user" ? [{ messageIndex, text: messageText(message) || "[空用户消息]" }] : [],
+	const candidates = snapshot.messages.flatMap((message) =>
+		message.role === "user"
+			? [{ messageId: messageIdentity(message), text: messageText(message) || "[空用户消息]" }]
+			: [],
 	);
 	return (
 		<div className="settings-overlay">
@@ -193,9 +197,9 @@ function ForkPrompt({
 					{candidates.map((candidate, index) => (
 						<button
 							type="button"
-							key={`${candidate.messageIndex}:${candidate.text}`}
+							key={candidate.messageId}
 							disabled={disabled}
-							onClick={() => onFork(candidate.messageIndex)}
+							onClick={() => onFork(candidate.messageId)}
 						>
 							<small>用户消息 {index + 1}</small>
 							<span>{candidate.text}</span>
@@ -237,6 +241,7 @@ function App() {
 	const [query, setQuery] = useState("");
 	const [coreReady, setCoreReady] = useState(false);
 	const [connected, setConnected] = useState(false);
+	const [loadingHistory, setLoadingHistory] = useState(false);
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState("");
 	const [showSidebar, setShowSidebar] = useState(false);
@@ -253,11 +258,10 @@ function App() {
 
 	const accept = useCallback((next: SessionSnapshot) => {
 		if (sessionRef.current?.id !== next.id) return;
-		setSnapshot((previous) =>
-			previous?.id === next.id && previous.instanceId === next.instanceId && previous.revision > next.revision
-				? previous
-				: next,
-		);
+		const previous = sessionRef.current;
+		if (previous.instanceId === next.instanceId && previous.revision > next.revision) return;
+		sessionRef.current = next;
+		setSnapshot(next);
 	}, []);
 
 	const refreshSessions = useCallback(async () => {
@@ -302,7 +306,7 @@ function App() {
 			setAssistantId(defaultAssistantId);
 			const saved = localStorage.getItem("pie.web.session");
 			const existing = allSessions.find((session) => session.id === saved) ?? allSessions[0];
-			activate(existing ? await request<SessionSnapshot>(`/sessions/${existing.id}`) : undefined);
+			activate(existing ? await request<SessionSnapshot>(`/sessions/${existing.id}?limit=50`) : undefined);
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
 		} finally {
@@ -314,27 +318,53 @@ function App() {
 		void initialize();
 	}, [initialize]);
 	useEffect(() => {
-		sessionRef.current = snapshot;
-	}, [snapshot]);
-	useEffect(() => {
 		const timer = setInterval(() => void refreshSessions().catch(() => {}), 5000);
 		return () => clearInterval(timer);
 	}, [refreshSessions]);
 	useEffect(() => {
-		if (!snapshot?.id) return;
-		setConnected(false);
-		const source = new EventSource(`/api/sessions/${snapshot.id}/events`);
-		source.onmessage = (message) => {
-			const packet: SessionEvent = JSON.parse(message.data);
-			if (sessionRef.current?.id !== packet.sessionId) return;
-			setConnected(true);
-			accept(packet.snapshot);
-			setToolProgress((current) => updateToolProgress(current, packet));
-			if (packet.type === "turn.settled") void refreshSessions().catch(() => {});
-		};
-		source.onerror = () => setConnected(false);
+		const sessionId = snapshot?.id;
+		if (!sessionId) return;
+		let source: EventSource;
+		function connect() {
+			setConnected(false);
+			source = new EventSource(`/api/sessions/${sessionId}/events`);
+			source.onmessage = (message) => {
+				const packet: SessionEvent = JSON.parse(message.data);
+				if (sessionRef.current?.id !== packet.sessionId) return;
+				const next = applySessionEvent(sessionRef.current, packet);
+				if (!next) {
+					source.close();
+					connect();
+					return;
+				}
+				setConnected(true);
+				accept(next);
+				setToolProgress((current) => updateToolProgress(current, packet));
+				if (packet.type === "turn.settled") void refreshSessions().catch(() => {});
+			};
+			source.onerror = () => setConnected(false);
+		}
+		connect();
 		return () => source.close();
 	}, [accept, refreshSessions, snapshot?.id]);
+
+	async function loadEarlierHistory() {
+		const current = sessionRef.current;
+		const cursor = current?.history?.nextBeforeSeq;
+		if (!current || cursor == null || loadingHistory) return;
+		setLoadingHistory(true);
+		try {
+			const page = await request<SessionHistoryPage>(
+				`/sessions/${current.id}/history?limit=50&beforeSeq=${cursor}&leafId=${encodeURIComponent(current.history?.leafId ?? "null")}`,
+			);
+			const latest = sessionRef.current;
+			if (latest?.id === current.id) accept(prependHistoryPage(latest, page, cursor));
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setLoadingHistory(false);
+		}
+	}
 
 	async function operate(action: () => Promise<void>) {
 		if (pending) return;
@@ -366,7 +396,6 @@ function App() {
 		setError("");
 		try {
 			await request(`/sessions/${current.id}/turns`, "POST", { text });
-			accept(await request<SessionSnapshot>(`/sessions/${current.id}`));
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
 			throw reason;
@@ -418,11 +447,11 @@ function App() {
 		}
 	}
 
-	async function forkSession(messageIndex: number) {
+	async function forkSession(beforeMessageId: string) {
 		const current = sessionRef.current;
 		if (!current || current.turn?.status === "running") return;
 		await operate(async () => {
-			const result = await request<SessionForkResult>(`/sessions/${current.id}/fork`, "POST", { messageIndex });
+			const result = await request<SessionForkResult>(`/sessions/${current.id}/fork`, "POST", { beforeMessageId });
 			draftRef.current.set(result.session.id, result.selectedText);
 			switchSession(result.session);
 			await refreshSessions();
@@ -506,7 +535,7 @@ function App() {
 									void operate(async () => {
 										const latest = (await refreshSessions()).find((session) => session.assistantId === id);
 										switchSession(
-											latest ? await request<SessionSnapshot>(`/sessions/${latest.id}`) : undefined,
+											latest ? await request<SessionSnapshot>(`/sessions/${latest.id}?limit=50`) : undefined,
 										);
 										setAssistantId(id);
 									});
@@ -575,7 +604,7 @@ function App() {
 								disabled={pending}
 								onClick={() =>
 									void operate(async () =>
-										switchSession(await request<SessionSnapshot>(`/sessions/${session.id}`)),
+										switchSession(await request<SessionSnapshot>(`/sessions/${session.id}?limit=50`)),
 									)
 								}
 							>
@@ -684,6 +713,16 @@ function App() {
 										</button>
 									)}
 								</section>
+							)}
+							{snapshot?.history?.nextBeforeSeq != null && (
+								<button
+									type="button"
+									className="button secondary"
+									disabled={loadingHistory}
+									onClick={() => void loadEarlierHistory()}
+								>
+									{loadingHistory ? "正在加载…" : "加载更早消息"}
+								</button>
 							)}
 							<div className="transcript">
 								<ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
@@ -853,7 +892,9 @@ function App() {
 													(session) => session.assistantId === assistantId,
 												);
 												if (remaining)
-													switchSession(await request<SessionSnapshot>(`/sessions/${remaining.id}`));
+													switchSession(
+														await request<SessionSnapshot>(`/sessions/${remaining.id}?limit=50`),
+													);
 											})
 										}
 									>
@@ -907,7 +948,7 @@ function App() {
 					snapshot={snapshot}
 					disabled={pending}
 					onClose={() => setShowFork(false)}
-					onFork={(messageIndex) => void forkSession(messageIndex)}
+					onFork={(beforeMessageId) => void forkSession(beforeMessageId)}
 				/>
 			)}
 			{snapshot?.interactions[0] && (

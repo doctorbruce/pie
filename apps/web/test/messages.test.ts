@@ -85,6 +85,8 @@ test("partial text retains identity when committed; aborted output stays cancell
 test("tool progress stays UI-only and does not mark a running call as completed", () => {
 	const packet: SessionEvent = {
 		type: "agent.event",
+		instanceId: snapshot.instanceId,
+		revision: snapshot.revision,
 		sessionId: snapshot.id,
 		snapshot,
 		event: {
@@ -139,7 +141,13 @@ test("progress updates preserve other calls and ignore malformed or unrelated ev
 		["call-1", "first"],
 		["call-2", "second"],
 	]);
-	const packet: SessionEvent = { type: "agent.event", sessionId: snapshot.id, snapshot };
+	const packet: SessionEvent = {
+		type: "agent.event",
+		instanceId: snapshot.instanceId,
+		revision: snapshot.revision,
+		sessionId: snapshot.id,
+		snapshot,
+	};
 	assert.equal(updateToolProgress(progress, packet), progress);
 	for (const partialResult of [null, {}, { content: null }, { content: [null, 42, { type: "text", text: false }] }]) {
 		assert.equal(
@@ -160,4 +168,16 @@ test("progress updates preserve other calls and ignore malformed or unrelated ev
 	});
 	assert.deepEqual([...next], [["call-2", "second"]]);
 	assert.equal(progress.get("call-1"), "first");
+});
+
+test("loading older history preserves existing UI message identities", () => {
+	const before = toThreadMessages(snapshot);
+	const after = toThreadMessages({
+		...snapshot,
+		messages: [{ role: "user", content: "older", timestamp: -1 }, ...snapshot.messages],
+	});
+	assert.deepEqual(
+		after.slice(1).map((message) => message.id),
+		before.map((message) => message.id),
+	);
 });

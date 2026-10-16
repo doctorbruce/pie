@@ -12,13 +12,16 @@ import { fileURLToPath } from "node:url";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import type {
 	Assistant,
+	MaterializedSessionEvent,
 	ModelCatalog,
 	ProviderCatalog,
 	SessionEvent,
+	SessionHistoryPage,
 	SessionSnapshot,
 	SessionSummary,
 } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
+import { createSessionEventReader } from "./event-client.ts";
 
 const shellTool = "bash";
 const waitCommand = process.platform === "win32" ? "Start-Sleep -Seconds 10" : "sleep 10";
@@ -55,7 +58,7 @@ async function start(env: NodeJS.ProcessEnv = {}) {
 	};
 }
 
-async function* events(url: string): AsyncGenerator<SessionEvent> {
+async function* rawEvents(url: string): AsyncGenerator<SessionEvent> {
 	const response = await fetch(url, { signal: AbortSignal.timeout(10000) });
 	assert.equal(response.status, 200);
 	assert(response.body);
@@ -77,6 +80,11 @@ async function* events(url: string): AsyncGenerator<SessionEvent> {
 	} finally {
 		await reader.cancel();
 	}
+}
+
+async function* events(url: string): AsyncGenerator<MaterializedSessionEvent> {
+	const readEvent = createSessionEventReader();
+	for await (const packet of rawEvents(url)) yield readEvent(packet);
 }
 
 test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconnect snapshot", async (t) => {
@@ -120,7 +128,7 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	});
 	assert.equal(accepted.status, 202);
 	const { turnId } = (await accepted.json()) as { turnId: string };
-	const received: SessionEvent[] = [];
+	const received: MaterializedSessionEvent[] = [];
 	for await (const packet of stream) {
 		received.push(packet);
 		assert.equal(packet.sessionId, session.id);
@@ -140,7 +148,10 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	assert(final.messages.some((m) => m.role === "toolResult" && !m.isError && m.toolName === "read"));
 	assert.match(JSON.stringify(final.messages), /READ_OK/);
 	const reconnected = events(`${core.base}/sessions/${session.id}/events`);
-	assert.deepEqual((await reconnected.next()).value?.snapshot, final);
+	const restored = (await reconnected.next()).value?.snapshot;
+	assert.deepEqual(restored?.messages, final?.messages);
+	assert.deepEqual(restored?.turn, final?.turn);
+	assert.equal(restored?.revision, final?.revision);
 	await reconnected.return(undefined);
 	assert(received.every((p, i) => i === 0 || p.snapshot.revision > received[i - 1].snapshot.revision));
 });
@@ -183,6 +194,92 @@ test("a persisted host runtime that no longer parses is dropped instead of block
 	assert.equal(rows.count, 0);
 });
 
+test("session HTTP paging and raw SSE bound history while explicit snapshots remain complete", async (context) => {
+	const core = await start();
+	context.after(() => core.close());
+	const session = (await (await core.post("/sessions", {})).json()) as SessionSnapshot;
+	const imported = await fetch(`${core.base}/sessions/${session.id}/import`, {
+		method: "PUT",
+		headers: { "Content-Type": "application/json" },
+		body: JSON.stringify({
+			schemaVersion: 1,
+			source: { astronSessionId: "source", coreId: "test", sessionId: "source" },
+			transcript: Array.from({ length: 60 }, (_, index) => ({
+				id: `history-${index}`,
+				role: "user",
+				createdAt: index + 1,
+				content:
+					index === 0
+						? [
+								{ type: "text", text: "OLD_IMAGE_ONLY" },
+								{
+									type: "file",
+									mimeType: "image/png",
+									uri: `data:image/png;base64,${Buffer.alloc(128 * 1024).toString("base64")}`,
+								},
+							]
+						: [{ type: "text", text: `history-${index}` }],
+			})),
+		}),
+	});
+	assert.equal(imported.status, 200, await imported.clone().text());
+	const latest = (await (await fetch(`${core.base}/sessions/${session.id}?limit=2`)).json()) as SessionSnapshot;
+	assert.equal(latest.messages.length, 2);
+	assert(latest.history?.nextBeforeSeq);
+	const history: SessionHistoryPage["entries"] = [];
+	let beforeSeq: number | null = null;
+	do {
+		const response = await fetch(
+			`${core.base}/sessions/${session.id}/history?limit=7&leafId=${latest.history.leafId}${beforeSeq === null ? "" : `&beforeSeq=${beforeSeq}`}`,
+		);
+		assert.equal(response.status, 200);
+		const page = (await response.json()) as SessionHistoryPage;
+		assert(page.entries.length <= 7);
+		history.unshift(...page.entries);
+		beforeSeq = page.nextBeforeSeq;
+	} while (beforeSeq !== null);
+	assert.equal(history.length, 60);
+	assert.equal(new Set(history.map((entry) => entry.id)).size, 60);
+	assert(history.every((entry, index) => index === 0 || entry.seq! > history[index - 1].seq!));
+	for (const query of ["limit=0", "limit=201", "limit=NaN", "limit=1.5"])
+		assert.equal((await fetch(`${core.base}/sessions/${session.id}?${query}`)).status, 400);
+	for (const query of ["beforeSeq=0", "beforeSeq=1.5", "leafId=", "limit=201"])
+		assert.equal((await fetch(`${core.base}/sessions/${session.id}/history?${query}`)).status, 400);
+	const stream = rawEvents(`${core.base}/sessions/${session.id}/events`);
+	const initial = (await stream.next()).value;
+	assert(initial?.snapshot);
+	assert.equal(initial.snapshot.messages.length, 50);
+	assert(initial.snapshot.history?.nextBeforeSeq);
+	assert(!JSON.stringify(initial).includes("OLD_IMAGE_ONLY"));
+	const readEvent = createSessionEventReader();
+	readEvent(initial);
+	assert.equal((await core.post(`/sessions/${session.id}/turns`, { text: "hello" })).status, 202);
+	let reconstructed = initial.snapshot;
+	let deltas = 0;
+	for await (const packet of stream) {
+		assert.equal(packet.snapshot, undefined);
+		assert.equal(packet.instanceId, initial.instanceId);
+		assert(!JSON.stringify(packet).includes("OLD_IMAGE_ONLY"));
+		if (packet.event?.type === "message_update") {
+			deltas++;
+			assert(JSON.stringify(packet).length < 2000);
+			assert.equal(packet.event.message, undefined);
+			assert(!JSON.stringify(packet.event).includes('"partial":'));
+		}
+		reconstructed = readEvent(packet).snapshot;
+		if (packet.type === "turn.settled") break;
+	}
+	assert(deltas > 0);
+	const complete = (await (await fetch(`${core.base}/sessions/${session.id}`)).json()) as SessionSnapshot;
+	assert.equal(complete.messages.length, 62);
+	assert.deepEqual(reconstructed.messages, complete.messages.slice(10));
+	const reconnected = rawEvents(`${core.base}/sessions/${session.id}/events`);
+	const bootstrap = (await reconnected.next()).value;
+	assert.deepEqual(bootstrap?.snapshot?.messages, complete.messages.slice(-50));
+	assert.equal(bootstrap?.revision, complete.revision);
+	await reconnected.return(undefined);
+});
+
 test("global SSE stays incremental when the session snapshot exceeds the client backlog limit", async (t) => {
 	const core = await start();
 	t.after(() => core.close());
@@ -194,7 +291,7 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 	});
 	assert.equal(imported.status, 200);
 	assert(Buffer.byteLength(await imported.text()) > 1024 * 1024);
-	const stream = events(`${core.base}/events`);
+	const stream = rawEvents(`${core.base}/events`);
 	const firstPacket = stream.next();
 	const accepted = await core.post(`/sessions/${session.id}/turns`, { text: "继续" });
 	assert.equal(accepted.status, 202, await accepted.clone().text());
@@ -226,7 +323,7 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 		if (packet.type === "turn.settled") {
 			assert(receivedAgentEvent);
 			assert(receivedMessageEnd);
-			assert.equal(packet.snapshot.turn?.status, "completed");
+			assert.equal(packet.snapshot?.turn?.status, "completed");
 			const saved = (await (await fetch(`${core.base}/sessions/${session.id}`)).json()) as SessionSnapshot;
 			const assistant = saved.messages.find((message) => message.role === "assistant");
 			assert(assistant?.role === "assistant");
@@ -261,7 +358,7 @@ test("global SSE promotes file output details for Astron artifact discovery", as
 	const session = (await (
 		await core.post("/sessions", { assistantId: "artifact-host", workspacePath: directory })
 	).json()) as SessionSnapshot;
-	const stream = events(`${core.base}/events`);
+	const stream = rawEvents(`${core.base}/events`);
 	const firstPacket = stream.next();
 	assert.equal(
 		(
@@ -448,7 +545,7 @@ test("Pi models.json configuration persists, reloads atomically and drives a rea
 		for await (const packet of stream) {
 			assert(!JSON.stringify(packet).includes("private-test-key"));
 			if (packet.type !== "turn.settled") continue;
-			assert.equal(packet.snapshot.turn?.status, "completed", packet.snapshot.turn?.error);
+			assert.equal(packet.snapshot?.turn?.status, "completed", packet.snapshot?.turn?.error);
 			assert(
 				packet.snapshot.messages.some((message) => message.role === "toolResult" && message.toolName === "read"),
 			);
@@ -571,7 +668,7 @@ test("assistant edits reconfigure existing durable sessions before their next tu
 		assert.equal((await core.post(`/sessions/${session.id}/turns`, { text })).status, 202);
 		for await (const packet of stream) {
 			if (packet.type !== "turn.settled") continue;
-			assert.equal(packet.snapshot.turn?.status, "completed");
+			assert.equal(packet.snapshot?.turn?.status, "completed");
 			const toolResult = packet.snapshot.messages.find((message) => message.role === "toolResult");
 			assert(toolResult);
 			assert.equal(toolResult.isError, false);
@@ -618,7 +715,7 @@ test("assistant edits reconfigure existing durable sessions before their next tu
 	await restarted.post(`/sessions/${a.id}/turns`, { text: "继续" });
 	for await (const packet of continued) {
 		if (packet.type !== "turn.settled") continue;
-		assert.equal(packet.snapshot.turn?.status, "completed");
+		assert.equal(packet.snapshot?.turn?.status, "completed");
 		assert.equal(packet.snapshot.messages.filter((m) => m.role === "user").length, 2);
 		break;
 	}
@@ -843,7 +940,7 @@ test("task delegates to fresh child sessions using the latest host assistant bin
 				continue;
 			}
 			if (packet.type !== "turn.settled") continue;
-			assert.equal(packet.snapshot.turn?.status, "completed", packet.snapshot.turn?.error);
+			assert.equal(packet.snapshot?.turn?.status, "completed", packet.snapshot?.turn?.error);
 			const result = [...packet.snapshot.messages]
 				.reverse()
 				.find((message) => message.role === "toolResult" && message.toolName === "task");
@@ -1098,7 +1195,7 @@ test("process crash keeps accepted input and closes unknown tool outcomes withou
 	await core.post(`/sessions/${session.id}/turns`, { text: "继续" });
 	for await (const packet of continued) {
 		if (packet.type !== "turn.settled") continue;
-		assert.equal(packet.snapshot.turn?.status, "completed");
+		assert.equal(packet.snapshot?.turn?.status, "completed");
 		assert.equal(
 			packet.snapshot.messages.filter((message) => message.role === "toolResult" && message.toolName === shellTool)
 				.length,
@@ -1155,14 +1252,14 @@ test("cancel targets one turn, rejects concurrent submits, and permits another t
 			cancelSent = true;
 		}
 		if (packet.type === "turn.settled") {
-			assert.equal(packet.snapshot.turn?.status, "cancelled");
+			assert.equal(packet.snapshot?.turn?.status, "cancelled");
 			break;
 		}
 	}
 	assert(cancelSent);
 	for await (const packet of other) {
 		if (packet.type === "turn.settled") {
-			assert.equal(packet.snapshot.turn?.status, "completed");
+			assert.equal(packet.snapshot?.turn?.status, "completed");
 			break;
 		}
 	}
@@ -1178,7 +1275,7 @@ test("cancel targets one turn, rejects concurrent submits, and permits another t
 	);
 	for await (const packet of retry) {
 		if (packet.type !== "turn.settled") continue;
-		assert.equal(packet.snapshot.turn?.status, "completed");
+		assert.equal(packet.snapshot?.turn?.status, "completed");
 		assert(packet.snapshot.messages.some((m) => m.role === "toolResult" && !m.isError));
 		const message = packet.snapshot.messages.at(-1);
 		assert(
@@ -1218,7 +1315,7 @@ test("steer injects a user message into the active turn and rejects idle or stal
 	assert.equal((await core.post(`/sessions/${session.id}/steer`, { turnId: "idle", text: "改变方向" })).status, 409);
 	const stream = events(`${core.base}/sessions/${session.id}/events`);
 	await stream.next();
-	const globalStream = events(`${core.base}/events`);
+	const globalStream = rawEvents(`${core.base}/events`);
 	const firstGlobalPacket = globalStream.next();
 	const accepted = await core.post(`/sessions/${session.id}/turns`, {
 		requestId: "request-before-steer",
@@ -1249,8 +1346,8 @@ test("steer injects a user message into the active turn and rejects idle or stal
 			steerSent = true;
 		}
 		if (packet.type !== "turn.settled") continue;
-		assert.equal(packet.snapshot.turn?.status, "completed");
-		assert.equal(packet.snapshot.turn?.requestId, "request-after-steer");
+		assert.equal(packet.snapshot?.turn?.status, "completed");
+		assert.equal(packet.snapshot?.turn?.requestId, "request-after-steer");
 		assert(packet.snapshot.messages.some((message) => message.role === "user" && message.content === "改变方向"));
 		// 引擎侧身份必须原样留在 user 消息上（历史读回靠它认领 turn / 计划任务）。
 		const firstTurnMessage = packet.snapshot.messages.find(
@@ -1277,7 +1374,7 @@ test("steer injects a user message into the active turn and rejects idle or stal
 			assistantMessageIds.add(String(packet.event.messageId));
 		}
 		if (packet.sessionId === session.id && packet.type === "turn.settled") {
-			assert.equal(packet.snapshot.turn?.requestId, "request-after-steer");
+			assert.equal(packet.snapshot?.turn?.requestId, "request-after-steer");
 			break;
 		}
 		nextGlobal = await globalStream.next();

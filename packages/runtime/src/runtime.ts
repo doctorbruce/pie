@@ -5,6 +5,7 @@ import type { createAgentFactory } from "./agent.ts";
 import type { AssistantSource } from "./capabilities.ts";
 import { checkpointMessage, isContextCheckpoint } from "./compaction.ts";
 import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./config.ts";
+import { projectSessionAgentEvent } from "./event-projection.ts";
 import { type BackgroundJobInfo, BackgroundJobs } from "./jobs.ts";
 import type {
 	ActivityRecord,
@@ -16,6 +17,7 @@ import type {
 	InteractionRequest,
 	SessionEvent,
 	SessionSnapshot,
+	SessionState,
 	SessionSummary,
 	SessionTransfer,
 	SubagentBinding,
@@ -650,14 +652,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 			runtime: localRuntime(assistant),
 		};
 	}
-	async function snapshot(session: Session): Promise<SessionSnapshot> {
-		const messages = await fullHistory(session);
+	function sessionState(session: Session): SessionState {
 		return structuredClone({
 			instanceId,
 			...summary(session),
 			assistant: session.assistant,
 			revision: session.revision,
-			messages: displayAgentMessages(messages),
 			streamingMessage: session.agent?.state.streamingMessage,
 			turn: session.turn,
 			runtime: session.runtime,
@@ -667,6 +667,29 @@ async function initializeRuntime(options: RuntimeOptions) {
 				.filter((interaction) => interaction.sessionId === session.id)
 				.map((interaction) => interaction.request),
 		});
+	}
+	async function snapshot(session: Session, options?: { limit: number }): Promise<SessionSnapshot> {
+		const state = sessionState(session);
+		const leafId = session.tree?.leafId ?? null;
+		const page = options ? await store.readHistory(session.id, { ...options, leafId }) : undefined;
+		const messages = page ? page.entries.map((entry) => entry.message) : await fullHistory(session);
+		return structuredClone({
+			...state,
+			messages: displayAgentMessages(messages),
+			...(page ? { history: { leafId, nextBeforeSeq: page.nextBeforeSeq } } : {}),
+		});
+	}
+	function validateHistoryOptions(options: { limit: number; beforeSeq?: number; leafId?: string | null }) {
+		if (
+			!Number.isSafeInteger(options.limit) ||
+			options.limit < 1 ||
+			options.limit > 200 ||
+			(options.beforeSeq !== undefined && (!Number.isSafeInteger(options.beforeSeq) || options.beforeSeq < 1)) ||
+			(options.leafId !== undefined &&
+				options.leafId !== null &&
+				(typeof options.leafId !== "string" || !options.leafId))
+		)
+			throw new RuntimeError(400, "历史分页需要 1–200 条、有效 seq 游标和叶子 ID");
 	}
 	async function publish(
 		session: Session,
@@ -686,7 +709,19 @@ async function initializeRuntime(options: RuntimeOptions) {
 				interaction,
 				snapshot: { instanceId, revision: session.revision, turn: session.turn },
 			};
-			if (session.clients.size) notifySubscribers(session.clients, { ...packet, snapshot: await snapshot(session) });
+			if (session.clients.size)
+				notifySubscribers(session.clients, {
+					type,
+					sessionId: session.id,
+					turnId: session.turn?.id,
+					instanceId,
+					revision: session.revision,
+					turn: session.turn,
+					activity,
+					interaction,
+					event: type === "agent.event" ? projectSessionAgentEvent(event) : event,
+					...(type === "agent.event" ? {} : { state: sessionState(session) }),
+				});
 			notifySubscribers(globalClients, packet);
 		});
 		session.publishPromise = pending.catch(() => {});
@@ -722,7 +757,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 			child.cancelRequested = false;
 			child.updatedAt = Date.now();
 			await persist(child);
-			await publish(child, "snapshot");
+			await publish(
+				child,
+				"snapshot",
+				projectSessionAgentEvent({ type: "message_end", message: agent.state.messages.at(-1) }),
+			);
 		} else {
 			const id = randomUUID();
 			const now = Date.now();
@@ -1063,10 +1102,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 				return await snapshot(session);
 			}, true);
 		},
-		getSession(sessionId: string) {
+		getSession(sessionId: string, options?: { limit: number }) {
 			return execute(async () => {
 				const session = requireSession(sessionId);
-				return await snapshot(session);
+				if (options) validateHistoryOptions(options);
+				return await snapshot(session, options);
 			}, false);
 		},
 		exportSession(sessionId: string) {
@@ -1103,7 +1143,20 @@ async function initializeRuntime(options: RuntimeOptions) {
 		readHistory(sessionId: string, options: { limit: number; beforeSeq?: number; leafId?: string | null }) {
 			return execute(async () => {
 				const session = requireSession(sessionId);
-				return await store.readHistory(session.id, options);
+				validateHistoryOptions(options);
+				const leafId = options.leafId === undefined ? (session.tree?.leafId ?? null) : options.leafId;
+				const revision = session.revision;
+				const page = await store.readHistory(session.id, { ...options, leafId });
+				return {
+					...page,
+					instanceId,
+					revision,
+					leafId,
+					entries: page.entries.flatMap((entry) => {
+						const message = displayAgentMessages([entry.message])[0];
+						return message ? [{ ...entry, message }] : [];
+					}),
+				};
 			}, false);
 		},
 		selectTree(sessionId: string, body: Record<string, unknown>) {
@@ -1139,7 +1192,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					Object.assign(session, previous);
 					throw error;
 				}
-				await publish(session, "snapshot");
+				await publish(session, "snapshot", { type: "history.reset" });
 				const displayed = displayAgentMessages([selected.message])[0];
 				return {
 					session: await snapshot(session),
@@ -1191,6 +1244,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					Object.assign(session, previous);
 					throw error;
 				}
+				await publish(session, "snapshot", { type: "history.reset" });
 				const result: SessionTransfer = exportSession({ ...session, messages: await fullHistory(session) });
 				return { session: await snapshot(session), transfer: result };
 			}, true);
@@ -1393,7 +1447,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					configuration.runtime,
 					typeof body.systemPrompt === "string" ? body.systemPrompt : configuration.runtime.systemPrompt,
 				);
-				await publish(session, "snapshot");
+				await publish(session, "snapshot", projectSessionAgentEvent({ type: "message_end", message: userMessage }));
 				const accepted = { sessionId: session.id, turnId: session.turn.id, requestId };
 				startRun(session);
 				return accepted;

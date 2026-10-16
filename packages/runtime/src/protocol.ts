@@ -13,6 +13,7 @@ export type WireMessage =
 						id: string;
 						name: string;
 						arguments: Record<string, unknown>;
+						argumentsText?: string;
 				  }
 			)[];
 			stopReason: string;
@@ -213,6 +214,15 @@ export type SessionSnapshot = SessionSummary & {
 	activities?: ActivityRecord[];
 	compaction?: ContextCompaction;
 	interactions: InteractionRequest[];
+	history?: { leafId: string | null; nextBeforeSeq: number | null };
+};
+export type SessionState = Omit<SessionSnapshot, "messages" | "history">;
+export type SessionHistoryPage = {
+	instanceId: string;
+	revision: number;
+	leafId: string | null;
+	entries: { id: string; parentId: string | null; seq?: number; message: WireMessage }[];
+	nextBeforeSeq: number | null;
 };
 export type SessionForkResult = {
 	session: SessionSnapshot;
@@ -269,12 +279,20 @@ export type SessionEvent = {
 		| "interaction.resolved";
 	sessionId: string;
 	turnId?: string;
+	instanceId: string;
+	revision: number;
+	turn?: Turn;
 	event?: { type: string; [key: string]: unknown };
 	activity?: ActivityRecord;
 	interaction?: InteractionRequest;
-	snapshot: SessionSnapshot;
+	state?: SessionState;
+	snapshot?: SessionSnapshot;
 };
-export type GlobalSessionEvent = Omit<SessionEvent, "snapshot"> & {
+export type MaterializedSessionEvent = Omit<SessionEvent, "snapshot"> & { snapshot: SessionSnapshot };
+export type GlobalSessionEvent = Pick<
+	SessionEvent,
+	"type" | "sessionId" | "turnId" | "event" | "activity" | "interaction"
+> & {
 	snapshot: Pick<SessionSnapshot, "instanceId" | "revision" | "turn">;
 };
 export type ServerInfo = {

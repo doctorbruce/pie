@@ -86,6 +86,8 @@ await runtime.close();
 
 `env` 为可选的工厂环境快照，Runtime 不默认读取 `process.env`。`compactionSettings(model)` 可选；省略时仅使用纯计算的预算默认值，不读文件。本地工厂注入文件配置读取实现。
 
+宿主可以在 `AgentRuntimeConfig.compaction` 提供 `{ thresholdTokens }`，空对象表示使用模型预算默认值。参数随 host runtime revision 在下一 Turn 生效，并传入对应的 Subagent；该模式直接使用宿主参数，不读取本地 `settings.json`。未提供该字段的独立运行模式仍使用工厂注入的 `compactionSettings(model)`。阈值必须为正整数，实际压缩预算仍受模型上下文窗口与保留量约束。
+
 目前 Skill 绑定仍采用目录字段；对象存储引用、Worker 路径映射和跨环境资源协议尚未实现。这是后续接入工作，不要用虚构路径绕过它。
 
 ## 存储契约

@@ -15,6 +15,7 @@ async function start(
 	context: TestContext,
 	handle: (request: ModelRequest, requests: ModelRequest[]) => Reply,
 	thresholdTokens = 300,
+	hostThresholdTokens?: number,
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-auto-compaction-"));
 	const requests: ModelRequest[] = [];
@@ -81,24 +82,62 @@ async function start(
 	const address = core.server.address();
 	assert(address && typeof address !== "string");
 	const base = `http://127.0.0.1:${address.port}`;
+	const abort = new AbortController();
+	let reading: Promise<void> | undefined;
+	context.after(async () => {
+		abort.abort();
+		await reading;
+		await core.close();
+		endpoint.closeAllConnections();
+		await new Promise<void>((resolve) => endpoint.close(() => resolve()));
+		await rm(directory, { recursive: true, force: true });
+	});
 	const post = (path: string, body: unknown) =>
 		fetch(base + path, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(body),
 		});
-	const assistantResponse = await post("/assistants", { name: "Compaction", systemPrompt: "", toolIds: [] });
-	assert.equal(assistantResponse.status, 201);
-	const assistant = (await assistantResponse.json()) as Assistant;
-	const sessionResponse = await post("/sessions", { mode: "real", assistantId: assistant.id });
+	async function configureHost(threshold?: number) {
+		const response = await fetch(`${base}/host-runtimes`, {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				runtimes: [
+					{
+						assistantId: "host-compaction",
+						assistantRevision: String(threshold ?? "default"),
+						runtime: {
+							systemPrompt: "",
+							toolIds: [],
+							skills: [],
+							subagents: [],
+							compaction: threshold === undefined ? {} : { thresholdTokens: threshold },
+						},
+					},
+				],
+			}),
+		});
+		assert.equal(response.status, 200);
+	}
+	let assistantId: string;
+	if (hostThresholdTokens !== undefined) {
+		await configureHost(hostThresholdTokens);
+		assistantId = "host-compaction";
+		await writeFile(join(directory, "settings.json"), "not valid JSON");
+	} else {
+		const assistantResponse = await post("/assistants", { name: "Compaction", systemPrompt: "", toolIds: [] });
+		assert.equal(assistantResponse.status, 201);
+		assistantId = ((await assistantResponse.json()) as Assistant).id;
+	}
+	const sessionResponse = await post("/sessions", { mode: "real", assistantId });
 	assert.equal(sessionResponse.status, 201);
 	const session = (await sessionResponse.json()) as SessionSnapshot;
 	const events: SessionEvent[] = [];
-	const abort = new AbortController();
 	const eventResponse = await fetch(`${base}/sessions/${session.id}/events`, { signal: abort.signal });
 	assert(eventResponse.body);
 	const reader = eventResponse.body.getReader();
-	const reading = (async () => {
+	reading = (async () => {
 		let buffer = "";
 		const decoder = new TextDecoder();
 		for (;;) {
@@ -114,14 +153,6 @@ async function start(
 		}
 	})().catch((error) => {
 		if (!abort.signal.aborted) throw error;
-	});
-	context.after(async () => {
-		abort.abort();
-		await reading;
-		await core.close();
-		endpoint.closeAllConnections();
-		await new Promise<void>((resolve) => endpoint.close(() => resolve()));
-		await rm(directory, { recursive: true, force: true });
 	});
 	const snapshot = async () => (await (await fetch(`${base}/sessions/${session.id}`)).json()) as SessionSnapshot;
 	async function settled() {
@@ -139,8 +170,23 @@ async function start(
 		assert.equal((await post(`/sessions/${session.id}/turns`, body)).status, 202);
 		return settled();
 	}
-	return { requests, events, post, session, snapshot, settled, submit };
+	return { requests, events, post, session, snapshot, settled, submit, configureHost };
 }
+
+test("host compaction thresholds hot-update without reading a local settings file", async (context) => {
+	const server = await start(context, () => ({}), 300, 8000);
+	assert.equal((await server.submit({ text: "x".repeat(600) })).turn?.status, "completed");
+	assert.equal((await server.submit({ text: "y".repeat(600) })).compaction, undefined);
+	await server.configureHost(300);
+	const compacted = await server.submit({ text: "z".repeat(600) });
+	assert.equal(compacted.turn?.status, "completed");
+	assert.equal(compacted.compaction?.generation, 1);
+	assert(server.requests.some((request) => request.summary));
+	await server.configureHost();
+	const restored = await server.submit({ text: "after reset" });
+	assert.equal(restored.turn?.status, "completed");
+	assert.equal(restored.compaction?.generation, 1);
+});
 
 test("provider overflow compacts and retries the same native turn, retaining images and full history", async (context) => {
 	let failed = false;

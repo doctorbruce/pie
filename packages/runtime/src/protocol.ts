@@ -77,6 +77,7 @@ export type McpServerConfig =
 			timeout?: number;
 	  };
 export type AgentRuntimeConfig = {
+	compaction?: { thresholdTokens?: number };
 	mcp?: Record<string, McpServerConfig>;
 	systemPrompt: string;
 	language?: string;

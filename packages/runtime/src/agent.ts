@@ -235,7 +235,9 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			let checkpoint = compaction?.current;
 			const automation =
 				mode === "real" && realModel
-					? (options.compactionSettings?.(realModel) ?? resolveCompactionSettings({}, realModel))
+					? runtime.compaction
+						? resolveCompactionSettings({ compaction: runtime.compaction }, realModel)
+						: (options.compactionSettings?.(realModel) ?? resolveCompactionSettings({}, realModel))
 					: undefined;
 			const compactContext =
 				mode === "real" && realModel && compaction

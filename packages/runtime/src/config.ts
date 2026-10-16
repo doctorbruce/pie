@@ -87,6 +87,16 @@ function parseAgentRuntimeConfig(
 	});
 	if (new Set(skills.map((skill) => skill.id)).size !== skills.length) throw new SkillConfigError("绑定 ID 不可重复");
 	const language = input.language === undefined ? undefined : text(input.language, "语言", 32);
+	let compaction: AgentRuntimeConfig["compaction"];
+	if (input.compaction !== undefined) {
+		const threshold = object(input.compaction).thresholdTokens;
+		if (
+			threshold !== undefined &&
+			(typeof threshold !== "number" || !Number.isSafeInteger(threshold) || threshold <= 0)
+		)
+			throw new SkillConfigError("compaction.thresholdTokens 必须是正整数");
+		compaction = threshold === undefined ? {} : { thresholdTokens: threshold };
+	}
 	return {
 		systemPrompt: input.systemPrompt,
 		...(language ? { language } : {}),
@@ -94,6 +104,7 @@ function parseAgentRuntimeConfig(
 		skills,
 		permissions: parsePermissionPolicy(input.permissions),
 		...(input.mcp !== undefined ? { mcp: parseMcpServers(input.mcp) } : {}),
+		...(compaction !== undefined ? { compaction } : {}),
 	};
 }
 
@@ -148,6 +159,7 @@ export function hydrateHostRuntime(
 					skills: structuredClone(target.runtime.skills),
 					permissions: structuredClone(target.runtime.permissions),
 					...(target.runtime.mcp ? { mcp: structuredClone(target.runtime.mcp) } : {}),
+					...(target.runtime.compaction ? { compaction: structuredClone(target.runtime.compaction) } : {}),
 				},
 			};
 		}),

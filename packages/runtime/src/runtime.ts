@@ -152,6 +152,7 @@ export type RuntimeAgents = Omit<ReturnType<typeof createAgentFactory>, "setting
 export type RuntimeOptions = {
 	store: RuntimeStore;
 	agents: RuntimeAgents;
+	sessionRetention?: "retain" | "release-after-turn";
 	hostRuntimes?: readonly HostRuntimeDefinition[];
 	saveHostRuntimes?: (definitions: readonly HostRuntimeDefinition[]) => Promise<void>;
 	assistants?: AssistantSource;
@@ -206,7 +207,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
 		clients: Set<RuntimeSubscriber>;
-		runPromise?: Promise<void>;
+		runPromise?: Promise<string | undefined>;
 		writePromise?: Promise<void>;
 		publishPromise?: Promise<void>;
 	};
@@ -235,6 +236,25 @@ async function initializeRuntime(options: RuntimeOptions) {
 	);
 	const pendingInteractions = new Map<string, PendingInteraction>();
 	const entryIds = new WeakMap<AgentMessage, string>();
+	function releaseSession(session: Session) {
+		if (
+			options.sessionRetention !== "release-after-turn" ||
+			storageFailed ||
+			session.runPromise ||
+			session.turn?.status === "running" ||
+			session.agent?.state.isStreaming ||
+			session.agent?.hasQueuedMessages() ||
+			jobs.list(session.id).some((job) => job.status === "running") ||
+			[...pendingInteractions.values()].some(
+				(pending) => pending.sessionId === session.id || pending.executionSessionId === session.id,
+			)
+		)
+			return;
+		session.agent = undefined;
+		session.messages = [];
+		session.transferBase = undefined;
+		session.historyLoaded = false;
+	}
 	async function loadHistory(session: Session) {
 		if (session.historyLoaded !== false) return;
 		if (session.compaction && !session.compaction.firstKeptEntryId) {
@@ -311,6 +331,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	async function forkSession(source: Session, messageIndex: number, requestedTitle: unknown, boundary = false) {
 		if (source.kind !== "root") throw new RuntimeError(409, "子会话不能分叉");
 		if (source.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行，不能分叉");
+		await source.runPromise;
 		const messages = await fullHistory(source);
 		const selected = messages[messageIndex];
 		if (
@@ -417,6 +438,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		});
 		session.writePromise = pending.catch(() => {});
 		await pending;
+		releaseSession(session);
 	}
 	async function recordActivity(session: Session, activity: ToolActivity) {
 		if (!session.turn) throw new Error("技能记录缺少 Turn");
@@ -562,17 +584,20 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	async function notifyBackground(session: Session, text: string) {
 		if (closing) return;
-		const agent = await attachAgent(session);
-		const content = [{ type: "text" as const, text, synthetic: true as const }];
-		agent.followUp({ role: "user", content, timestamp: Date.now() });
-		if (agent.state.isStreaming || session.turn?.status === "running") return;
-		session.turn = { id: randomUUID(), status: "running" };
-		session.cancelRequested = false;
-		session.updatedAt = Date.now();
-		await persist(session);
-		await publish(session, "snapshot");
-		session.runPromise = run(session);
-		await session.runPromise;
+		const started = await execute(async () => {
+			if (session.turn?.status !== "running") await session.runPromise;
+			const agent = await attachAgent(session);
+			const content = [{ type: "text" as const, text, synthetic: true as const }];
+			agent.followUp({ role: "user", content, timestamp: Date.now() });
+			if (agent.state.isStreaming || session.turn?.status === "running") return;
+			session.turn = { id: randomUUID(), status: "running" };
+			session.cancelRequested = false;
+			session.updatedAt = Date.now();
+			await persist(session);
+			await publish(session, "snapshot");
+			return { runPromise: startRun(session) };
+		}, true);
+		await started?.runPromise;
 	}
 	function bindAgent(session: Session, agent: ReturnType<typeof factory.create>) {
 		session.agent = agent;
@@ -687,7 +712,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 				throw new Error(`不可继续的 task_id：${options.taskId}`);
 			if (existing.subagentType !== binding.id || existing.assistantId !== binding.assistantId)
 				throw new Error("task_id 与指定 Subagent 不匹配");
-			if (existing.turn?.status === "running") throw new Error(`Subagent 仍在运行：${existing.id}`);
+			if (existing.turn?.status === "running" || jobs.get(existing.id)?.status === "running")
+				throw new Error(`Subagent 仍在运行：${existing.id}`);
+			await existing.runPromise;
 			child = existing;
 			const agent = await attachAgent(child);
 			agent.state.messages = [...agent.state.messages, { role: "user", content: prompt, timestamp: Date.now() }];
@@ -746,9 +773,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 				};
 				jobSignal.addEventListener("abort", abortChild, { once: true });
 				if (jobSignal.aborted) abortChild();
+				let output: string | undefined;
 				try {
-					child.runPromise = run(child);
-					await child.runPromise;
+					output = await startRun(child);
 				} finally {
 					jobSignal.removeEventListener("abort", abortChild);
 				}
@@ -756,13 +783,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 					throw new Error(
 						`Subagent 执行${child.turn?.status === "cancelled" ? "已取消" : "失败"}（${child.id}）：${child.turn?.error ?? "没有完成"}`,
 					);
-				const message = [...(child.agent?.state.messages ?? [])]
-					.reverse()
-					.find((item) => item.role === "assistant");
-				const output =
-					message?.role === "assistant"
-						? contentText(message.content) || "Subagent 已完成任务。"
-						: "Subagent 已完成任务。";
 				return { output };
 			},
 			async onSettled(job) {
@@ -848,6 +868,21 @@ async function initializeRuntime(options: RuntimeOptions) {
 				turn.error = "无法读取会话结果，请检查存储后重启运行时。";
 			}
 		}
+		if (session.kind === "subagent") {
+			const message = [...agent.state.messages].reverse().find((item) => item.role === "assistant");
+			return message?.role === "assistant"
+				? contentText(message.content) || "Subagent 已完成任务。"
+				: "Subagent 已完成任务。";
+		}
+	}
+	function startRun(session: Session) {
+		const pending = run(session).finally(() => {
+			if (session.runPromise !== pending) return;
+			session.runPromise = undefined;
+			releaseSession(session);
+		});
+		session.runPromise = pending;
+		return pending;
 	}
 
 	let commands = Promise.resolve();
@@ -1038,6 +1073,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			return execute(async () => {
 				const session = requireSession(sessionId);
 				if (session.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行，不能导出");
+				await session.runPromise;
 				return exportSession({ ...session, messages: await fullHistory(session) });
 			}, false);
 		},
@@ -1076,6 +1112,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (session.kind !== "root") throw new RuntimeError(409, "子会话不能切换分支");
 
 				if (session.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行，不能切换分支");
+				await session.runPromise;
 				const tree = await store.readTree(session.id);
 				const selected = tree.nodes.find((node) =>
 					"entryId" in body ? node.id === body.entryId : historyMessageId(node.message) === body.messageId,
@@ -1115,6 +1152,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const session = requireSession(sessionId);
 				if (session.kind === "subagent") throw new RuntimeError(409, "子会话不能导入历史");
 				if (session.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行，不能导入");
+				await session.runPromise;
 				const transfer = parseSessionTransfer(body);
 				const importedMessages = transferToAgentMessages(transfer);
 				const previous = {
@@ -1188,6 +1226,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100)
 					throw new RuntimeError(400, "会话标题需要 1–100 个字符");
 				if (session.turn?.status === "running") throw new RuntimeError(409, "请在执行结束后重命名");
+				await session.runPromise;
 				const previous = session.title;
 				session.title = body.title.trim();
 				session.updatedAt = Date.now();
@@ -1272,6 +1311,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				)
 					throw new RuntimeError(400, "systemPrompt 需要字符串，最多 60000 字符");
 				if (session.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行");
+				await session.runPromise;
 				const requestId = optionalRequestId(body);
 				const messageIdentity = optionalMessageIdentity(body);
 				const configuration = resolveTurnConfiguration(session, body);
@@ -1355,7 +1395,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				);
 				await publish(session, "snapshot");
 				const accepted = { sessionId: session.id, turnId: session.turn.id, requestId };
-				session.runPromise = run(session);
+				startRun(session);
 				return accepted;
 			}, true);
 		},
@@ -1364,6 +1404,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const session = requireSession(sessionId);
 				if (session.kind === "subagent") throw new RuntimeError(409, "子会话随父会话删除");
 				if (session.turn?.status === "running") throw new RuntimeError(409, "请先停止当前执行");
+				await session.runPromise;
 				for (const child of [...sessions.values()].filter(
 					(candidate) => candidate.parentSessionId === session.id,
 				)) {

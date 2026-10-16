@@ -5,6 +5,7 @@
 - 从包根入口导入 `createRuntime`、`createAgentFactory`、`RuntimeStore` 与能力契约；共享协议与工具类型可从 `@pie/runtime/protocol`、`@pie/runtime/tools` 导入。
 - 宿主必须提供会话存储，以及模型、工具、Skill、MCP 和请求记录实现。导入此包不会打开 SQLite、读取本地模型配置、扫描工具目录或监听 HTTP。
 - 本地实现位于 `@pie/local`；云端 `agent-service` 应自行装配数据库与 tools-sdk，不依赖本地适配包。
+- `createRuntime` 的 `sessionRetention` 默认 `"retain"`，继续复用内存；云端可选 `"release-after-turn"`，回合可靠提交并收尾后卸载 Agent / 工作正文，下次通过注入的 `RuntimeStore` 按 checkpoint 重建。运行中、待确认、排队消息和后台任务阻止卸载，写入失败保留内存；不删除持久历史或关闭共享资源。
 - 单次用户输入后，连续三次及以上使用相同 JSON 参数调用同一工具时，最终工具结果追加模型可见提醒；对象键顺序不影响判断。提醒不阻止必要的轮询或重试，不修改工具成功/失败状态，也不限制步数。检测覆盖当前工作窗口内的跨轮次调用；新用户输入或不同调用打断计数。
 - 当前为源码 workspace 包，运行时需能解析内部 Agent / AI 依赖，并使用 `node --conditions=source`；发行产物及 Cloud workspace 接入尚待完成。
 

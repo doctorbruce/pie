@@ -40,3 +40,4 @@
 ## 参考
 
 - 第一阶段：`docs/specs/history-storage.md`；总体调查：`docs/agent-history-memory-design.md`。
+- 后续闲置会话卸载：`docs/specs/idle-session-release.md`，复用本阶段的工作窗口与 checkpoint，不改变压缩算法。

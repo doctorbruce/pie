@@ -53,5 +53,6 @@
 ## 参考
 
 - 第二阶段正文回收及工作窗口读取的后续实现见 `docs/specs/compaction-working-history.md`；本文件保留第一阶段完成时的范围与验证记录。
+- 闲置会话卸载与下一轮重建延续上述读取契约，见 `docs/specs/idle-session-release.md`；不是新的历史存储方案。
 
 - 调查与后续阶段：`docs/agent-history-memory-design.md`。本 SPEC 只覆盖其中的历史存储与读取，不代表其余阶段已实现。

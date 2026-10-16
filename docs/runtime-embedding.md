@@ -38,6 +38,7 @@ export async function createCloudRuntime(
   return createRuntime({
     store,
     agents: createAgentFactory(capabilities),
+    sessionRetention: "release-after-turn",
   });
 }
 ```
@@ -104,6 +105,9 @@ await runtime.close();
 - `subscribe` / `subscribeAll` 返回取消订阅函数，不自动发送初始快照，也不持久重放事件。宿主可用 `getSession` 读取快照；订阅回调不应阻塞或抛错，异步投递与背压由宿主承担。
 - `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。取消只是向工具传递信号；SDK / Worker 必须核对实际停止状态。
 - 当前单实例按顺序接纳控制操作，避免异步存储下重复提交；不同会话的模型执行可并行。此处不是分布式锁，也不是跨节点调度器。
+- `sessionRetention` 默认 `"retain"`，本地继续复用内存中的 Agent 和工作历史；宿主可显式传入 `"release-after-turn"`，在回合结果提交、事件收尾完成后解除 Agent 和消息引用，下一轮通过 `store.readWorkingPath` 加载 checkpoint 工作窗口并重建。该策略不选择数据库，Redis / SQL 仍由宿主实现 `RuntimeStore`。
+- 卸载保留会话元信息、当前叶子、checkpoint 和订阅，不调用 `deleteSession`、不关闭共享 MCP / 存储。创建、导入、分叉、分支选择和闲置元信息写入也会回收已提交的工作正文。完整历史浏览和导出仍临时读取持久数据。
+- 运行中、排队输入、待确认或相关后台任务会阻止卸载；Subagent 先提取结果再释放，后台完成通知进入同一接纳通道。成功、失败和取消都以最终保存成功为释放前提；写入失败保留内存并停止接受后续写入。调用方自行持有的快照不受此策略管理，也不保证 RSS 立即下降。
 - 一个实例对应一个已经限定权限的运行范围；存储、模型配置和工具实现都必须来自该范围。不得把不同租户的全局配置与数据放进同一实例，再依靠请求正文里的租户 ID 做隔离。
 - `close` 幂等，取消在途执行并关闭注入的 MCP 与存储。不要让多个实例共享同一个有独立关闭语义的 Agent 工厂；共享数据库连接池的适配器只释放自己拥有的资源。
 
@@ -113,6 +117,7 @@ await runtime.close();
 
 ```sh
 npm run test:runtime
+node --expose-gc --conditions=source --test packages/runtime/test/runtime.test.ts
 ```
 
-使用延迟存储替身、注入工具与 faux 模型，覆盖无 HTTP / SQLite 的工具循环、进度、历史恢复、并发提交拒绝、写入失败、用户确认和取消。不使用真实云端服务或付费模型；这不替代第二阶段的云端闭环验收。
+使用延迟存储替身、注入工具与 faux 模型，覆盖无 HTTP / SQLite 的工具循环、进度、历史恢复、并发提交拒绝、写入失败、用户确认和取消，以及两种保留策略、checkpoint 重建、Subagent / 后台通知和历史分支。第二条命令额外用 WeakRef 与显式 GC 验证 Agent 和工作正文可回收；不以 RSS 变化代替引用验证。不使用真实云端服务或付费模型；这不替代第二阶段的云端闭环验收。

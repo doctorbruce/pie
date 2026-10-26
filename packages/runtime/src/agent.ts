@@ -130,7 +130,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				update: (next: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => unknown;
 				report?: (event: CompactionEvent) => unknown;
 			},
-			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground">,
+			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground" | "runJob">,
 		) {
 			const runtime = structuredClone(configInput);
 			parseToolIds(runtime.toolIds, toolIds);
@@ -143,6 +143,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				ask: requestInteraction,
 				jobs: native?.jobs ?? new BackgroundJobs(),
 				notifyBackground: native?.notifyBackground,
+				runJob: native?.runJob,
 			});
 			const tools = options.tools.create(context, runtime.toolIds);
 			if (tools.some((tool) => !toolIds.includes(tool.name)))
@@ -309,6 +310,13 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				sessionId,
 				afterToolCall: async (context) => {
 					let skillResult = await skillTools.afterToolCall(context);
+					const job: unknown = context.result.details?.durableJob;
+					if (
+						job &&
+						typeof job === "object" &&
+						["failed", "cancelled"].includes(String(Reflect.get(job, "status")))
+					)
+						skillResult = { ...skillResult, isError: true };
 					const reminder = toolRepetitionReminder(context, runtime.language);
 					if (reminder)
 						skillResult = {

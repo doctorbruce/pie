@@ -255,6 +255,7 @@ function App() {
 	const draftRef = useRef(new Map<string, string>());
 	const sessionRef = useRef<SessionSnapshot | undefined>(undefined);
 	const busy = pending || snapshot?.turn?.status === "running";
+	const interrupted = snapshot?.turn?.status === "interrupted";
 
 	const accept = useCallback((next: SessionSnapshot) => {
 		if (sessionRef.current?.id !== next.id) return;
@@ -390,7 +391,14 @@ function App() {
 
 	async function send(text: string) {
 		const current = sessionRef.current;
-		if (!current || !connected || pending || current.turn?.status === "running") return;
+		if (
+			!current ||
+			!connected ||
+			pending ||
+			current.turn?.status === "running" ||
+			current.turn?.status === "interrupted"
+		)
+			return;
 		if (text.trim() === "/tree") return openTree();
 		setPending(true);
 		setError("");
@@ -485,7 +493,7 @@ function App() {
 		messages,
 		convertMessage: (message: ThreadMessageLike) => message,
 		isRunning: busy,
-		isDisabled: !connected || pending,
+		isDisabled: !connected || pending || interrupted,
 		onNew: async (message) => {
 			await send(message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"));
 		},
@@ -736,15 +744,43 @@ function App() {
 											? snapshot.turn.error
 											: snapshot.turn.status === "cancelled"
 												? "本次执行已停止"
-												: "任务已完成"}
+												: interrupted
+													? "执行已中断，可从已保存的消息边界继续"
+													: "任务已完成"}
 									</output>
+								)}
+								{interrupted && snapshot.turn && (
+									<div className="interaction-actions">
+										<button
+											type="button"
+											className="button secondary"
+											disabled={!connected || pending}
+											onClick={() => void cancel()}
+										>
+											停止本次执行
+										</button>
+										<button
+											type="button"
+											className="button primary"
+											disabled={!connected || pending}
+											onClick={() =>
+												void operate(async () => {
+													await request(`/sessions/${snapshot.id}/resume`, "POST", {
+														turnId: snapshot.turn?.id,
+													});
+												})
+											}
+										>
+											继续本次执行
+										</button>
+									</div>
 								)}
 								<ComposerPrimitive.Root className="composer">
 									<ComposerPrimitive.Input
 										aria-label="发送消息"
 										placeholder={connected ? "告诉 Pie 你想完成什么…" : "正在连接 Core…"}
 										maxLength={16000}
-										disabled={!connected || pending}
+										disabled={!connected || pending || interrupted}
 									/>
 									<div className="composer-footer">
 										<span>Enter 发送 · Shift + Enter 换行</span>

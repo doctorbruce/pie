@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<meta name="color-scheme" content="light">
+	<meta name="description" content="PIE 2026年10月24至26日服务化升级：单会话装载、Turn 恢复、统一 ToolExecution 执行账本、流式工具提前执行，以及 agent-service 的接入责任。">
+	<title>PIE 服务化升级 · 2026.10.24—26</title>
+	<style>
+		:root { --ink: #18283c; --muted: #5c6b7c; --line: #dfe5ea; --paper: #f5f7f8; --teal: #007b73; --teal-soft: #eaf6f2; --amber: #855719; --amber-soft: #fff6e6; --navy: #11263b; --lime: #d1ef99; }
+		* { box-sizing: border-box; }
+		html { scroll-behavior: smooth; scroll-padding-top: 30px; }
+		body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.8 "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+		a { color: var(--teal); text-decoration-thickness: 1px; text-underline-offset: 4px; }
+		a:hover { color: #024b47; }
+		a:focus-visible, summary:focus-visible { outline: 3px solid #8bbce4; outline-offset: 5px; border-radius: 3px; }
+		code { font: .86em/1.6 Consolas, "SFMono-Regular", monospace; overflow-wrap: anywhere; background: #eef1f4; padding: 2px 5px; border-radius: 4px; }
+		p { margin: 0 0 16px; }
+		h1, h2, h3, h4 { line-height: 1.4; margin-top: 0; }
+		h1 { font-size: clamp(32px, 3.7vw, 50px); font-weight: 650; letter-spacing: -1.3px; margin-bottom: 22px; }
+		h2 { font-size: 28px; letter-spacing: -.5px; margin-bottom: 13px; }
+		h3 { font-size: 20px; margin-bottom: 11px; }
+		h4 { font-size: 16px; margin-bottom: 8px; }
+		ul, ol { margin: 8px 0 15px; padding-left: 23px; }
+		li { margin: 5px 0; }
+		strong { font-weight: 650; }
+		.wrap { width: min(1280px, calc(100% - 72px)); margin: 0 auto; }
+		.masthead { display: flex; align-items: center; justify-content: space-between; gap: 22px; padding: 26px 0; font-size: 13px; }
+		.brand { display: flex; align-items: center; gap: 12px; font-size: 18px; letter-spacing: 1px; font-weight: 700; }
+		.brand-mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 9px; color: white; background: var(--navy); letter-spacing: 0; }
+		.masthead .meta { text-align: right; color: var(--muted); }
+		.eyebrow { font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: 2px; }
+		.hero { border-radius: 18px; overflow: hidden; background: var(--navy); color: white; }
+		.hero-main { display: grid; grid-template-columns: 1.45fr 1fr; gap: 44px; padding: 50px 52px 37px; }
+		.hero .eyebrow { color: var(--lime); margin-bottom: 22px; }
+		.hero h1 span { color: var(--lime); }
+		.hero .lead { color: #ced8e3; font-size: 17px; max-width: 590px; }
+		.hero code { background: #ffffff12; color: #dfe9f3; }
+		.tags { display: flex; gap: 9px; flex-wrap: wrap; margin-top: 23px; }
+		.tag { padding: 4px 11px; border-radius: 5px; font-size: 12px; font-weight: 600; background: #ffffff0d; border: 1px solid #ffffff24; color: #d8e1eb; }
+		.tag.done { color: var(--lime); border-color: #d1ef9950; }
+		.tag.pending { color: #ffda9f; border-color: #ffda9f50; }
+		.hero-board { align-self: center; border: 1px solid #ffffff26; border-radius: 12px; padding: 25px; background: #ffffff05; }
+		.board-top { font-size: 12px; color: #c8d6e5; margin-bottom: 17px; display: flex; justify-content: space-between; gap: 10px; }
+		.board-store { text-align: center; padding: 13px; border-radius: 6px; background: #d1ef9910; border: 1px solid #d1ef9960; color: var(--lime); }
+		.board-store small, .board-nodes small { display: block; font-size: 12px; font-weight: 400; }
+		.board-arrow { text-align: center; color: #8fa5bd; font-size: 13px; margin: 10px 0; }
+		.board-nodes { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+		.board-nodes div { text-align: center; padding: 12px 8px; border: 1px solid #ffffff2e; border-radius: 6px; font-size: 14px; }
+		.board-note { margin: 16px 0 0; color: #c4d2e2; font-size: 12px; }
+		.hero-bottom { border-top: 1px solid #ffffff20; padding: 16px 52px; font-size: 13px; color: #cad5e0; }
+		.hero-bottom strong { color: white; }
+		.layout { display: grid; grid-template-columns: 188px minmax(0, 1fr); gap: 48px; padding-top: 46px; }
+		.sidebar { position: sticky; top: 28px; align-self: start; font-size: 13px; }
+		.sidebar .eyebrow { color: var(--muted); font-size: 10px; margin-bottom: 18px; }
+		.sidebar a { display: block; padding: 10px 0; color: var(--muted); text-decoration: none; border-bottom: 1px solid var(--line); }
+		.sidebar a:hover { color: var(--teal); }
+		.sidebar a span { display: inline-block; font: 12px Consolas, monospace; color: #80909f; margin-right: 12px; }
+		.sidebar .reading-note { color: var(--muted); font-size: 12px; padding-top: 22px; }
+		main { min-width: 0; }
+		section { margin: 0 0 40px; padding-bottom: 40px; border-bottom: 1px solid var(--line); scroll-margin-top: 24px; }
+		.section-kicker { display: flex; gap: 10px; align-items: center; color: var(--teal); font-size: 12px; letter-spacing: 1px; font-weight: 650; margin-bottom: 12px; }
+		.section-kicker span { display: inline-grid; place-items: center; width: 27px; height: 27px; border: 1px solid #bfd9d4; border-radius: 50%; font: 12px Consolas, monospace; }
+		.section-lead { color: var(--muted); max-width: 850px; margin-bottom: 24px; }
+		.concept-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 24px; margin: 25px 0; }
+		.concept { border-left: 3px solid #becbd6; padding-left: 16px; }
+		.concept:nth-child(2) { border-color: var(--teal); }
+		.concept:nth-child(3) { border-color: #8873bd; }
+		.concept p { color: var(--muted); font-size: 14px; margin: 0; }
+		.callout { padding: 18px 22px; border-radius: 8px; background: var(--teal-soft); border-left: 3px solid var(--teal); margin: 22px 0; }
+		.callout p:last-child { margin-bottom: 0; }
+		.callout.warn { color: #694919; background: var(--amber-soft); border-left-color: #b9802d; }
+		.callout .label { font-size: 12px; font-weight: 700; letter-spacing: 1px; margin-bottom: 6px; }
+		.note { color: var(--muted); font-size: 13px; }
+		.change { display: grid; grid-template-columns: 42px minmax(0, 1fr); column-gap: 17px; padding: 28px 0; border-top: 1px solid var(--line); }
+		.change:last-of-type { padding-bottom: 8px; }
+		.change-number { font: 26px/1.4 Consolas, monospace; color: #8295a5; }
+		.change h3 { margin-bottom: 13px; }
+		.change p { margin-bottom: 11px; }
+		.benefit { background: var(--teal-soft); padding: 11px 15px; border-radius: 6px; font-size: 14px; }
+		details { margin: 14px 0 0; font-size: 14px; }
+		summary { color: var(--teal); cursor: pointer; font-weight: 600; }
+		details ul { color: var(--muted); }
+		.boundary { padding: 18px 20px; background: white; border: 1px solid var(--line); border-radius: 8px; margin-top: 26px; }
+		.boundary p { margin: 0; font-size: 14px; }
+		.trace-title { display: flex; align-items: baseline; gap: 13px; margin: 28px 0 13px; }
+		.trace-title h3 { margin: 0; }
+		.trace-title span { font-size: 12px; color: var(--muted); }
+		.trace { list-style: none; padding: 0; margin: 0 0 18px; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 9px; }
+		.trace li { position: relative; background: white; border: 1px solid var(--line); border-radius: 7px; padding: 14px 11px; margin: 0; font-size: 13px; }
+		.trace li strong { display: block; margin-bottom: 7px; }
+		.trace li small { display: block; color: var(--muted); font-size: 12px; }
+		.trace li:not(:last-child)::after { content: "→"; position: absolute; right: -10px; top: 35%; z-index: 1; color: #4c827c; background: var(--paper); line-height: 1; }
+		.trace .checkpoint { border-top: 3px solid var(--teal); padding-top: 12px; }
+		.trace .crash { background: var(--amber-soft); border-color: #ead9bb; }
+		.table-wrap { overflow-x: auto; margin: 20px 0; }
+		table { border-collapse: collapse; width: 100%; font-size: 14px; text-align: left; }
+		th { color: var(--muted); font-size: 12px; font-weight: 650; background: #eaf0f2; }
+		th, td { padding: 13px 15px; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
+		td:first-child { font-weight: 600; }
+		.status { font-size: 12px; display: inline-block; padding: 1px 7px; border-radius: 4px; background: var(--teal-soft); color: var(--teal); white-space: nowrap; }
+		.status.wait { background: var(--amber-soft); color: var(--amber); }
+		.hosts { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 26px; }
+		.host { background: white; border: 1px solid var(--line); border-radius: 9px; padding: 21px 23px; }
+		.host .eyebrow { color: var(--muted); font-size: 10px; margin-bottom: 10px; }
+		.host h3 { margin-bottom: 10px; }
+		.host p { font-size: 14px; color: var(--muted); margin-bottom: 0; }
+		.shared { margin: 14px 0 20px; background: #e5efec; border: 1px solid #c6dbd3; border-radius: 8px; padding: 20px 23px; }
+		.shared h4 { color: #1a5a50; }
+		.shared p { font-size: 14px; margin-bottom: 0; }
+		.migration { list-style: none; padding: 0; counter-reset: migration; }
+		.migration li { counter-increment: migration; position: relative; padding: 2px 0 20px 45px; margin: 0; border-left: 1px solid #cedbd9; margin-left: 14px; }
+		.migration li:last-child { border-left-color: transparent; padding-bottom: 0; }
+		.migration li::before { content: counter(migration); position: absolute; left: -14px; top: 0; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 50%; color: var(--teal); background: #e8f1ed; border: 1px solid #c2d9d0; font: 12px Consolas, monospace; }
+		.migration p { font-size: 14px; color: var(--muted); margin-bottom: 0; }
+		.migration h4 { margin-bottom: 5px; }
+		.metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 24px 0 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+		.metric { padding: 22px 18px; border-right: 1px solid var(--line); }
+		.metric:first-child { padding-left: 0; }
+		.metric:last-child { border-right: 0; }
+		.metric strong { display: block; font: 42px/1.2 Consolas, monospace; color: var(--teal); margin-bottom: 7px; }
+		.metric p { font-size: 13px; margin: 0; }
+		.metric small { color: var(--muted); font-size: 12px; }
+		.source-list { display: grid; grid-template-columns: 1fr 1fr; gap: 20px 30px; margin: 23px 0; }
+		.source-list p { font-size: 13px; color: var(--muted); margin-bottom: 0; }
+		.source-list h4 { margin-bottom: 7px; }
+		.links { display: flex; flex-wrap: wrap; gap: 9px 19px; font-size: 13px; margin: 22px 0; }
+		footer { border-top: 1px solid var(--line); padding: 28px 0 40px; margin-top: 10px; font-size: 13px; color: var(--muted); }
+		.footer-content { display: flex; justify-content: space-between; gap: 25px; }
+		@media (max-width: 1100px) { .wrap { width: calc(100% - 40px); } .hero-main { padding: 36px; gap: 28px; } .hero-bottom { padding: 16px 36px; } .layout { grid-template-columns: 160px minmax(0, 1fr); gap: 28px; } .trace { grid-template-columns: 1fr; } .trace li:not(:last-child)::after { content: "↓"; right: 18px; top: auto; bottom: -10px; } }
+		@media (max-width: 800px) { .hero-main { grid-template-columns: 1fr; } .hero-board { max-width: 520px; } .layout { display: block; } .sidebar { position: static; display: flex; gap: 8px 18px; flex-wrap: wrap; margin-bottom: 32px; } .sidebar a { font-size: 12px; padding: 7px 0; } .sidebar .eyebrow, .reading-note { display: none; } .concept-grid { grid-template-columns: 1fr; gap: 18px; } h2 { font-size: 25px; } }
+		@media (max-width: 520px) { .wrap { width: calc(100% - 28px); } .masthead { align-items: flex-start; padding: 20px 0; gap: 10px; } .masthead .meta { font-size: 10px; max-width: 150px; } .brand { font-size: 16px; gap: 8px; } .hero { border-radius: 12px; } .hero-main { padding: 28px 23px; gap: 27px; } .hero-bottom { padding: 16px 23px; } h1 { font-size: 32px; letter-spacing: -.5px; } .hero .lead { font-size: 15px; } .hero-board { padding: 18px; } .board-top { font-size: 11px; } .hosts, .source-list { grid-template-columns: 1fr; } .change { grid-template-columns: 30px minmax(0, 1fr); gap: 9px; } .change-number { font-size: 20px; } .change h3 { font-size: 18px; } .metrics { grid-template-columns: 1fr; } .metric, .metric:first-child { padding: 17px 0; border-right: 0; border-bottom: 1px solid var(--line); } .metric:last-child { border-bottom: 0; } .metric strong { font-size: 35px; } th, td { padding: 11px 9px; } .footer-content { display: block; } }
+		@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+		@media print { @page { margin: 16mm; } body { background: white; font-size: 10pt; color: #142334; } .wrap { width: 100%; } .sidebar { display: none; } .layout { display: block; padding-top: 20px; } .hero { background: white; color: var(--ink); border: 1px solid var(--line); } .hero-main { padding: 20px; grid-template-columns: 1.4fr 1fr; gap: 20px; } .hero h1 { font-size: 25pt; } .hero h1 span, .hero .eyebrow, .hero .lead, .hero-bottom, .hero-bottom strong, .hero-board, .board-store, .board-top, .board-note, .board-arrow, .tag { color: var(--ink); } .hero-board, .board-store, .board-nodes div, .tag { border-color: var(--line); } .hero-bottom { padding: 10px 20px; border-color: var(--line); } h2 { font-size: 18pt; } h3 { font-size: 13pt; } section { padding-bottom: 20px; margin-bottom: 23px; } .change, .host, .callout, .shared, .trace li, .metric { break-inside: avoid; } .trace { grid-template-columns: repeat(5, minmax(0, 1fr)); } .trace li:not(:last-child)::after { content: "→"; right: -10px; top: 35%; bottom: auto; } .metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); } a { color: inherit; } .links { gap: 5px 12px; } footer { padding-bottom: 0; } }
+		@media print { .hero code { color: var(--ink); background: #eef1f4; } }
+	</style>
+</head>
+<body>
+	<header class="wrap masthead">
+		<div class="brand"><span class="brand-mark" aria-hidden="true">P</span> PIE <span style="font-weight:400;color:#7b8b99">/</span> ENGINEERING</div>
+		<div class="meta">改动 2026.10.24—26<br>账本与流式工具更新 2026.10.26</div>
+	</header>
+	<div class="wrap hero">
+		<div class="hero-main">
+			<div>
+				<div class="eyebrow">Cloud-ready runtime · change report</div>
+				<h1>让运行状态可重建，<br>而不是把服务<br><span>绑在内存里。</span></h1>
+				<p class="lead">PIE 本轮补齐单会话装载、安全恢复、外部任务接管与统一执行账本。让 <code>agent-service</code> 可基于持久事实替换执行实例，而不必复制另一套 Agent Loop。</p>
+				<div class="tags"><span class="tag done">PIE 侧已完成</span><span class="tag pending">Cloud 待适配与验收</span><span class="tag">本地默认保持</span></div>
+			</div>
+			<div class="hero-board" role="img" aria-label="共享持久事实支持实例A和实例B重建执行对象；这是目标接入关系，不是已经部署的Cloud结果。">
+				<div class="board-top"><span>正确性依赖持久事实</span><span>不依赖固定进程</span></div>
+				<div class="board-store"><strong>Session · Turn · ToolExecution</strong><small>历史 · 执行账本 · 外部结果关联</small></div>
+				<div class="board-arrow">按需读取 ↓ &nbsp;&nbsp; 可靠提交 ↑</div>
+				<div class="board-nodes"><div><strong>实例 A</strong><small>临时 Agent / 工作上下文</small></div><div><strong>实例 B</strong><small>取得归属后重建与接管</small></div></div>
+				<p class="board-note">A、B 不是同时推进同一 Turn。归属、租约与旧实例隔离由 Cloud 保证。</p>
+			</div>
+		</div>
+		<div class="hero-bottom"><strong>交付范围：</strong>共享 PIE 能力与本地回归闭环。不是 Cloud 上线报告，不承诺任意代码行恢复或副作用“恰好一次”。</div>
+	</div>
+	<div class="wrap layout">
+		<nav class="sidebar" aria-label="报告目录">
+			<div class="eyebrow">In this report</div>
+			<a href="#principle"><span>01</span>问题与边界</a>
+			<a href="#changes"><span>02</span>六条改造主线</a>
+			<a href="#recovery"><span>03</span>中断后从哪接手</a>
+			<a href="#ownership"><span>04</span>PIE 与宿主分工</a>
+			<a href="#cloud"><span>05</span>Cloud 接入清单</a>
+			<a href="#evidence"><span>06</span>验证与修改地图</a>
+			<div class="reading-note">适合架构讨论与服务端接入评审。<br>无外部依赖，可离线查看；浏览器打印可导出 PDF。</div>
+		</nav>
+		<main>
+			<section id="principle" aria-labelledby="principle-title">
+				<div class="section-kicker"><span>01</span> WHAT “STATELESS” MEANS HERE</div>
+				<h2 id="principle-title">不是没有状态，而是不依赖固定实例</h2>
+				<p class="section-lead">模型上下文、Promise 和取消信号在执行时存在于内存很正常。问题在于：实例退出后，下一台机器能否从外部事实判断发生过什么，并在安全位置继续。</p>
+				<div class="concept-grid">
+					<div class="concept"><h4>执行时有状态</h4><p>Agent、工具调用、工作上下文都是本次执行的临时对象。它们不需要被序列化搬走。</p></div>
+					<div class="concept"><h4>服务可替换</h4><p>关键事实在共享存储中。实例换掉后，可按权限与归属重新装载，不依赖原进程常驻。</p></div>
+					<div class="concept"><h4>任务可恢复</h4><p>从已提交输入、工具结果或可查询外部任务继续；不是恢复未保存 token 或异步函数现场。</p></div>
+				</div>
+				<div class="callout"><div class="label">这轮真正改变的依赖关系</div><p>从“这个对象一直活着，所以能继续”，转为“持久事实足够，所以对象可以重建”。这为滚动更新、实例替换与多实例接管提供基础，但生产归属和调度仍由 Cloud 完成。</p></div>
+				<p class="note"><strong>术语：</strong>Assistant 是角色配置；Session 是持久会话；Turn 是一次完整用户提交；Agent 是执行对象。Runtime 是管理这些语义的共享层，不是某个助手的 prompt 模板，也不是一用户必须常驻一个 Agent。</p>
+				<p class="note"><strong>恢复模型：</strong><code>Turn → ToolExecution</code>。Job 只是外部执行器适配名称，不是顶层恢复对象。普通调用 inline、委派 delegated、持久外部执行 durable 共用执行身份与事实记录；不意味着所有模式都支持跨进程续跑。</p>
+			</section>
+			<section id="changes" aria-labelledby="changes-title">
+				<div class="section-kicker"><span>02</span> THE CHANGES</div>
+				<h2 id="changes-title">六条主线，把“可重建”落到实际路径</h2>
+				<p class="section-lead">10 月 24—25 日补装载、读取边界与任务接管；26 日新增统一执行账本，并纳入同工作树的流式工具提前执行。后者是时序优化，不是新增流中断恢复。保留原文件名，日期与验收更新至 26 日。</p>
+				<article class="change"><div class="change-number">01</div><div>
+					<h3>只装载被访问的会话，空闲后可释放整个 Session</h3>
+					<p><strong>以前：</strong><code>loadSessions()</code> 把范围内全部 Session 元信息放进 Runtime。只访问 A，也要承担许多冷会话的对象成本。</p>
+					<p><strong>现在：</strong>启动不查询会话；按 ID 读取，列表独立分页。同 ID 并发访问合并装载，未恢复的 running 会话只影响目标访问。启用卸载策略后，可靠收尾且无引用时回收整个 Session。</p>
+					<div class="benefit"><strong>对 agent-service：</strong>冷启动和闲置执行态不再必然随用户全部历史会话一起增长。不是测得的 RSS 承诺；Cloud 工厂和 Store 也要迁移。</div>
+					<details><summary>接口与安全保护</summary><ul><li><code>readSession(id)</code> + <code>listSessions({ limit, cursor })</code>；列表不激活 Agent、不读正文。</li><li>排序使用 updatedAt 与 ID 双键；父会话删除查询未装载子会话。</li><li>执行、确认、后台任务、读操作及写入失败阻止不安全释放；订阅可保留轻量元信息。</li></ul></details>
+				</div></article>
+				<article class="change"><div class="change-number">02</div><div>
+					<h3>不是读完再切片，而是在存储查询里停止</h3>
+					<p><strong>以前：</strong>分页或恢复检查可能先走完整条祖先链。API 看似只拿一页，底层仍承担长历史成本。</p>
+					<p><strong>现在：</strong><code>readHistory</code> 累计页大小加一的候选节点后停止；工作窗口到压缩边界停止；<code>readTurnPath</code> 只读当前 Turn 的输入到叶子。</p>
+					<div class="benefit"><strong>对 agent-service：</strong>给远端 Store 明确的读取边界，减少旧历史对普通读取、恢复判定和模型准备的牵连。SQLite 优化不会自动优化 MySQL。</div>
+					<details><summary>仍然可能昂贵的路径</summary><ul><li>完整树、导出、显式全量快照、未知结果失败修复可能全量读取。</li><li>单条大消息、超长当前 Turn 以及无压缩边界的工作上下文仍不保证固定成本。</li><li>页大小约束节点数量，不等于消息字节数、总缓存或事件缓冲已有上限。</li></ul></details>
+				</div></article>
+				<article class="change"><div class="change-number">03</div><div>
+					<h3>保持原 Turn，在已提交消息边界恢复</h3>
+					<p><strong>以前：</strong>读到历史不等于知道从哪继续；重新提交用户输入，可能重复执行有副作用的工具。</p>
+					<p><strong>现在：</strong>持久化输入节点、实际 prompt 与取消意图；共享判定 + <code>resumeTurn</code> 保持原用户输入、Turn/request ID 和已应用配置。准入保存成功后才调用模型。</p>
+					<div class="benefit"><strong>对 agent-service：</strong>实例替换有统一恢复语义，不必靠新建 Turn 或复制消息猜测续跑位置。Cloud 仍须先取得归属、核对工具事实并隔离旧 owner。</div>
+					<details><summary>恢复边界</summary><ul><li>输入或整批工具结果已提交：继续；最终 Assistant 已提交：仅补结算。</li><li>工具结果未知且没有有效外部关联：拒绝盲目重放。</li><li>无效/跨分支/循环路径安全拒绝，存储错误不伪装成恢复成功。</li></ul></details>
+				</div></article>
+				<article class="change"><div class="change-number">04</div><div>
+					<h3>异步任务靠持久 ID 接回结果，不靠原回调</h3>
+					<p><strong>以前：</strong>任务可能还在远端跑，但实例的 Promise 和 callback 消失了。新实例不知道该找谁。</p>
+					<p><strong>现在：</strong>工具调用可选 <code>context.runJob</code>，先原子保存稳定关联与提交意图，收到执行器确认后记录 submitted。新实例只查询原任务；明确结果、终态账本和恢复准入同事务提交后继续原 Turn，不重新 submit。</p>
+					<div class="benefit"><strong>对 agent-service：</strong>可映射已有账本与 Worker 状态；通知仅负责唤醒，持久查询才是事实来源。关闭解除等待，显式取消才请求远端取消。</div>
+					<details><summary>能力不是自动套在所有 job 上</summary><ul><li>宿主必须实现并注入 <code>DurableJobExecutor</code>，持久映射稳定 ID 与远端 taskId。</li><li>原 Shell、后台 Subagent、内存 BackgroundJobs 不自动持久化。</li><li>Worker 自身中断后从哪继续，仍由工具内部 checkpoint/幂等策略决定。</li></ul></details>
+				</div></article>
+				<article class="change"><div class="change-number">05</div><div>
+					<h3>统一执行账本，记录工具到达过的确定边界</h3>
+					<p><strong>以前：</strong>checkpoint 会在终态清理，Promise 或执行函数返回也不能证明结果已可靠保存。重建对象和查到历史，仍不足以说明工具到了哪一步。</p>
+					<p><strong>现在：</strong>工具开始前保存 started，外部提交前保存 submission_intent，实际收到确认后保存 submitted。后处理后的结果与 completed / failed 同事务落盘；未知边界可记 recovery_required，不伪造成功或撤销事实。</p>
+					<div class="benefit"><strong>对 agent-service：</strong>不同实例可核对同一 Session/Turn/toolCall 的稳定执行事实。账本与历史矛盾时先拒绝，不查询执行器、不创建 Agent；写入屏障失败后不能绕过账本单独保存结果。</div>
+					<details><summary>模式、分页与保留规则</summary><ul><li>普通工具默认 inline，内置 Task 为 delegated，runJob 关联外部执行后为 durable。只声明模式不会赋予接管能力，也不同于串行/并行的 executionMode。</li><li>账本独立追加，不塞进 Session 或 checkpoint；结果正文仍在历史中。稳定记录 ID 去重，身份冲突拒绝。</li><li><code>readToolExecutions(sessionId, { turnId, limit, afterSeq? })</code> 每页 1–200 条。账本 seq、历史 seq、事件 revision 各自独立。</li><li>终态、下一轮和重启保留账本，删除 Session 才级联清理。普通列表、快照和 SSE 不携带完整账本。</li><li>recovery_required 不是公开 Turn 新状态；硬退出可能来不及写它。没有 submitted 不能证明远端没执行，恢复仍只查原 ID。</li></ul></details>
+				</div></article>
+				<article class="change"><div class="change-number">06</div><div>
+					<h3>完整工具调用可提前启动，但恢复仍保守</h3>
+					<p><strong>以前：</strong>通常等整条模型响应结束后才执行工具，即使一个调用已经完整，仍需等待剩余输出。</p>
+					<p><strong>现在：</strong>收到明确的 <code>toolcall_end</code> 且原始参数可严格解析时，可以提前执行；工具开始前保存 pendingAssistant 调用快照与 started。下一次模型请求仍等待本条响应结束和本批结果，保留执行前权限及落库屏障。</p>
+					<div class="benefit"><strong>对 agent-service：</strong>工具耗时可与剩余输出重叠，同时保留可审计的执行起点。这是同工作树并行完成的时序优化，不是服务化前置条件，也不承诺每种 Provider 都有延迟收益。</div>
+					<details><summary>不是流式中断恢复</summary><ul><li>缺少原始参数或完整结束事件时，回退到响应结束后的执行；不使用片段或修补 JSON 盲目启动。</li><li>保留工具顺序、串行规则、结果复用及错误/取消收束，不重复执行提前完成的调用。</li><li>最终 Assistant 提交后清除调用快照。若工具已启动但最终模型响应未提交就崩溃，保留快照和账本，拒绝盲目续跑，不伪造历史。</li></ul></details>
+				</div></article>
+				<div class="boundary"><h4>已有基线继续沿用，不重复算成本轮新功能</h4><p>10 月 15–16 日已完成包级分层、宿主注入、按需正文、每轮卸载及增量事件。本轮扩展到元信息按需、整个 Session 回收和恢复闭环。token 增量与分页引导继续回归，但 Cloud 的完整快照消费者仍须迁移。事件 revision 与历史 seq 不是同一个游标，缺口须重建引导视图。</p></div>
+			</section>
+			<section id="recovery" aria-labelledby="recovery-title">
+				<div class="section-kicker"><span>03</span> WHERE TAKEOVER STARTS</div>
+				<h2 id="recovery-title">接手的是已保存的事实，不是旧进程的现场</h2>
+				<p class="section-lead">Turn 是恢复任务；已提交消息是继续执行的安全边界。外部任务的关联让“工具结果暂缺”可以被查询，但不让未知结果自动变成成功。执行 checkpoint 与上下文压缩 checkpoint 用途不同，不能互相替代。</p>
+				<div class="trace-title"><h3>场景 A · 工具结果已经提交</h3><span>不再执行工具</span></div>
+				<ol class="trace" aria-label="已保存工具结果的恢复时序">
+					<li class="checkpoint"><strong>1. 输入已保存</strong><small>用户消息 + Turn checkpoint</small></li>
+					<li class="checkpoint"><strong>2. 工具结果已保存</strong><small>结果与终态账本同事务</small></li>
+					<li class="crash"><strong>3. 实例 A 退出</strong><small>未提交的流式片段可能丢失</small></li>
+					<li><strong>4. B 取得归属</strong><small>核对 checkpoint 与工具事实</small></li>
+					<li class="checkpoint"><strong>5. 原 Turn 继续</strong><small>保存准入后，再请求模型</small></li>
+				</ol>
+				<div class="trace-title"><h3>场景 B · 外部任务还在执行</h3><span>不重新提交任务</span></div>
+				<ol class="trace" aria-label="外部任务的查询接管时序">
+					<li class="checkpoint"><strong>1. 先保存关联</strong><small>原工具身份 + submission_intent</small></li>
+					<li><strong>2. 执行器提交</strong><small>实际收到确认才记录 submitted</small></li>
+					<li class="crash"><strong>3. A 退出 / 丢响应</strong><small>远端任务可能继续运行</small></li>
+					<li><strong>4. B 查询原 ID</strong><small>不依赖原 callback 或通知</small></li>
+					<li class="checkpoint"><strong>5. 保存明确结果</strong><small>结果 + 终态账本 + 准入同事务</small></li>
+				</ol>
+				<div class="table-wrap"><table>
+					<caption class="note" style="text-align:left;margin-bottom:10px">外部任务恢复行为：正常执行会查询等待；恢复入口不会替 Cloud 自动调度。</caption>
+					<thead><tr><th scope="col" style="width:29%">查询或故障情况</th><th scope="col">PIE 的实际处理</th></tr></thead>
+					<tbody>
+						<tr><td><span class="status wait">running</span></td><td>恢复返回 409，不推进；宿主之后可再次触发。</td></tr>
+						<tr><td><span class="status">completed + 有效结果</span></td><td>保存原工具结果，与终态账本及准入原子提交，再运行模型。</td></tr>
+						<tr><td>已知 failed / cancelled</td><td>按工具错误结果进入原 Loop，不重新启动任务。</td></tr>
+						<tr><td>缺失 / unknown / 身份不符</td><td>拒绝继续，不自动重提；完成状态缺少结果也拒绝。</td></tr>
+						<tr><td>丢提交响应 / 查询故障</td><td>保留原关联与历史，不保存由本地中止产生的假工具错误。</td></tr>
+						<tr><td>只有提交意图，没有确认</td><td>不能推断远端未执行；只查原任务，missing/unknown 继续阻断，不自动重提。</td></tr>
+						<tr><td>终态账本没有配套历史结果</td><td>在查询执行器或创建 Agent 前拒绝，不能把不一致状态当作可恢复事实。</td></tr>
+						<tr><td>提前工具已启动，最终模型响应未提交</td><td>保留 pendingAssistant 与 started 审计，不伪造历史，不盲目续跑。</td></tr>
+						<tr><td>服务关闭 vs 用户取消</td><td>关闭只解除本地等待；显式取消先保存意图，再请求远端。不能据此断言副作用已撤销。</td></tr>
+					</tbody>
+				</table></div>
+				<div class="callout warn"><div class="label">安全边界，不是功能缺陷</div><p>只有工具调用、没有结果且没有有效外部任务关联时，不能判断动作是否已经生效。宁可记录“未知”并阻断，也不能因重启把发送、支付或文件修改盲目再做一遍。</p></div>
+				<p class="note">PIE 不承诺副作用恰好一次。实例内串行准入不是分布式锁；远端任务幂等、Worker 内部恢复与旧 owner 隔离，仍由宿主和执行器保证。</p>
+			</section>
+			<section id="ownership" aria-labelledby="ownership-title">
+				<div class="section-kicker"><span>04</span> ONE LOOP, DIFFERENT HOSTS</div>
+				<h2 id="ownership-title">复用执行语义，不强求相同宿主生命周期</h2>
+				<p class="section-lead">agent-service 对应云端的产品宿主，承担与本地 astronverse-agent 相近的装配职责；不是把本地 Server 搬到云上。不同存储和工具通过契约接入同一份 Loop。</p>
+				<div class="hosts">
+					<article class="host"><div class="eyebrow">Local host</div><h3>本地装配</h3><p><code>packages/local</code> 提供 SQLite、本机工具、Skill/MCP 与配置；<code>packages/server</code> 提供本地 HTTP/SSE、CLI/Sidecar。</p></article>
+					<article class="host"><div class="eyebrow">Cloud host</div><h3>agent-service</h3><p>限定授权范围，注入共享存储、模型与工具能力，管理归属/路由/WS/SSE；不导入 Local/Server 实现。</p></article>
+				</div>
+				<div class="shared"><h4>共同复用 · packages/pie 下的五个共享包</h4><p><code>runtime</code> 会话/Turn/恢复语义 · <code>agent</code> 底层 Loop · <code>ai</code> 模型调用 · <code>mcp</code> 协议能力 · <code>telemetry</code> 观测契约</p></div>
+				<div class="table-wrap"><table>
+					<thead><tr><th scope="col">职责</th><th scope="col">PIE 提供</th><th scope="col">agent-service / 云端负责</th></tr></thead>
+					<tbody>
+						<tr><td>执行</td><td>Session/Turn、Loop、历史、分支、压缩和恢复入口</td><td>产品 API、授权、请求路由与执行范围</td></tr>
+						<tr><td>存储</td><td>按需读取、独立账本与历史/元信息/账本原子提交契约</td><td>MySQL/Redis/对象存储、索引、事务、连接池</td></tr>
+						<tr><td>配置 / 能力</td><td>消费宿主注入的模型、工具、Skill/MCP</td><td>租户/用户配置、凭据、SDK 与资源授权</td></tr>
+						<tr><td>归属</td><td>不把租约、Pod 或 Redis 协议写进 Loop</td><td>认领、续约、代次校验、失租隔离和接管</td></tr>
+						<tr><td>工具 / 外部执行</td><td>统一 ToolExecution 事实、持久关联、查询结果、接回原 Turn</td><td>共享账本存储、幂等映射、Worker、结果与内部 checkpoint</td></tr>
+						<tr><td>连接 / 投递</td><td>增量事件与补读契约</td><td>跨实例通知、WS/SSE、背压与断线重连</td></tr>
+					</tbody>
+				</table></div>
+				<div class="callout"><div class="label">本地使用不增加云端依赖</div><p>默认仍是 SQLite + <code>retain</code>。恢复通过 <code>PI_TURN_RECOVERY=manual</code> 显式开启；HTTP/Web 增加继续/停止入口，中断 Turn 处理前禁止新一轮输入。原工具、Skill/MCP、Subagent 和后台行为保持回归。</p></div>
+				<p class="note">Runtime 列表默认分页 50 条，但本地封装按页汇总，HTTP <code>GET /sessions</code> 保持原完整列表形状。异步订阅已适配；旧数据库事务性迁移并建立索引，不要求删库重建。</p>
+				<p class="note">本次 SQLite 新增独立账本表及索引，工具执行边界增加可靠写入，但不要求本地每轮销毁 Agent。完整工具调用可能更早启动；下一次模型请求仍等待结果，本地默认保留和恢复策略不变。</p>
+			</section>
+			<section id="cloud" aria-labelledby="cloud-title">
+				<div class="section-kicker"><span>05</span> CLOUD ADOPTION</div>
+				<h2 id="cloud-title">PIE 完成，不等于 agent-service 已经消费</h2>
+				<p class="section-lead">沿用此前 2026-10-26 的 Cloud 本地源码只读核对：已有 MySQL 存储、执行归属/路由和工具执行层，不是从零搭建。本次文档更新未重新核对 Cloud 工作树，未运行 Cloud 测试或确认生产部署；以下是待增量接入项。</p>
+				<div class="table-wrap"><table>
+					<thead><tr><th scope="col" style="width:30%">当前源码观察</th><th scope="col">需要解决的接入差距</th></tr></thead>
+					<tbody>
+						<tr><td>共享 Runtime / MySQL Store</td><td>Cloud 副本仍使用 <code>loadSessions()</code>；需要实现按 ID、游标分页和 Turn 后缀读取。</td></tr>
+						<tr><td>RuntimeFactory</td><td>已启用 <code>release-after-turn</code>，但仍全范围恢复和收集配置引用。仅升级 PIE 不能消除工厂预扫描。</td></tr>
+						<tr><td>RuntimeManager / 事件路由</td><td>仍读取 <code>event.snapshot</code> 并构造 Cloud 快照事件；须同步增量契约、引导视图与历史补读。</td></tr>
+					</tbody>
+				</table></div>
+				<h3 style="margin-top:28px">建议服务端按这个顺序接入</h3>
+				<ol class="migration">
+					<li><h4>五包三方增量合并</h4><p>固定基线，仅合并 runtime/agent/ai/mcp/telemetry，保留同事改动。不覆盖目录，不搬入 Local/Server/Web。</p></li>
+					<li><h4>迁移 Store、账本与工厂</h4><p>实现 readSession、分页 listSessions、readTurnPath 与 readToolExecutions。saveSession 必须同事务保存历史、元信息和增量账本，不能忽略第三个参数或提交后补写；工厂按目标会话恢复与解析配置。</p></li>
+					<li><h4>迁移增量事件链路</h4><p>await 会话订阅；处理分页初始视图、历史补读与序号缺口。Redis 路由、WS/SSE 和客户端都不能假定每个事件有完整 snapshot。</p></li>
+					<li><h4>把租约与原 Turn 恢复衔接</h4><p>授权、认领与旧 owner 隔离在先；恢复使用原配置/prompt/Turn ID，不能把 resume 当作重新 submit。</p></li>
+					<li><h4>用现有账本 / Worker 实现执行器</h4><p>注入 DurableJobExecutor，持久映射稳定 ID，保存状态与结果。通知可丢，但 get 必须能找到已提交事实。</p></li>
+					<li><h4>联合故障与成本验收</h4><p>验证 A 退出/B 接手、丢通知/丢响应、DB 故障、取消、滚动更新、失租旧写入与长历史/大消息。健康 200 不能替代接管验收。</p></li>
+				</ol>
+				<details><summary>必须迁移的共享接口</summary><ul><li><code>loadSessions</code> 删除：改为 readSession 与游标 listSessions。</li><li><code>readTurnPath</code> 新增：校验分支，保留原节点身份并返回当前 Turn 后缀。</li><li><code>saveSession(session, replaceHistory?, toolExecutions?)</code>：账本与历史/元信息同事务，按稳定记录 ID 去重，身份冲突拒绝。</li><li><code>readToolExecutions</code>：按 Session、Turn 和独立 seq 在存储层分页，每页 1–200 条；清理 checkpoint 不删账本。</li><li><code>TurnCheckpoint.pendingAssistant</code>：保留执行前调用快照，不能因最终消息未落盘就把工具判为未执行。</li><li>Runtime 列表消费 <code>nextCursor</code>；不能误把第一页当完整结果。</li><li><code>subscribe</code> 返回 Promise，<code>subscribeAll</code> 仍同步；处理建立前连接关闭。</li><li>消费 <code>interrupted</code> 与 <code>resumeTurn</code>；原 Turn 未处理完不提交下一轮。</li><li><code>jobs/runJob</code> 为显式可选能力，原内存任务不会自动升级。</li></ul></details>
+			</section>
+			<section id="evidence" aria-labelledby="evidence-title">
+				<div class="section-kicker"><span>06</span> EVIDENCE &amp; LIMITS</div>
+				<h2 id="evidence-title">有本地回归证据，也保留明确的未完成项</h2>
+				<p class="section-lead">更新至 2026-10-26 执行账本及流式工具阶段，引用 Turn/流式工具 SPEC 完成记录与同轮 Server 联合验收。当前仅同步文档，没有重跑这些业务测试，也不是生产压测结果。</p>
+				<div class="metrics" aria-label="最近实现测试结果">
+					<div class="metric"><strong>54</strong><p>Runtime 回归通过</p><small>npm run test:runtime</small></div>
+					<div class="metric"><strong>230</strong><p>Server / 共享层回归通过</p><small>npm run test:server</small></div>
+					<div class="metric"><strong>23</strong><p>账本 / 外部任务定向回归</p><small>契约 · SQLite · 跨进程接管</small></div>
+				</div>
+				<p class="note">集合有重叠，不能相加，也不是本阶段新增测试总数。另有 Agent 四文件定向 58 项通过；<code>npm run check</code>（Biome、类型、模型数据）与 <code>git diff --check</code> 通过。25 日的 51 / 221 / 19 项是历史阶段记录，不再作为最新结果。均使用假模型或本地端点，无收费 Provider 调用。</p>
+				<p>覆盖两种保留策略、冷会话、真实 SQLite、显式 GC、工具/MCP、分支/导入导出、压缩、取消、Subagent、HTTP/SSE。账本专项覆盖追加去重、冲突、分页隔离、终态/重启保留、删除清理和事务回滚；保存 started 失败不执行工具，终态写入失败不绕过账本。真实子进程还验证提交/响应丢失和提前工具启动后崩溃，不依赖旧回调、不盲目重放。</p>
+				<details><summary>定向验证命令</summary><ul><li>仓库根目录：<code>node --conditions=source --test packages/runtime/test/durable-jobs.test.ts packages/server/test/tool-execution.test.ts packages/server/test/durable-jobs.test.ts</code>，23 项通过。</li><li>packages/agent：<code>node ../../node_modules/vitest/dist/cli.js --run test/agent.test.ts test/agent-loop.test.ts test/message-replacement.test.ts test/streamed-tool-execution.test.ts</code>，58 项通过。</li><li>Runtime/Server 全量入口与上述集合重叠；完整验收来源见 Turn 与流式工具 SPEC。</li></ul></details>
+				<h3 style="margin-top:28px">修改地图</h3>
+				<div class="source-list">
+					<div><h4>共享执行层</h4><p><code>packages/runtime/src/runtime.ts</code>、<code>runtime-store.ts</code>：按需装载、回收、checkpoint、执行账本、恢复与任务协调。</p></div>
+					<div><h4>安全判定与执行身份</h4><p><code>turn-recovery.ts</code>、<code>durable-jobs.ts</code>、<code>tool-execution.ts</code>：恢复判定、稳定身份、执行边界和分页契约。</p></div>
+					<div><h4>公共能力与状态</h4><p><code>agent.ts</code>、<code>tools.ts</code>、<code>protocol.ts</code>、<code>index.ts</code>：工具上下文、错误语义、interrupted 与导出。</p></div>
+					<div><h4>本地适配与宿主</h4><p><code>packages/local/src/store.ts</code>、<code>runtime.ts</code>；Server 路由和 <code>apps/web/client/main.tsx</code>：SQLite、独立账本表、原子提交/分页、恢复 UI、异步订阅。</p></div>
+					<div><h4>测试与入口</h4><p>Runtime/Server 测试和 fixtures、根 <code>package.json</code>：延迟存储、GC、SQLite 与跨进程故障。没有新增依赖。</p></div>
+					<div><h4>设计与迁移文档</h4><p>开发/嵌入文档、Server README、现有 CHANGELOG 与相关 SPEC：公共契约、验证和完成记录。</p></div>
+					<div><h4>底层工具时序</h4><p><code>packages/agent/src/agent-loop.ts</code>、<code>types.ts</code>：完整调用提前执行、结果复用和等待屏障，启动事件携带调用快照。</p></div>
+					<div><h4>新增专项回归</h4><p><code>tool-execution.test.ts</code>、<code>streamed-tool-execution.test.ts</code>：账本事务/分页/保留、流式权限与落库屏障、真实崩溃边界。</p></div>
+				</div>
+				<div class="callout warn"><div class="label">不能把这些写成“已完成”</div><p>Cloud 生产执行器、租约与恢复联合验收、持久确认和未保存队列、原内存后台/父子任务迁移、任意函数现场续跑，都不属于当前交付。没有承诺 RSS、吞吐或全链路字节上限，也未构建 Sidecar、部署或验收 Electron/Astron 实机链路。</p></div>
+				<p class="note">执行账本不是完整事件溯源或任意步骤重放引擎，durable 标签也不替代执行器和租约。流式工具提前执行不提供流中断恢复，缺少完整调用事件时保守回退。</p>
+				<div class="links" aria-label="详细设计与配套文档">
+					<a href="pie-cloud-service-upgrade-2026-10-24-25.md">完整 Markdown 说明</a>
+					<a href="../specs/session-activation.md">单会话装载 SPEC</a>
+					<a href="../specs/turn-recovery.md">Turn 恢复 SPEC</a>
+					<a href="../specs/history-storage.md">历史读取 SPEC</a>
+					<a href="../specs/durable-jobs.md">外部任务 SPEC</a>
+					<a href="../specs/streamed-tool-execution.md">流式工具 SPEC</a>
+					<a href="../specs/remote-loop-evolution.md">整体路线</a>
+					<a href="../runtime-embedding.md">宿主嵌入契约</a>
+				</div>
+				<div class="boundary"><h4>这次升级的一句话</h4><p>PIE 负责“如何正确执行、保存并重建”；agent-service 负责“谁有权执行、在哪里执行、如何跨实例送达”。本地和云端复用语义，而不是强行共用一个常驻对象模型。</p></div>
+			</section>
+		</main>
+	</div>
+	<footer class="wrap"><div class="footer-content"><div><strong>PIE / Cloud-ready runtime</strong><br>基于当前工作树与阶段 SPEC · 更新至 2026.10.26</div><div>含统一执行账本与流式工具改动 · Cloud 待接入<br>当前修改尚未提交或推送 · 原文件名保留 · 离线阅读版</div></div></footer>
+</body>
+</html>

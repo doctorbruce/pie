@@ -118,8 +118,12 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 		else res.write(`data: ${JSON.stringify(value)}\n\n`);
 	};
 	const unsubscribe = sessionId
-		? runtime.subscribe(sessionId, write, () => res.end())
+		? await runtime.subscribe(sessionId, write, () => res.end())
 		: runtime.subscribeAll(write, () => res.end());
+	if (res.destroyed) {
+		unsubscribe();
+		return;
+	}
 	let heartbeat: ReturnType<typeof setInterval> | undefined;
 	res.on("close", () => {
 		clearInterval(heartbeat);
@@ -191,14 +195,13 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				);
 			if (assistantMatch && req.method === "DELETE")
 				return json(200, await runtime.deleteAssistant(assistantMatch[1]));
-			if (path === "/sessions" && req.method === "GET")
-				return json(
-					200,
-					await runtime.listSessions({
-						assistantId: url.searchParams.get("assistantId") ?? undefined,
-						includeSubagents: url.searchParams.get("includeSubagents") === "true",
-					}),
-				);
+			if (path === "/sessions" && req.method === "GET") {
+				const { sessions } = await runtime.listSessions({
+					assistantId: url.searchParams.get("assistantId") ?? undefined,
+					includeSubagents: url.searchParams.get("includeSubagents") === "true",
+				});
+				return json(200, { sessions });
+			}
 			if (path === "/events" && req.method === "GET") return streamEvents(runtime, res);
 			if (path === "/mcp" && req.method === "GET") return json(200, factory.mcp.status());
 			if (path === "/host-runtimes" && req.method === "PUT") {
@@ -226,7 +229,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (path === "/sessions" && req.method === "POST")
 				return json(201, await runtime.createSession((await readJson(req)) as CreateSessionInput));
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|history|turns|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|history|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			if (!match) throw new RuntimeError(404, "会话或接口不存在");
@@ -266,6 +269,8 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (req.method === "PATCH" && !action) return json(200, await runtime.renameSession(id, await readJson(req)));
 			if (req.method === "POST" && action === "cancel")
 				return json(202, await runtime.cancelTurn(id, (await readJson(req)) as { turnId: string }));
+			if (req.method === "POST" && action === "resume")
+				return json(202, await runtime.resumeTurn(id, (await readJson(req)) as { turnId: string }));
 			if (req.method === "POST" && action === "steer")
 				return json(
 					202,

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
+import type { ContextCompaction, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
 import type { SavedSession, SessionMetadata } from "@pie/runtime/runtime-store";
 import { exportSession, transferToAgentMessages } from "@pie/runtime/session-transfer";
 import { type MessageTree, syncMessageTree } from "@pie/runtime/session-tree";
@@ -306,6 +306,223 @@ test("history cursors follow parent links rather than including alternate branch
 	} finally {
 		store.close();
 	}
+});
+
+test("turn recovery reads only the current Turn suffix", async (context) => {
+	const path = await directory(context);
+	const store = openStore({ PI_DATA_DIR: path });
+	try {
+		const saved = session(
+			"turn-suffix",
+			Array.from({ length: 40 }, (_, index) => user(`message-${index}`, index + 1)),
+		);
+		saved.tree = syncMessageTree(undefined, saved.messages);
+		store.saveSession(saved);
+		const inputEntryId = saved.tree.nodes[35].id;
+		const suffix = store.readTurnPath(saved.id, inputEntryId);
+		assert.deepEqual(
+			suffix.nodes.map((node) => node.id),
+			saved.tree.nodes.slice(35).map((node) => node.id),
+		);
+		assert.equal(suffix.nodes[0].parentId, null);
+		assert.deepEqual(store.readTurnPath(saved.id, "missing").nodes, []);
+	} finally {
+		store.close();
+	}
+});
+
+test("Turn path traversal stops at its input independently of the older history length", async (context) => {
+	const path = await directory(context);
+	const store = openStore({ PI_DATA_DIR: path });
+	const visited: number[] = [];
+	const prepare = DatabaseSync.prototype.prepare;
+	context.mock.method(DatabaseSync.prototype, "prepare", function (this: DatabaseSync, sql: string) {
+		const traced = sql.replace(
+			"SELECT entry.id, entry.parent_id, entry.seq FROM session_entries entry",
+			"SELECT entry.id, entry.parent_id, turn_path_visit(entry.seq) FROM session_entries entry",
+		);
+		if (traced !== sql)
+			this.function("turn_path_visit", (sequence) => {
+				visited.push(Number(sequence));
+				return sequence;
+			});
+		return prepare.call(this, traced);
+	});
+	try {
+		for (const prefixLength of [20, 2000]) {
+			const saved = session(
+				`turn-prefix-${prefixLength}`,
+				Array.from({ length: prefixLength + 5 }, (_, index) => user(`message-${index}`, index + 1)),
+			);
+			saved.tree = syncMessageTree(undefined, saved.messages);
+			store.saveSession(saved);
+			visited.length = 0;
+			const suffix = store.readTurnPath(saved.id, saved.tree.nodes[prefixLength].id);
+			assert.equal(suffix.nodes.length, 5);
+			assert.equal(visited.length, 4, `prefix length ${prefixLength}: visited ${visited.length} ancestors`);
+		}
+	} finally {
+		store.close();
+	}
+});
+
+test("history pagination stops after the requested page independently of older history", async (context) => {
+	const path = await directory(context);
+	const store = openStore({ PI_DATA_DIR: path });
+	const visited: number[] = [];
+	const prepare = DatabaseSync.prototype.prepare;
+	context.mock.method(DatabaseSync.prototype, "prepare", function (this: DatabaseSync, sql: string) {
+		const traced = sql.replace("CAST(entry.seq AS INTEGER)", "history_path_visit(entry.seq)");
+		if (traced !== sql)
+			this.function("history_path_visit", (sequence) => {
+				visited.push(Number(sequence));
+				return sequence;
+			});
+		return prepare.call(this, traced);
+	});
+	try {
+		for (const prefixLength of [20, 2000]) {
+			const saved = session(
+				`history-prefix-${prefixLength}`,
+				Array.from({ length: prefixLength + 10 }, (_, index) => user(`message-${index}`, index + 1)),
+			);
+			saved.tree = syncMessageTree(undefined, saved.messages);
+			store.saveSession(saved);
+			visited.length = 0;
+			const page = store.readHistory(saved.id, { limit: 5 });
+			assert.deepEqual(
+				page.entries.map((entry) => entry.seq),
+				saved.tree.nodes.slice(-5).map((entry) => entry.seq),
+			);
+			assert.equal(visited.length, 5, `prefix length ${prefixLength}: visited ${visited.length} ancestors`);
+		}
+	} finally {
+		store.close();
+	}
+});
+
+test("working path traversal stops at compaction boundaries independently of older history", async (context) => {
+	const path = await directory(context);
+	const store = openStore({ PI_DATA_DIR: path });
+	const visited: number[] = [];
+	const prepare = DatabaseSync.prototype.prepare;
+	context.mock.method(DatabaseSync.prototype, "prepare", function (this: DatabaseSync, sql: string) {
+		const traced = sql.replace("CAST(entry.seq AS INTEGER)", "working_path_visit(entry.seq)");
+		if (traced !== sql)
+			this.function("working_path_visit", (sequence) => {
+				visited.push(Number(sequence));
+				return sequence;
+			});
+		return prepare.call(this, traced);
+	});
+	try {
+		for (const prefixLength of [20, 2000]) {
+			const saved = session(
+				`working-prefix-${prefixLength}`,
+				Array.from({ length: prefixLength + 5 }, (_, index) => user(`message-${index}`, index + 1)),
+			);
+			saved.tree = syncMessageTree(undefined, saved.messages);
+			store.saveSession(saved);
+			const ids = store.readPathIds(saved.id);
+			const compaction: ContextCompaction = {
+				summary: "checkpoint",
+				firstKeptMessage: prefixLength + 1,
+				firstKeptEntryId: ids[prefixLength + 1],
+				turnStartEntryId: ids[prefixLength],
+				turnStartIndex: prefixLength,
+				workingMessageCount: 4,
+				messageCount: prefixLength + 5,
+				tokensBefore: 100,
+				estimatedTokensAfter: 10,
+				compactedAt: 10,
+				generation: 1,
+			};
+			visited.length = 0;
+			const tree = store.readWorkingPath(saved.id, compaction);
+			assert.deepEqual(
+				tree.nodes.map((entry) => entry.id),
+				ids.slice(prefixLength),
+			);
+			assert.equal(visited.length, 4, `prefix length ${prefixLength}: visited ${visited.length} ancestors`);
+		}
+	} finally {
+		store.close();
+	}
+});
+
+test("Turn path reads reject missing, other-session and alternate-branch inputs", async (context) => {
+	const path = await directory(context);
+	const store = openStore({ PI_DATA_DIR: path });
+	try {
+		const saved = session("turn-branches", [user("root"), user("old input", 2), user("old leaf", 3)]);
+		saved.tree = syncMessageTree(undefined, saved.messages);
+		store.saveSession(saved);
+		const oldInput = saved.tree.nodes[1].id;
+		const oldLeaf = saved.tree.leafId;
+		saved.messages = [saved.messages[0], user("new input", 4), user("new leaf", 5)];
+		saved.tree = syncMessageTree(saved.tree, saved.messages);
+		store.saveSession(saved);
+		const other = session("another-session", [user("other input")]);
+		other.tree = syncMessageTree(undefined, other.messages);
+		store.saveSession(other);
+		for (const inputEntryId of ["missing", oldInput, other.tree.leafId!]) {
+			const suffix = store.readTurnPath(saved.id, inputEntryId);
+			assert.deepEqual(suffix.nodes, []);
+			assert.equal(suffix.leafId, saved.tree.leafId);
+		}
+		assert.equal(store.readTurnPath(saved.id, oldInput, oldLeaf).nodes.length, 2);
+		assert.deepEqual(store.readTurnPath(saved.id, oldInput, null), { leafId: null, nodes: [] });
+		assert.throws(() => store.readTurnPath(saved.id, oldInput, "missing"), /叶子不存在/);
+	} finally {
+		store.close();
+	}
+});
+
+test("startup recovery skips old message bodies and preserves the persisted Turn parent", async (context) => {
+	const path = await directory(context);
+	const saved = session(
+		"cold-turn-prefix",
+		Array.from({ length: 1001 }, (_, index) => user(`message-${index}`, index + 1)),
+	);
+	saved.tree = syncMessageTree(undefined, saved.messages);
+	saved.runtime = { systemPrompt: "original", toolIds: [], skills: [], subagents: [] };
+	saved.turn = { id: "turn", status: "running" };
+	saved.turnCheckpoint = {
+		version: 1,
+		turnId: "turn",
+		inputEntryId: saved.tree.leafId!,
+		systemPrompt: "original",
+	};
+	let store = openStore({ PI_DATA_DIR: path });
+	store.saveSession(saved);
+	store.close();
+	database(path, (db) => {
+		db.prepare("UPDATE session_entries SET payload = 'invalid JSON' WHERE session_id = ? AND seq < ?").run(
+			saved.id,
+			1001,
+		);
+	});
+	store = openStore({ PI_DATA_DIR: path, PI_TURN_RECOVERY: "manual" });
+	try {
+		const metadata = store.readSession(saved.id);
+		assert.equal(metadata?.turn?.status, "interrupted");
+		assert.equal(metadata.revision, saved.revision + 1);
+		assert.deepEqual(metadata.turnCheckpoint, saved.turnCheckpoint);
+		const suffix = store.readTurnPath(saved.id, saved.turnCheckpoint.inputEntryId);
+		assert.equal(suffix.nodes.length, 1);
+		assert.equal(suffix.nodes[0].id, saved.tree.leafId);
+		assert.equal(suffix.nodes[0].parentId, null);
+		assert.throws(() => store.readPath(saved.id), SyntaxError);
+	} finally {
+		store.close();
+	}
+	database(path, (db) => {
+		const node = db
+			.prepare("SELECT parent_id, seq FROM session_entries WHERE session_id = ? AND id = ?")
+			.get(saved.id, saved.tree!.leafId)!;
+		assert.equal(node.parent_id, saved.tree!.nodes.at(-2)!.id);
+		assert.equal(node.seq, 1001);
+	});
 });
 
 test("export retains imported originals and continuation IDs after restart without storing a duplicate prefix", async (context) => {

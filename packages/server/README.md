@@ -45,6 +45,7 @@
 | `POST /sessions/:id/turns` | `{ text?, images?, assistantId?, systemPrompt?, displayText? }` | `202` + `{ sessionId, turnId }`；宿主会话在准入时读取已注册的最新 runtime，systemPrompt 是与助手提示词拼接的本轮附加系统规则 |
 | `POST /sessions/:id/steer` | `{ turnId, text?, images?, displayText? }` | `202`，将文字和图片一起追加到当前运行回合；turnId 必须匹配 |
 | `POST /sessions/:id/cancel` | `{ "turnId": "要取消的 turn" }` | `202`，请求取消；以最终 `turn.settled` 为准 |
+| `POST /sessions/:id/resume` | `{ "turnId": "原 turn ID" }` | `202` + 原 sessionId/turnId/requestId；只接受安全分类后的 interrupted Turn，其他状态或 ID 不匹配返回 409 |
 | `POST /sessions/:id/interactions/:interactionId` | `{ "approved": true/false }` | `202`，答复当前工具交互；以 SSE 的 `interaction.resolved` 为准 |
 | `DELETE /sessions/:id` | 无 | 删除空闲会话并关闭对应事件连接 |
 
@@ -166,6 +167,17 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 同会话只接受一个活动 turn；不同会话相互独立。取消必须匹配最近的 turnId，避免延迟请求误取消下一次执行。HTTP 连接关闭、前端刷新和 SSE 断线不会取消模型调用；需要显式发送 cancel。
 
+## 中断恢复
+
+默认维持重启后把未完成 Turn 修复为失败的行为。需要恢复原 Turn 时，在启动前显式设置 `PI_TURN_RECOVERY=manual`；尚未接入恢复 API 的 Astron 宿主不要启用。该开关不更换 SQLite，也不在启动时自动执行模型或工具。
+
+- 用户输入或完整工具结果已提交：标为 `interrupted`，通过 Web 的“继续本次执行”或 `POST /sessions/:id/resume` 继续，沿用原 Turn ID、用户输入、模型和提示词。
+- 最终 Assistant 已提交但终态未提交：只补齐结算，不重新请求模型。取消意图已提交的 Turn 不再续跑。
+- 工具结果缺失、旧记录缺少执行 checkpoint、Subagent、后台任务和未持久化队列：继续失败修复；未匹配调用补入明确的未知结果，绝不自动重放。
+- `interrupted` 不是已完成；恢复或取消前，提交下一 Turn、导入及切换分支返回 409。取消该 Turn 直接持久化为 cancelled。
+
+仅在受理和提交消息边界恢复，未提交 token 不能续接；不保证外部副作用恰好一次。详细边界见 [Turn 恢复 SPEC](../../docs/specs/turn-recovery.md)。
+
 ## SSE
 
 会话树沿用上游 `a4d040d30f2cb30fffbd841b3f0a7052158e2e21` 的无分支摘要导航语义。新消息追加到当前叶节点，旧分支保留在 SQLite，重启可继续切换。运行中、子会话和未闭合工具调用处不能切换；切换后仅当前路径进入模型上下文，旧压缩摘要不会跨分支复用。Web 会话详情中的「会话树」及 `/tree` 打开同一选择器。尚未接入上游的分支摘要生成、树标签和搜索过滤。
@@ -201,7 +213,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - 自动压缩在 checkpoint 与原文事务提交后替换 Agent、执行 loop 和 Session 的工作历史，保留摘要、必要的当前输入和近期消息，解除冷正文引用；完整原文仍在 SQLite，摘要不成为原始消息节点。请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片保留。摘要失败、取消、提交失败或压缩后仍超预算时不裁剪工作历史，明确结束本轮。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)，正文回收见 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
 - 会话元信息保存在 `sessions`，消息以 `session_entries` 树节点唯一持久化；新增节点和叶子状态在同一事务中写入，不再整段保存 `messages`。旧 payload 在首次启动时逐会话事务迁移，保留节点 ID、分支和导入原文。启动及列表只读元信息，执行时按 checkpoint 节点边界读取工作窗口；内存树只留叶子，消息身份通过弱引用索引关联存储。完整快照、导出、fork 和树导航临时从数据库读取原文，不回填已裁剪的工作窗口。存储层提供按父指针读取的 seq 游标分页，HTTP/SSE 仍返回完整快照，读取和发送成本尚未有界；闲置 Agent 卸载和前端分页留待后续。页面保存 session ID 于 sessionStorage；独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。实现与验证见 [历史存储 SPEC](../../docs/specs/history-storage.md) 和 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
 - 模型配置为进程共享，Agent 保留创建时解析的模型调用配置。Assistant/runtime 版本变化或服务重启会重建 Agent，并用会话保存的 provider/model 选择重新解析当前端点和凭据；模型不可用时历史仍可读，提交报错。目录和 health 表示本地配置状态，不代表远端凭据有效；创建会话和保存配置均不调用模型。
-- 输入在返回 `202` 前落盘；完整消息在 message_end 落盘，流式片段不逐 token 保存。崩溃遗留的 running 标记为 failed，未匹配工具调用补入结果未知的错误，不自动重放；不保证工具副作用恰好一次。
+- 输入和执行 checkpoint 在返回 `202` 前原子落盘；完整消息在 message_end 落盘，流式片段不逐 token 保存。默认崩溃遗留的 running 标记为 failed，显式恢复模式按上述安全边界分类；未匹配工具调用补入结果未知的错误，不自动重放，不保证工具副作用恰好一次。
 
 验证：根目录 `npm run test:server`，包含假模型测试和本地 OpenAI 兼容模拟端点上的真实 SDK + 工具循环、配置重载/重启/校验/密钥不回显测试，不调用付费服务。
 

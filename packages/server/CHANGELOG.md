@@ -8,6 +8,8 @@
 
 ### Added
 
+- Recover safe interrupted Turns through SQLite startup classification, `POST /sessions/:id/resume` and Web resume/cancel controls; keep the original Turn identity and configuration, and settle already committed final answers without another model call.
+
 - Add an embeddable runtime with asynchronous session storage and host-provided model, tool, skill, MCP and request-recording capabilities; reuse it in the local HTTP service.
 - Record complete provider request payloads for each session, including context compaction calls, without changing the prompt or recording authentication headers.
 
@@ -21,6 +23,8 @@
 
 ### Changed
 
+- Query session metadata on demand and index pending SQLite recovery instead of retaining a startup snapshot; keep the local HTTP session list complete through paged store reads.
+
 - Split shared runtime contracts and orchestration into `@pie/runtime`, and SQLite, local tools and configuration into `@pie/local`; keep `@pie/server` as the local HTTP/SSE and CLI/Sidecar host. Embedded callers must use `@pie/runtime` and explicitly supply agent capabilities.
 - Replace runtime history with the compacted working window only after its checkpoint and original messages commit; read full snapshots, exports and fork boundaries from storage.
 
@@ -29,6 +33,8 @@
 
 ### Fixed
 
+- Bound SQLite history pagination and compaction working-path traversal to the requested page or checkpoint boundaries instead of walking the full parent chain.
+- Stop SQLite recovery path traversal at the Turn input and reject missing or off-branch checkpoints without blocking startup or replaying tools.
 - Expose webfetch HTTP status, final URL, body size and empty-content boundaries without guessing application success from response text.
 - Report shell exit status consistently in foreground results, background notifications and job output without treating ordinary nonzero exits as tool execution errors.
 - Read the same public Bilibili video's official mobile page after HTTP 412, with a separate permission check and explicit source attribution.

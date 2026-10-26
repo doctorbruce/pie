@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRuntime, type PieRuntime, RuntimeError } from "@pie/runtime";
-import type { Assistant } from "@pie/runtime/protocol";
+import type { Assistant, SessionSummary } from "@pie/runtime/protocol";
+import type { SessionCursor } from "@pie/runtime/runtime-store";
 import { parseToolIds } from "@pie/runtime/tools";
 import { createAgentFactory } from "./agent.ts";
 import { createModelSettings } from "./models/settings.ts";
@@ -165,8 +166,19 @@ async function createLocalRuntime(options: {
 
 		listSessionMetadata: (...args: Parameters<PieRuntime["listSessionMetadata"]>) =>
 			execute(() => runtime.listSessionMetadata(...args), false),
-		listSessions: (...args: Parameters<PieRuntime["listSessions"]>) =>
-			execute(() => runtime.listSessions(...args), false),
+		listSessions(filter: Parameters<PieRuntime["listSessions"]>[0] = {}) {
+			return execute(async () => {
+				if (filter.limit !== undefined || filter.cursor !== undefined) return runtime.listSessions(filter);
+				const sessions: SessionSummary[] = [];
+				let cursor: SessionCursor | undefined;
+				do {
+					const page = await runtime.listSessions({ ...filter, limit: 200, cursor });
+					sessions.push(...page.sessions);
+					cursor = page.nextCursor ?? undefined;
+				} while (cursor);
+				return { sessions, nextCursor: null };
+			}, false);
+		},
 		registerHostRuntimes: (...args: Parameters<PieRuntime["registerHostRuntimes"]>) =>
 			execute(() => runtime.registerHostRuntimes(...args), true),
 		createSession: (...args: Parameters<PieRuntime["createSession"]>) =>
@@ -179,6 +191,8 @@ async function createLocalRuntime(options: {
 		getTree: (...args: Parameters<PieRuntime["getTree"]>) => execute(() => runtime.getTree(...args), false),
 		readHistory: (...args: Parameters<PieRuntime["readHistory"]>) =>
 			execute(() => runtime.readHistory(...args), false),
+		readToolExecutions: (...args: Parameters<PieRuntime["readToolExecutions"]>) =>
+			execute(() => runtime.readToolExecutions(...args), false),
 		selectTree: (...args: Parameters<PieRuntime["selectTree"]>) => execute(() => runtime.selectTree(...args), true),
 		importSession: (...args: Parameters<PieRuntime["importSession"]>) =>
 			execute(() => runtime.importSession(...args), true),
@@ -191,6 +205,7 @@ async function createLocalRuntime(options: {
 		replyInteraction: (...args: Parameters<PieRuntime["replyInteraction"]>) =>
 			execute(() => runtime.replyInteraction(...args), true),
 		submitTurn: (...args: Parameters<PieRuntime["submitTurn"]>) => execute(() => runtime.submitTurn(...args), true),
+		resumeTurn: (...args: Parameters<PieRuntime["resumeTurn"]>) => execute(() => runtime.resumeTurn(...args), true),
 		deleteSession: (...args: Parameters<PieRuntime["deleteSession"]>) =>
 			execute(() => runtime.deleteSession(...args), true),
 		subscribe: runtime.subscribe,

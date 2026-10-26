@@ -1,7 +1,8 @@
-import type { AgentTool } from "@earendil-works/pi-agent-core";
+import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Type } from "@earendil-works/pi-ai";
 import type { BackgroundJobs } from "./jobs.ts";
 import type { InteractionRequest, PermissionPolicy } from "./protocol.ts";
+import type { ToolExecutionMode } from "./tool-execution.ts";
 
 export class ToolConfigError extends Error {}
 
@@ -12,7 +13,10 @@ export type ToolContext = {
 	readonly Type: typeof Type;
 	readonly ask: (request: Omit<InteractionRequest, "id">, signal?: AbortSignal) => Promise<void>;
 };
-export type ExternalTool = AgentTool & { exposure?: "default" | "deferred" };
+export type ExternalTool = AgentTool & {
+	exposure?: "default" | "deferred";
+	toolExecutionMode?: ToolExecutionMode;
+};
 export type ToolFactory = (context: ToolContext) => ExternalTool;
 
 export function parseToolIds(value: unknown, available: readonly string[]): string[] {
@@ -34,6 +38,7 @@ export type ToolRuntime = {
 	ask: ToolAsk;
 	jobs: BackgroundJobs;
 	notifyBackground?: (message: string) => Promise<void>;
+	runJob?: (toolCallId: string, signal?: AbortSignal) => Promise<AgentToolResult<unknown>>;
 };
 
 export function applyPermissionPolicy(policy: PermissionPolicy | undefined, ask: ToolAsk): ToolAsk {

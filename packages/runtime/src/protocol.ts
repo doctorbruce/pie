@@ -178,7 +178,7 @@ export type ModelCatalog = {
 export type Turn = {
 	id: string;
 	requestId?: string;
-	status: "running" | "completed" | "cancelled" | "failed";
+	status: "running" | "interrupted" | "completed" | "cancelled" | "failed";
 	error?: string;
 };
 export type ContextCompaction = {

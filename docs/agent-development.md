@@ -35,7 +35,7 @@ packages/ai：模型目录、协议适配、流式响应和凭据解析
 | Assistant | `id/name/systemPrompt/toolIds/pluginIds/subagentIds/createdAt/updatedAt`；不保存消息或 API key | 本地持久化，可被多个会话引用 |
 | Session | `kind/assistantId/assistantRevision/runtimeSource/title/mode/provider/model`、父会话/工具调用引用、已应用运行配置、完整消息、技能记录、最近一次 Turn | 根会话从创建到显式删除；子会话随父会话删除 |
 | Agent 实例 | 配置后的模型、提示词、工具、消息、取消信号、运行状态 | 创建会话时构造；配置版本变化或重启后按需重建 |
-| Turn | 用户一次提交：`running/completed/cancelled/failed` | 一次提交可触发多轮模型响应和工具调用 |
+| Turn | 用户一次提交：`running/interrupted/completed/cancelled/failed` | 一次提交可触发多轮模型响应和工具调用；interrupted 等待显式恢复或取消 |
 | loop | 模型响应 → 执行工具 → 把结果交给模型，直到结束 | 每次执行时运行，完成后释放运行状态 |
 
 例如，写作助手下的“周报”和“方案”两个会话使用同一份助手定义，各自有独立的消息历史和 Agent 实例。同一会话同时只能执行一个 Turn，重复提交返回 `409`；不同会话在同一 Node 进程中异步并发，不是一会话一进程或一线程。
@@ -190,11 +190,15 @@ Astron 当前 Assistant 配置
 
 SQLite 使用 Node 内置 `node:sqlite`，不增加依赖。当前 Node 会输出此内置模块的实验性提示。数据库采用独占连接锁，同目录第二个服务启动失败；锁由进程退出释放。工具和提供商对象不会序列化进数据库。旧助手及会话记录缺少 pluginIds 时按空列表读取；除此之外没有通用跨版本迁移框架，不支持手工改库。
 
+Runtime 启动不再装载全部会话元信息：指定会话通过 `RuntimeStore.readSession` 查询，列表通过 `listSessions` 游标分页且不激活 Agent。SQLite 首次升级增加 `needs_recovery` 标记及索引，后续启动只读取待迁移或待恢复记录；本地 HTTP 完整列表由 Local 分页汇总，助手和插件引用检查仍是显式管理扫描。普通历史分页和压缩工作窗口也在 SQLite 查询中按页大小或 checkpoint 边界停止，不因旧正文长度扩大；完整树、导出和显式全量快照仍是有意的完整读取。默认 `retain` 继续复用已访问会话；`release-after-turn` 还会移除没有执行、订阅或后台引用的空闲 Session。会话订阅入口改为异步，HTTP / SSE 对外接入方式不变。实现与验收见 [单会话按需装载](specs/session-activation.md) 和 [历史存储](specs/history-storage.md)。
+
 持久化时机是创建/修改/删除、接受用户消息、每个 `message_end` 和整次执行结算。消息保存原版 Pi 数据，包括思考、工具调用/结果和模型元数据，以供恢复上下文；流式 token 的中间片段只在内存中。SQLite 的单条写入是原子的，API 写入成功才返回成功。
 
 技能记录另外在受理和完成时持久化：先保存 running 记录，再读取 Skill；结束后保存状态、时间和结果摘要。`activity.updated` 通过 SSE 推送同一记录 ID 的更新，快照中的 `activities` 提供完整历史；工具结果 `details.activity` 保留同一来源，不从模型返回文本解析归属。Skill 正文的 `contentHash` 是本次加载文本的 SHA-256；超过 64 KiB 拒绝加载。配置与来源快照不冻结文件内容，Skill 文件仍可被外部修改。
 
-服务崩溃后，重启将遗留 `running` 标记为 `failed`。对于已经保存调用、但没有保存结果的工具，补入“执行结果未知”的错误结果；不会重放工具，也不会自动再次调用模型。工具可能已经产生副作用，用户需要核对后显式继续。已经落盘的完整消息保留，未完成的流式片段可能丢失。
+服务崩溃后，默认仍将遗留 `running` 修复为 `failed`。显式设置 `PI_TURN_RECOVERY=manual` 后，SQLite 使用共享判定：输入或完整工具结果已提交且有有效执行 checkpoint 时标为 `interrupted`，经 `resumeTurn` / HTTP 恢复原 Turn；已提交最终 Assistant 时仅补齐终态。恢复优先通过 `RuntimeStore.readTurnPath` 读取当前 Turn 后缀，只有无效 checkpoint 或生成未知工具结果时才回读完整路径。原输入、Turn/request ID、已应用配置和本轮实际 prompt 保留，不应用下一轮助手更新；取消意图也在返回前持久化。当前 Astron 宿主尚未接入恢复入口，因此不改变本地默认策略。
+
+对于已经保存调用、但没有保存结果且未关联外部任务的工具，仍补入“执行结果未知”的错误结果；不会重放工具，也不会自动再次调用模型。宿主显式注入 `DurableJobExecutor` 后，工具可通过 `context.runJob` 保存任务关联，新实例查询原任务的持久状态与结果，再继续原 Turn；不恢复异步函数的代码现场。原内存 Job、Subagent 和尚未持久化的 Steer/follow-up 队列仍不支持接管。完整消息保留，未提交流式片段可能丢失，详见 [Turn 恢复 SPEC](specs/turn-recovery.md) 与 [外部任务 SPEC](specs/durable-jobs.md)。
 
 未完成的技能记录转为 `unknown` 并保留当时的来源绑定。如果加载结束记录已落盘、原工具输出尚未落盘，保留已知的技能记录，并提示原工具输出未保存。进程崩溃后不保证其子进程已经停止，也不把未收到结果当作执行失败的证据。
 

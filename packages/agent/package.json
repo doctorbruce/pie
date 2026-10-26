@@ -20,7 +20,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"build": "tsc -p tsconfig.build.json",
-		"test": "vitest --run test/agent.test.ts test/agent-loop.test.ts"
+		"test": "vitest --run test/agent.test.ts test/agent-loop.test.ts test/streamed-tool-execution.test.ts"
 	},
 	"dependencies": {
 		"@earendil-works/pi-ai": "0.85.1",

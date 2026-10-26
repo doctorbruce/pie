@@ -15,6 +15,7 @@ import {
 	type SavedSession,
 	type SessionEvent,
 	type SessionMetadata,
+	type ToolExecutionRecord,
 } from "@pie/runtime";
 import { applySessionEvent } from "@pie/runtime/session-events";
 import { type MessageTree, treePath } from "@pie/runtime/session-tree";
@@ -23,9 +24,12 @@ import type { ExternalTool } from "@pie/runtime/tools";
 function memoryStore() {
 	const sessions = new Map<string, SessionMetadata>();
 	const trees = new Map<string, MessageTree>();
+	const journal = new Map<string, (ToolExecutionRecord & { seq: number })[]>();
 	let failWrites = false;
 	let closes = 0;
 	const workingReads: string[] = [];
+	const metadataReads: string[] = [];
+	let listReads = 0;
 	let onSave: (session: SavedSession) => void = () => {};
 	const path = (id: string, leafId = trees.get(id)?.leafId) => {
 		const tree = trees.get(id);
@@ -34,11 +38,36 @@ function memoryStore() {
 	};
 	const store: RuntimeStore = {
 		persistence: "test-memory",
-		async loadSessions() {
+		async readSession(id) {
+			metadataReads.push(id);
 			await delay(2);
-			return structuredClone([...sessions.values()]);
+			return structuredClone(sessions.get(id));
 		},
-		async saveSession(session: SavedSession, replaceHistory = false) {
+		async listSessions({ limit, cursor, assistantId, kind, parentSessionId }) {
+			listReads++;
+			await delay(2);
+			const matches = [...sessions.values()]
+				.filter(
+					(session) =>
+						(assistantId === undefined || session.assistantId === assistantId) &&
+						(kind === undefined || session.kind === kind) &&
+						(parentSessionId === undefined || session.parentSessionId === parentSessionId) &&
+						(!cursor ||
+							session.updatedAt < cursor.updatedAt ||
+							(session.updatedAt === cursor.updatedAt && session.id < cursor.id)),
+				)
+				.sort(
+					(left, right) =>
+						right.updatedAt - left.updatedAt || (left.id < right.id ? 1 : left.id > right.id ? -1 : 0),
+				);
+			const page = matches.slice(0, limit);
+			const last = page.at(-1);
+			return structuredClone({
+				sessions: page,
+				nextCursor: matches.length > limit && last ? { updatedAt: last.updatedAt, id: last.id } : null,
+			});
+		},
+		async saveSession(session: SavedSession, replaceHistory = false, records: readonly ToolExecutionRecord[] = []) {
 			onSave(session);
 			await delay(5);
 			if (failWrites) throw new Error("storage write rejected");
@@ -50,11 +79,29 @@ function memoryStore() {
 			const metadata = structuredClone({ ...fields, leafId: tree.leafId });
 			trees.set(session.id, { nodes, leafId: tree.leafId });
 			sessions.set(session.id, metadata);
+			const entries = journal.get(session.id) ?? [];
+			for (const record of records)
+				if (!entries.some((entry) => entry.id === record.id))
+					entries.push(structuredClone({ ...record, seq: entries.length + 1 }));
+			journal.set(session.id, entries);
 			return metadata;
+		},
+		async readToolExecutions(id, { turnId, limit, afterSeq = 0 }) {
+			const rows = (journal.get(id) ?? []).filter((entry) => entry.turnId === turnId && entry.seq > afterSeq);
+			const entries = structuredClone(rows.slice(0, limit));
+			return { entries, nextAfterSeq: rows.length > limit ? entries.at(-1)!.seq : null };
 		},
 		async readPath(id, leafId) {
 			await delay(2);
 			return path(id, leafId);
+		},
+		async readTurnPath(id, inputEntryId, leafId) {
+			await delay(2);
+			const tree = path(id, leafId);
+			const start = tree.nodes.findIndex((node) => node.id === inputEntryId);
+			const nodes = start < 0 ? [] : tree.nodes.slice(start);
+			if (nodes.length > 0) nodes[0] = { ...nodes[0], parentId: null };
+			return { leafId: tree.leafId, nodes };
 		},
 		async readPathIds(id, leafId) {
 			await delay(2);
@@ -78,6 +125,7 @@ function memoryStore() {
 			await delay(2);
 			sessions.delete(id);
 			trees.delete(id);
+			journal.delete(id);
 		},
 		async close() {
 			closes++;
@@ -88,6 +136,10 @@ function memoryStore() {
 		sessions,
 		trees,
 		workingReads,
+		metadataReads,
+		get listReads() {
+			return listReads;
+		},
 		get closes() {
 			return closes;
 		},
@@ -157,16 +209,19 @@ function trackedAgents(onCall: (value: string) => void | Promise<void> = () => {
 	const created: WeakRef<ReturnType<typeof factory.create>>[] = [];
 	const current = new Map<string, WeakRef<ReturnType<typeof factory.create>>>();
 	const messages: WeakRef<AgentMessage>[] = [];
+	const configurations: WeakRef<Parameters<typeof factory.create>[2]>[] = [];
 	const native = new Map<string, NonNullable<Parameters<typeof factory.create>[9]>>();
 	return {
 		created,
 		current,
 		messages,
+		configurations,
 		native,
 		factory: {
 			...factory,
 			create(...args: Parameters<typeof factory.create>) {
 				const agent = factory.create(...args);
+				configurations.push(new WeakRef(args[2]));
 				created.push(new WeakRef(agent));
 				current.set(args[1], created[created.length - 1]);
 				if (args[9]) native.set(args[1], args[9]);
@@ -194,6 +249,160 @@ const definition: HostRuntimeDefinition = {
 	assistantRevision: "1",
 	runtime: { systemPrompt: "Use the SDK tool.", toolIds: ["sdk_echo"], skills: [], subagents: [] },
 };
+
+function seedSession(memory: ReturnType<typeof memoryStore>, id: string, overrides: Partial<SessionMetadata> = {}) {
+	const metadata: SessionMetadata = {
+		id,
+		kind: "root",
+		assistantId: definition.assistantId,
+		assistantRevision: "1",
+		runtimeSource: "host",
+		title: id,
+		mode: "faux",
+		model: "faux",
+		createdAt: 1,
+		updatedAt: 1,
+		revision: 0,
+		leafId: null,
+		runtime: { ...structuredClone(definition.runtime), subagents: [] },
+		...overrides,
+	};
+	memory.sessions.set(id, metadata);
+	memory.trees.set(id, { leafId: null, nodes: [] });
+	return metadata;
+}
+
+test("startup reads no session metadata and concurrent access activates only its target", async (context) => {
+	const memory = memoryStore();
+	for (let index = 0; index < 600; index++) seedSession(memory, `cold-${index.toString().padStart(4, "0")}`);
+	const observed = trackedAgents();
+	const runtime = await createRuntime({ store: memory.store, agents: observed.factory });
+	context.after(() => runtime.close());
+	assert.equal(memory.listReads, 0);
+	assert.deepEqual(memory.metadataReads, []);
+	assert.equal(observed.created.length, 0);
+	await Promise.all(Array.from({ length: 8 }, () => runtime.getSession("cold-0300", { limit: 1 })));
+	assert.deepEqual(memory.metadataReads, ["cold-0300"]);
+	assert.deepEqual(memory.workingReads, []);
+	assert.equal(observed.created.length, 0);
+	await assert.rejects(runtime.getSession("absent"), { status: 404 });
+	seedSession(memory, "absent");
+	assert.equal((await runtime.getSession("absent")).id, "absent");
+	assert.equal(memory.metadataReads.filter((id) => id === "absent").length, 2);
+});
+
+test("session lists page durable metadata without activating sessions and break timestamp ties by ID", async (context) => {
+	const memory = memoryStore();
+	for (let index = 0; index < 260; index++)
+		seedSession(memory, `page-${index.toString().padStart(4, "0")}`, {
+			assistantId: index % 2 ? "other" : definition.assistantId,
+			...(index % 3 ? {} : { kind: "subagent", parentSessionId: "parent" }),
+		});
+	const observed = trackedAgents();
+	const runtime = await createRuntime({ store: memory.store, agents: observed.factory });
+	context.after(() => runtime.close());
+	const ids: string[] = [];
+	let page = await runtime.listSessions({ includeSubagents: true });
+	assert.equal(page.sessions.length, 50);
+	while (true) {
+		ids.push(...page.sessions.map((session) => session.id));
+		if (!page.nextCursor) break;
+		page = await runtime.listSessions({ includeSubagents: true, cursor: page.nextCursor });
+	}
+	assert.deepEqual(ids, [...memory.sessions.keys()].sort().reverse());
+	const roots = await runtime.listSessions({ assistantId: definition.assistantId, limit: 200 });
+	assert(roots.sessions.every((session) => session.kind === "root" && session.assistantId === definition.assistantId));
+	assert.equal(roots.nextCursor, null);
+	assert.equal((await runtime.listSessionMetadata()).length, 260);
+	assert.deepEqual(memory.metadataReads, []);
+	assert.equal(observed.created.length, 0);
+	for (const limit of [0, 201, NaN, 1.5]) await assert.rejects(runtime.listSessions({ limit }), { status: 400 });
+	await assert.rejects(runtime.listSessions({ cursor: { updatedAt: -1, id: "id" } }), { status: 400 });
+	await runtime.getSession(ids[0]);
+	assert.deepEqual(memory.metadataReads, [ids[0]]);
+});
+
+for (const sessionRetention of ["retain", "release-after-turn"] as const) {
+	test(`metadata is retained only while needed with ${sessionRetention}`, async (context) => {
+		const memory = memoryStore();
+		seedSession(memory, "target");
+		const runtime = await createRuntime({ store: memory.store, agents: agents("unused"), sessionRetention });
+		context.after(() => runtime.close());
+		await runtime.getSession("target", { limit: 1 });
+		await runtime.getSession("target", { limit: 1 });
+		const releasing = sessionRetention === "release-after-turn";
+		assert.equal(memory.metadataReads.length, releasing ? 2 : 1);
+		const beforeBurst = memory.metadataReads.length;
+		await Promise.all(Array.from({ length: 8 }, () => runtime.getSession("target", { limit: 1 })));
+		assert.equal(memory.metadataReads.length, beforeBurst + Number(releasing));
+		const unsubscribe = await runtime.subscribe("target", () => {});
+		const before = memory.metadataReads.length;
+		await runtime.getSession("target", { limit: 1 });
+		await runtime.getSession("target", { limit: 1 });
+		assert.equal(memory.metadataReads.length, before);
+		unsubscribe();
+		await runtime.getSession("target", { limit: 1 });
+		assert.equal(memory.metadataReads.length, before + Number(releasing));
+	});
+}
+
+test("parent deletion discovers every unloaded child across pages and preserves independent forks", async (context) => {
+	const memory = memoryStore();
+	seedSession(memory, "parent");
+	seedSession(memory, "fork", { forkedFromSessionId: "parent" });
+	for (let index = 0; index < 240; index++)
+		seedSession(memory, `child-${index}`, { kind: "subagent", parentSessionId: "parent" });
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused"),
+		sessionRetention: "release-after-turn",
+	});
+	context.after(() => runtime.close());
+	assert.deepEqual(await runtime.deleteSession("parent"), { deleted: true });
+	assert.deepEqual([...memory.sessions.keys()], ["fork"]);
+	assert.deepEqual(memory.metadataReads, ["parent"]);
+	assert.equal(memory.listReads, 2);
+	await assert.rejects(runtime.getSession("child-0"), { status: 404 });
+	assert.equal((await runtime.getSession("fork")).forkedFromSessionId, "parent");
+});
+
+test("close waits for a cold waitForTurn snapshot before closing storage", async (context) => {
+	const memory = memoryStore();
+	seedSession(memory, "cold");
+	let entered = () => {};
+	let resume = () => {};
+	const reading = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const gate = new Promise<void>((resolve) => {
+		resume = resolve;
+	});
+	const readPath = memory.store.readPath;
+	memory.store.readPath = async (...args) => {
+		entered();
+		await gate;
+		assert.equal(memory.closes, 0);
+		return readPath(...args);
+	};
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused"),
+		sessionRetention: "release-after-turn",
+	});
+	context.after(async () => {
+		resume();
+		await runtime.close();
+	});
+	const pending = runtime.waitForTurn("cold");
+	await reading;
+	const closing = runtime.close();
+	await delay(10);
+	assert.equal(memory.closes, 0);
+	resume();
+	assert.equal((await pending).id, "cold");
+	await closing;
+	assert.equal(memory.closes, 1);
+});
 
 const delegatingDefinitions: HostRuntimeDefinition[] = [
 	{
@@ -241,8 +450,8 @@ test("embedded runtime uses injected async storage and tools without creating a 
 			overridden = runtime.setModelOverride(session.id, { modelOverride: null });
 	});
 	const packets: SessionEvent[] = [];
-	const unsubscribe = runtime.subscribe(session.id, (packet) => packets.push(packet));
-	runtime.subscribe(
+	const unsubscribe = await runtime.subscribe(session.id, (packet) => packets.push(packet));
+	await runtime.subscribe(
 		session.id,
 		() => {
 			throw new Error("host delivery failed");
@@ -260,6 +469,30 @@ test("embedded runtime uses injected async storage and tools without creating a 
 	assert.deepEqual(calls, ["ok"]);
 	assert.equal(settled.messages.length, 4);
 	assert.equal(memory.trees.get(session.id)?.nodes.length, 4);
+	const journal = await runtime.readToolExecutions(session.id, { turnId: settled.turn!.id, limit: 200 });
+	assert.deepEqual(
+		journal.entries.map((entry) => entry.phase),
+		["started", "completed"],
+	);
+	assert(journal.entries.every((entry) => entry.mode === "inline"));
+	assert.equal(new Set(journal.entries.map((entry) => entry.executionId)).size, 1);
+	assert.equal("toolExecutions" in settled, false);
+	const page = await runtime.readToolExecutions(session.id, { turnId: settled.turn!.id, limit: 1 });
+	assert.equal(page.entries[0].phase, "started");
+	assert.equal(
+		(
+			await runtime.readToolExecutions(session.id, {
+				turnId: settled.turn!.id,
+				limit: 1,
+				afterSeq: page.nextAfterSeq!,
+			})
+		).entries[0].phase,
+		"completed",
+	);
+	for (const limit of [0, 201, NaN])
+		await assert.rejects(runtime.readToolExecutions(session.id, { turnId: settled.turn!.id, limit }), {
+			status: 400,
+		});
 	assert(packets.some((packet) => packet.event?.type === "tool_execution_update"));
 	assert.equal(packets.at(-1)?.type, "turn.settled");
 	const detached = await runtime.getSession(session.id);
@@ -273,6 +506,37 @@ test("embedded runtime uses injected async storage and tools without creating a 
 	assert.deepEqual((await runtime.getSession(session.id)).messages, settled.messages);
 	assert.equal(existsSync(dataDirectory), false);
 });
+
+for (const phase of ["started", "completed"] as const) {
+	test(`a rejected ${phase} journal boundary cannot execute early or leak a later result-only commit`, async (context) => {
+		const memory = memoryStore();
+		const calls: string[] = [];
+		const save = memory.store.saveSession;
+		memory.store.saveSession = async (...args) => {
+			if (args[2]?.some((entry) => entry.phase === phase)) throw new Error("journal write rejected");
+			return save(...args);
+		};
+		const runtime = await createRuntime({
+			store: memory.store,
+			agents: agents("unused", (value) => {
+				calls.push(value);
+			}),
+			hostRuntimes: [definition],
+		});
+		context.after(() => runtime.close());
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		const accepted = await runtime.submitTurn(session.id, { text: '调用工具 sdk_echo {"text":"effect"}' });
+		await runtime.waitForTurn(session.id);
+		assert.equal(calls.length, phase === "started" ? 0 : 1);
+		const journal = await runtime.readToolExecutions(session.id, { turnId: accepted.turnId, limit: 200 });
+		assert.deepEqual(
+			journal.entries.map((entry) => entry.phase),
+			phase === "started" ? [] : ["started"],
+		);
+		assert.equal(memory.trees.get(session.id)?.nodes.filter((node) => node.message.role === "toolResult").length, 0);
+		await assert.rejects(runtime.submitTurn(session.id, { text: "next" }), { status: 503 });
+	});
+}
 
 test("async admission rejects simultaneous turns and storage failures never launch the model or tool", async (context) => {
 	const memory = memoryStore();
@@ -318,7 +582,7 @@ test("host subscriptions can approve and cancel SDK tools without an HTTP transp
 	const session = await runtime.createSession({ assistantId: definition.assistantId });
 	let approved: Promise<unknown> | undefined;
 	const revisions: number[] = [];
-	runtime.subscribe(session.id, (packet) => {
+	await runtime.subscribe(session.id, (packet) => {
 		revisions.push(packet.revision);
 		if (packet.type === "interaction.requested" && packet.interaction)
 			approved = runtime.replyInteraction(session.id, packet.interaction.id, { approved: true });
@@ -334,7 +598,7 @@ test("host subscriptions can approve and cancel SDK tools without an HTTP transp
 	await assert.rejects(runtime.cancelTurn(session.id, { turnId: "stale" }), /turnId 不匹配/);
 });
 
-test("startup refuses unrecovered turns and releases injected resources without replaying tools", async () => {
+test("activation refuses an unrecovered Turn without blocking other sessions or replaying tools", async () => {
 	const memory = memoryStore();
 	const runtime = await createRuntime({ store: memory.store, agents: agents("unused") });
 	await runtime.registerHostRuntimes([definition]);
@@ -342,15 +606,16 @@ test("startup refuses unrecovered turns and releases injected resources without 
 	await runtime.close();
 	memory.sessions.get(session.id)!.turn = { id: "interrupted", status: "running" };
 	const calls: string[] = [];
-	await assert.rejects(
-		createRuntime({
-			store: memory.store,
-			agents: agents("unused", (value) => {
-				calls.push(value);
-			}),
+	const restored = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", (value) => {
+			calls.push(value);
 		}),
-		/启动恢复/,
-	);
+	});
+	await assert.rejects(restored.getSession(session.id), /启动恢复/);
+	await restored.registerHostRuntimes([definition]);
+	assert((await restored.createSession({ assistantId: definition.assistantId })).id);
+	await restored.close();
 	assert.deepEqual(calls, []);
 	assert.equal(memory.closes, 2);
 });
@@ -383,7 +648,10 @@ for (const sessionRetention of [undefined, "retain", "release-after-turn"] as co
 		const releasing = sessionRetention === "release-after-turn";
 		assert.equal(observed.created.length, releasing ? 3 : 1);
 		assert.equal(memory.workingReads.length, releasing ? 2 : 0);
-		if (global.gc && releasing) await assertCollected([...observed.created, ...observed.messages]);
+		if (global.gc && releasing) {
+			observed.native.clear();
+			await assertCollected([...observed.created, ...observed.messages, ...observed.configurations]);
+		}
 		if (global.gc && !releasing) {
 			await delay(0);
 			global.gc();
@@ -407,7 +675,7 @@ test("release waits for confirmation and cancellation settlement, then the next 
 	const confirmation = new Promise<void>((resolve) => {
 		waiting = resolve;
 	});
-	runtime.subscribe(session.id, (packet) => {
+	await runtime.subscribe(session.id, (packet) => {
 		if (packet.type === "interaction.requested") waiting();
 	});
 	const accepted = await runtime.submitTurn(session.id, {
@@ -547,6 +815,14 @@ test("foreground Subagents return their output before release and continue from 
 		);
 		assert(JSON.stringify(results.at(-1)).includes(`part-${index}`));
 		assert.equal(memory.trees.get(childId)!.nodes.length, (index + 1) * 4);
+		const journal = await runtime.readToolExecutions(parent.id, { turnId: settled.turn!.id, limit: 200 });
+		assert.deepEqual(
+			journal.entries.map((entry) => [entry.mode, entry.phase]),
+			[
+				["delegated", "started"],
+				["delegated", "completed"],
+			],
+		);
 		if (global.gc) await assertCollected([...observed.created, ...observed.messages]);
 	}
 	assert.deepEqual(calls, ["part-0", "part-1"]);
@@ -736,7 +1012,7 @@ test("long-history session events never read full history and bounded views use 
 	assert.equal(fullReads, 0);
 	const packets: SessionEvent[] = [];
 	const readsAtPublication: number[] = [];
-	runtime.subscribe(session.id, (packet) => {
+	await runtime.subscribe(session.id, (packet) => {
 		packets.push(packet);
 		readsAtPublication.push(fullReads);
 	});
@@ -806,7 +1082,7 @@ test(
 			return readHistory(...args);
 		};
 		const packets: SessionEvent[] = [];
-		runtime.subscribe(session.id, (packet) => packets.push(packet));
+		await runtime.subscribe(session.id, (packet) => packets.push(packet));
 		const pending = runtime.getSession(session.id, { limit: 2 });
 		await entered;
 		releaseTool();
@@ -822,6 +1098,11 @@ test(
 			current = next;
 		}
 		assert.equal(current.revision, completed.revision);
-		assert.deepEqual(current.messages, completed.messages.slice(4));
+		const baselineStart = completed.messages.findIndex(
+			(message) =>
+				message.role === baseline.messages[0].role && message.timestamp === baseline.messages[0].timestamp,
+		);
+		assert(baselineStart >= 0);
+		assert.deepEqual(current.messages, completed.messages.slice(baselineStart));
 	},
 );

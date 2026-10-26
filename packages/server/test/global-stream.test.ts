@@ -69,7 +69,7 @@ test("global streaming does not read full history and permits cancellation follo
 	assert.equal(globalMutationLeaked, false);
 	const baseline = await runtime.getSession(session.id);
 	const fullPackets: SessionEvent[] = [];
-	runtime.subscribe(session.id, (packet) => fullPackets.push(packet));
+	await runtime.subscribe(session.id, (packet) => fullPackets.push(packet));
 	await runtime.submitTurn(session.id, { text: "hello again" });
 	const completed = await runtime.waitForTurn(session.id);
 	assert.equal(completed.turn?.status, "completed");

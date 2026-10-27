@@ -150,7 +150,7 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 					],
 					details: details(current),
 				};
-			runtime.jobs.cancel(job_id);
+			runtime.jobs.cancel(job_id, { notify: false });
 			const job = (await runtime.jobs.wait(job_id, 5_000)) ?? current;
 			return {
 				content: [{ type: "text", text: `${formatJobStatus(job)}\n\n已请求停止后台任务 ${job.id}` }],

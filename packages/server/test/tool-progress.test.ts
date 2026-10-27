@@ -215,6 +215,106 @@ test("job_output cancels only the wait and releases its timeout without consumin
 	assert.match(JSON.stringify(repeated.content), /no new output/);
 });
 
+for (const type of ["shell", "task"] as const) {
+	test(`job_kill stops a background ${type} without a synthetic follow-up or extra model call`, async (context) => {
+		const jobs = new BackgroundJobs();
+		context.after(() => jobs.close());
+		const provider = fauxProvider();
+		const models = createModels();
+		models.setProvider(provider.provider);
+		const histories: Message[][] = [];
+		const tools = jobTools({ sessionId: "owner", directory: process.cwd(), jobs, ask: async () => {} });
+		const agent = new Agent({
+			initialState: { tools, model: provider.getModel() },
+			streamFn(model, request, options) {
+				histories.push(structuredClone(request.messages));
+				return models.streamSimple(model, request, options);
+			},
+		});
+		const completion = deferred<{ output: string }>();
+		const job = jobs.start({
+			ownerSessionId: "owner",
+			type,
+			title: "Background work",
+			run(signal, append) {
+				append("partial job output");
+				signal.addEventListener("abort", () => completion.reject(signal.reason), { once: true });
+				return completion.promise;
+			},
+			onSettled(settled) {
+				const content = [{ type: "text" as const, text: `Background job ${settled.status}`, synthetic: true }];
+				agent.followUp({
+					role: "user",
+					content,
+					timestamp: Date.now(),
+				});
+			},
+		});
+		provider.setResponses([
+			fauxAssistantMessage([fauxToolCall("job_kill", { job_id: job.id })], { stopReason: "toolUse" }),
+			fauxAssistantMessage("Stopped the background job."),
+			fauxAssistantMessage("Unexpected extra response to a cancellation notification."),
+		]);
+
+		await agent.prompt("Stop the background job");
+
+		assert.equal(histories.length, 2);
+		assert.equal(agent.state.messages.filter((message) => message.role === "user").length, 1);
+		const result = agent.state.messages.find((message) => message.role === "toolResult");
+		assert(result?.role === "toolResult");
+		assert.match(JSON.stringify(result.details), /"status":"cancelled"/);
+		assert.equal(jobs.get(job.id)?.status, "cancelled");
+		const output = await tools[0].execute("read-cancelled", { job_id: job.id });
+		assert.match(JSON.stringify(output.content), /partial job output/);
+	});
+}
+
+test("job_kill keeps a late cancellation silent after its bounded wait expires", async (context) => {
+	context.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
+	const jobs = new BackgroundJobs();
+	const completion = deferred<{ output: string }>();
+	const notifications: string[] = [];
+	const job = jobs.start({
+		ownerSessionId: "owner",
+		type: "task",
+		title: "Slow cancellation",
+		run: () => completion.promise,
+		onSettled(settled) {
+			notifications.push(settled.status);
+		},
+	});
+	const kill = jobTools({ sessionId: "owner", directory: process.cwd(), jobs, ask: async () => {} })[1];
+	const execution = kill.execute("stop", { job_id: job.id });
+	context.mock.timers.tick(5_000);
+	const result = await execution;
+	assert.match(JSON.stringify(result.details), /"status":"running"/);
+	completion.resolve({ output: "late output" });
+	assert.equal((await jobs.wait(job.id))?.status, "cancelled");
+	assert.deepEqual(notifications, []);
+});
+
+test("background completion, failure, and ordinary cancellation still notify", async () => {
+	const jobs = new BackgroundJobs();
+	const notifications: string[] = [];
+	for (const status of ["completed", "failed", "cancelled"] as const) {
+		const completion = deferred<{ output: string }>();
+		const job = jobs.start({
+			ownerSessionId: "owner",
+			type: "task",
+			title: status,
+			run: () => completion.promise,
+			onSettled(settled) {
+				notifications.push(settled.status);
+			},
+		});
+		if (status === "cancelled") jobs.cancel(job.id);
+		if (status === "failed") completion.reject(new Error("job failed"));
+		else completion.resolve({ output: "job output" });
+		assert.equal((await jobs.wait(job.id))?.status, status);
+	}
+	assert.deepEqual(notifications, ["completed", "failed", "cancelled"]);
+});
+
 test("bounded job waits release timeout handles on completion and return running jobs on timeout", async (context) => {
 	context.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1000 });
 	const clearTimer = context.mock.method(globalThis, "clearTimeout");

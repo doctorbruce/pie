@@ -90,6 +90,8 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 `bash` 对齐 Amio v1 契约：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 和 Turn 取消影响，只由 `job_kill` 停止；`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。完成通知作为 synthetic 用户内容进入模型和 follow-up 队列，但从产品快照和会话导出中隐藏，不表示用户主动发送。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
 
+显式调用 `job_kill` 停止后台 Shell 或 Subagent 时，取消结果只通过当前工具调用返回，不再额外发送 synthetic 取消通知唤醒模型。工具最多等待 5 秒；若任务稍后才结束，同样保持静默，最终状态和已有输出仍可通过 `job_output` 查询。正常完成、失败及其他调用方的默认取消通知不变。
+
 挂载控制模型的 Skill 目录和加载入口，不是系统访问权限隔离。Session 的 `workspacePath` 是审批边界；访问边界外的路径会请求确认，但批准后仍由 Core 系统账户直接访问。当前没有进程沙箱或凭据代理。Skill 中依赖 Astron Engine HTTP 服务、凭据请求、桌面环境的流程仍需相应宿主能力，不因导入成功而自动可运行。
 
 手工验证：在 Web 客户端「插件」中导入仓库的 `examples/plugins/hello-skill` 绝对路径；编辑助手挂载它，并启用 `read` 和 `bash`；新建真实模型会话，发送“测试本地插件 hello 示例”。预期依次看到 `skill`、`read`、命令工具结果。Web 客户端不提供 faux 会话。

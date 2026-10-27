@@ -17,6 +17,7 @@ const snapshot: SessionSnapshot = {
 	updatedAt: 0,
 	messages: [{ role: "user", content: "history", timestamp: 1 }],
 	interactions: [],
+	execution: { modelStreaming: false, activeTools: [], waitingForInteraction: false, cancellationRequested: false },
 	history: { leafId: "leaf", nextBeforeSeq: 5 },
 };
 const packet = (revision: number, event?: SessionEvent["event"]): SessionEvent => ({
@@ -85,4 +86,45 @@ test("older pages retain concurrent live messages and reject another branch or p
 	assert.equal(prependHistoryPage(snapshot, { ...page, instanceId: "other" }, 5), snapshot);
 	const reconnected = { ...snapshot, history: { leafId: "leaf", nextBeforeSeq: 10 } };
 	assert.equal(prependHistoryPage(reconnected, page, 5), reconnected);
+});
+
+test("execution deltas preserve orthogonal work and every native Turn outcome", () => {
+	const execution = {
+		modelStreaming: true,
+		activeTools: [{ toolCallId: "call", toolName: "remote" }],
+		waitingForInteraction: true,
+		cancellationRequested: true,
+	};
+	const running = applySessionEvent(snapshot, { ...packet(2), execution });
+	assert(running);
+	assert.deepEqual(running.execution, execution);
+	assert.deepEqual(snapshot.execution.activeTools, []);
+	assert.equal(applySessionEvent(running, packet(3))?.execution, execution);
+	for (const status of ["interrupted", "completed", "cancelled", "failed"] as const) {
+		const settled = applySessionEvent(running, {
+			...packet(3),
+			type: "turn.settled",
+			turn: { id: "turn", status },
+			execution: {
+				...snapshot.execution,
+				...(status === "interrupted" ? { recoveryBlockedReason: "unknown tool outcome" } : {}),
+			},
+		});
+		assert.equal(settled?.turn?.status, status);
+		assert.equal(settled?.execution.modelStreaming, false);
+		assert.deepEqual(settled?.execution.activeTools, []);
+		assert.equal(settled?.execution.cancellationRequested, false);
+		assert.equal(
+			settled?.execution.recoveryBlockedReason,
+			status === "interrupted" ? "unknown tool outcome" : undefined,
+		);
+	}
+	assert.equal(applySessionEvent(running, { ...packet(1), execution: snapshot.execution }), running);
+	assert.equal(applySessionEvent(running, { ...packet(4), execution: snapshot.execution }), undefined);
+	assert.equal(applySessionEvent(running, { ...packet(3), instanceId: "restarted" }), undefined);
+	const reconnected = { ...snapshot, instanceId: "restarted", revision: 0 };
+	assert.equal(
+		applySessionEvent(running, { ...packet(0), instanceId: "restarted", snapshot: reconnected }),
+		reconnected,
+	);
 });

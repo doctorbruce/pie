@@ -18,6 +18,7 @@ import type {
 	ImagePart,
 	InteractionRequest,
 	SessionEvent,
+	SessionExecution,
 	SessionSnapshot,
 	SessionState,
 	SessionSummary,
@@ -162,6 +163,16 @@ function notifySubscribers<Event>(listeners: Set<RuntimeSubscriber<Event>>, pack
 export type RuntimeAgents = Omit<ReturnType<typeof createAgentFactory>, "settings"> & {
 	settings: { readonly current: { selected?: { provider: string; id: string } } };
 };
+export type ToolStreamTrace = {
+	sessionId: string;
+	turnId?: string;
+	phase: "toolcall_end" | "tool_execution_start" | "assistant_message_end" | "tool_execution_end";
+	timestamp: number;
+	toolCallId?: string;
+	toolName?: string;
+	contentIndex?: number;
+	streaming?: boolean;
+};
 export type RuntimeOptions = {
 	store: RuntimeStore;
 	agents: RuntimeAgents;
@@ -170,12 +181,23 @@ export type RuntimeOptions = {
 	saveHostRuntimes?: (definitions: readonly HostRuntimeDefinition[]) => Promise<void>;
 	assistants?: AssistantSource;
 	jobs?: DurableJobExecutor;
+	toolStreamTrace?: (event: ToolStreamTrace) => void;
 };
 
 async function initializeRuntime(options: RuntimeOptions) {
 	const { agents: factory, store } = options;
 	const instanceId = randomUUID();
 	const jobs = new BackgroundJobs();
+	const traceToolStream = (session: Session, event: Omit<ToolStreamTrace, "sessionId" | "turnId" | "timestamp">) => {
+		try {
+			options.toolStreamTrace?.({
+				...event,
+				sessionId: session.id,
+				turnId: session.turn?.id,
+				timestamp: Date.now(),
+			});
+		} catch {}
+	};
 	const pollIntervalMs = options.jobs?.pollIntervalMs ?? 1000;
 	if (!Number.isSafeInteger(pollIntervalMs) || pollIntervalMs < 1 || pollIntervalMs > 60000)
 		throw new Error("外部任务查询间隔需要 1–60000 毫秒");
@@ -221,8 +243,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 		mcpAbort?: AbortController;
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
+		modelStreaming?: boolean;
+		activeTools?: Map<string, string>;
 		clients: Set<RuntimeSubscriber>;
 		runPromise?: Promise<string | undefined>;
+		cancelPromise?: Promise<{ sessionId: string; turnId: string }>;
 		writePromise?: Promise<void>;
 		publishPromise?: Promise<void>;
 		jobInterruption?: string;
@@ -693,12 +718,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 		}
 	}
 	async function pendingJobs(session: Session) {
-		if (!session.turnCheckpoint?.jobs?.length || !session.turn) return [];
-		const tree = await store.readTurnPath(session.id, session.turnCheckpoint.inputEntryId);
+		const checkpoint = session.turnCheckpoint;
+		const turn = session.turn;
+		if (!checkpoint?.jobs?.length || !turn) return [];
+		const tree = await store.readTurnPath(session.id, checkpoint.inputEntryId);
 		return pendingDurableJobs(
 			session.id,
-			session.turn.id,
-			session.turnCheckpoint.jobs,
+			turn.id,
+			checkpoint.jobs,
 			tree.nodes.map((node) => node.message),
 		);
 	}
@@ -738,6 +765,40 @@ async function initializeRuntime(options: RuntimeOptions) {
 			),
 		);
 	}
+	function cancelRunningTurn(session: Session) {
+		if (session.cancelPromise) return session.cancelPromise;
+		const turnId = session.turn!.id;
+		const running = session.runPromise;
+		session.cancelRequested = true;
+		if (session.turnCheckpoint) session.turnCheckpoint.cancelRequested = true;
+		if (session.turnCheckpoint?.jobs?.length) session.jobInterruption = "外部任务取消已请求";
+		const cancellation = Promise.all([persist(session), pendingJobs(session), publish(session, "snapshot")]).then(
+			async ([, pending]) => {
+				if (pending.length && !options.jobs) throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消");
+				for (const reference of pending) await options.jobs!.cancel(reference);
+				await rejectSessionInteractions(session.id, new Error("会话已取消"));
+				await persist(session);
+				return { sessionId: session.id, turnId };
+			},
+		);
+		session.cancelPromise = cancellation;
+		const pending = Promise.allSettled([running, cancellation])
+			.then(([result]) => {
+				if (result.status === "rejected") throw result.reason;
+				return result.value;
+			})
+			.finally(() => {
+				if (session.runPromise !== pending) return;
+				session.runPromise = undefined;
+				session.cancelPromise = undefined;
+				releaseSession(session);
+			});
+		session.runPromise = pending;
+		session.agent?.clearAllQueues();
+		session.agent?.abort();
+		session.mcpAbort?.abort();
+		return cancellation;
+	}
 	async function notifyBackground(session: Session, text: string) {
 		if (closing) return;
 		const started = await execute(async () => {
@@ -763,9 +824,31 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	function bindAgent(session: Session, agent: ReturnType<typeof factory.create>) {
 		session.agent = agent;
+		session.modelStreaming = false;
+		session.activeTools = new Map();
 		agent.subscribe(async (event) => {
 			if (session.jobInterruption) return;
+			if (event.type === "message_start" && event.message.role === "assistant") session.modelStreaming = true;
+			if ((event.type === "message_end" && event.message.role === "assistant") || event.type === "agent_end")
+				session.modelStreaming = false;
+			if (event.type === "tool_execution_start") session.activeTools!.set(event.toolCallId, event.toolName);
+			if (event.type === "tool_execution_end") session.activeTools!.delete(event.toolCallId);
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_end") {
+				traceToolStream(session, {
+					phase: "toolcall_end",
+					toolCallId: event.assistantMessageEvent.toolCall.id,
+					toolName: event.assistantMessageEvent.toolCall.name,
+					contentIndex: event.assistantMessageEvent.contentIndex,
+					streaming: true,
+				});
+			}
 			if (event.type === "tool_execution_start") {
+				traceToolStream(session, {
+					phase: "tool_execution_start",
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					streaming: session.agent?.state.streamingMessage?.role === "assistant",
+				});
 				if (session.turnCheckpoint && event.assistantMessage)
 					session.turnCheckpoint.pendingAssistant = structuredClone(event.assistantMessage);
 				await persist(session, false, undefined, [
@@ -773,6 +856,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				]);
 			}
 			if (event.type === "message_end") {
+				if (event.message.role === "assistant")
+					traceToolStream(session, { phase: "assistant_message_end", streaming: false });
 				if (event.message.role === "assistant" && session.turnCheckpoint)
 					delete session.turnCheckpoint.pendingAssistant;
 				if (session.turnCheckpoint && jobs.list(session.id).some((job) => job.status === "running"))
@@ -801,6 +886,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 						: [];
 				await persist(session, false, undefined, records);
 			}
+			if (event.type === "tool_execution_end")
+				traceToolStream(session, {
+					phase: "tool_execution_end",
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+				});
 			await publish(session, "agent.event", event);
 		});
 		return agent;
@@ -848,9 +939,24 @@ async function initializeRuntime(options: RuntimeOptions) {
 			runtime: localRuntime(assistant),
 		};
 	}
+	function executionState(session: Session): SessionExecution {
+		const running = session.turn?.status === "running";
+		return {
+			modelStreaming: running && session.modelStreaming === true,
+			activeTools: running
+				? [...(session.activeTools ?? [])].map(([toolCallId, toolName]) => ({ toolCallId, toolName }))
+				: [],
+			waitingForInteraction: [...pendingInteractions.values()].some((pending) => pending.sessionId === session.id),
+			cancellationRequested: running && session.cancelRequested,
+			...(session.turn?.status === "interrupted" && session.turnCheckpoint?.blockedReason
+				? { recoveryBlockedReason: session.turnCheckpoint.blockedReason }
+				: {}),
+		};
+	}
 	function sessionState(session: Session): SessionState {
 		return structuredClone({
 			instanceId,
+			execution: executionState(session),
 			...summary(session),
 			assistant: session.assistant,
 			revision: session.revision,
@@ -896,6 +1002,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	) {
 		const pending = (session.publishPromise ?? Promise.resolve()).then(async () => {
 			session.revision++;
+			const execution = executionState(session);
 			const packet: GlobalSessionEvent = {
 				type,
 				sessionId: session.id,
@@ -903,7 +1010,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				event,
 				activity,
 				interaction,
-				snapshot: { instanceId, revision: session.revision, turn: session.turn },
+				snapshot: { instanceId, revision: session.revision, turn: session.turn, execution },
 			};
 			if (session.clients.size)
 				notifySubscribers(session.clients, {
@@ -915,6 +1022,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					turn: session.turn,
 					activity,
 					interaction,
+					execution,
 					event: type === "agent.event" ? projectSessionAgentEvent(event) : event,
 					...(type === "agent.event" ? {} : { state: sessionState(session) }),
 				});
@@ -1081,6 +1189,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		try {
 			releaseMcp = await agent.prepareMcp(mcpAbort.signal);
 			do {
+				mcpAbort.signal.throwIfAborted();
 				await agent.continue();
 			} while (agent.hasQueuedMessages() && !session.cancelRequested && !session.jobInterruption);
 			turn.error = agent.state.errorMessage;
@@ -1091,6 +1200,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 		} finally {
 			releaseMcp?.();
 			session.mcpAbort = undefined;
+			session.modelStreaming = false;
+			session.activeTools?.clear();
 			try {
 				await rejectSessionInteractions(session.id, new Error("回合已结束"));
 			} catch {
@@ -1568,30 +1679,21 @@ async function initializeRuntime(options: RuntimeOptions) {
 				return await snapshot(session);
 			}, true);
 		},
-		cancelTurn(sessionId: string, body: { turnId: string }) {
+		async cancelTurn(sessionId: string, body: { turnId: string }) {
+			if (closing) throw new RuntimeError(503, "运行时正在关闭");
+			const active = sessions.get(sessionId);
+			if (active?.runPromise && (active.turn?.status === "running" || active.cancelPromise)) {
+				if (active.kind === "subagent") throw new RuntimeError(409, "请取消父会话");
+				if (body.turnId !== active.turn?.id) throw new RuntimeError(409, "turnId 不匹配");
+				return cancelRunningTurn(active);
+			}
 			return execute(async () => {
 				const session = await requireSession(sessionId);
 				if (session.kind === "subagent") throw new RuntimeError(409, "请取消父会话");
 
 				if (!session.turn || body.turnId !== session.turn.id) throw new RuntimeError(409, "turnId 不匹配");
 				if (session.turn.status === "running") {
-					session.cancelRequested = true;
-					if (session.turnCheckpoint) session.turnCheckpoint.cancelRequested = true;
-					if (session.turnCheckpoint?.jobs?.length) {
-						await persist(session);
-						try {
-							await cancelJobs(session);
-						} finally {
-							session.jobInterruption = "外部任务取消已请求";
-							session.agent?.abort();
-							session.mcpAbort?.abort();
-						}
-					}
-					session.agent?.clearAllQueues();
-					session.agent?.abort();
-					session.mcpAbort?.abort();
-					await rejectSessionInteractions(session.id, new Error("会话已取消"));
-					await persist(session);
+					return await cancelRunningTurn(session);
 				} else if (session.turn.status === "interrupted") {
 					let records: ToolExecutionRecord[] = [];
 					const previous = {

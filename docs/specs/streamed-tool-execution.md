@@ -38,6 +38,8 @@
 
 ## 验证结果
 
+- Local sidecar 默认在 stderr 输出 toolcall_end、tool_execution_start、assistant_message_end、tool_execution_end 的毫秒级 JSON 时序；tool_execution_start.streaming 用于直接确认是否在 assistant 响应结束前启动，PI_TOOL_STREAM_TRACE=0 可关闭。
+
 - `packages/agent` 下运行 `node ../../node_modules/vitest/dist/cli.js --run test/agent.test.ts test/agent-loop.test.ts test/message-replacement.test.ts test/streamed-tool-execution.test.ts`：58 项通过。
 - `npm run test:runtime`：54 项通过，包含工具重复提醒、分页、前后台子任务和恢复回归。
 - `node --conditions=source --test packages/server/test/turn-recovery.test.ts packages/server/test/streamed-tool-execution.test.ts`：16 项通过，包含实际进程退出与 SQLite 重开。

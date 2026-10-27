@@ -1,7 +1,7 @@
 
 # Pie 本地 / 云端统一 Loop 演进
 
-状态：进行中。Pie 侧的包级拆分、闲置正文卸载、会话增量事件、按 ID 装载、Turn 恢复边界、有界历史读取和外部任务关联接管已完成；统一工具执行账本延续 Turn 恢复阶段，验收状态见对应 SPEC。Cloud 适配、联合恢复与生产级资源验收仍待推进，以本地回归作为交付门槛。更新日期：2026-10-26。
+状态：进行中。Pie 侧的包级拆分、闲置正文卸载、会话增量事件、按 ID 装载、Turn 恢复边界、有界历史读取和外部任务关联接管已完成；统一工具执行账本延续 Turn 恢复阶段，验收状态见对应 SPEC。运行状态投影第一阶段已完成，回执与操作可用性仍待推进。Cloud 适配、联合恢复与生产级资源验收仍待推进，以本地回归作为交付门槛。更新日期：2026-10-27。
 
 ## 问题与目标
 
@@ -17,6 +17,7 @@ Session、Turn、上下文、模型调用、Subagent 和 Loop 只维护一份实
 
 ## 当前基础与差距
 
+- 运行状态与控制语义按 [运行状态投影 SPEC](runtime-state-projection.md) 分阶段落地：先补 Pie 的同源运行摘要，再补回执与操作可用性；Cloud 暂不修改，待 Pie 验证后差量同步。
 - `packages/agent` 继续负责底层 Loop；`packages/runtime` 承载可直接调用的会话运行逻辑与能力契约，通过 `@pie/runtime`（或根仓库 `pie/runtime`）导出。根入口仍导出 Agent Core，不再从 Server 导入运行模块。
 - `packages/local` 装配 SQLite、本机工具、文件模型配置、Skill / MCP 和本地助手管理；`packages/server` 只做 HTTP / SSE、CLI / Sidecar。Runtime 不依赖这两个包；本地默认使用 `retain`，云端可选择 `release-after-turn`，已有能力见 [卸载 SPEC](idle-session-release.md) 和 [事件 SPEC](session-event-stream.md)。
 - 按 2026-10-23 本地工作树核对，`cowork3/cloud/apps/agent-service` 已有 MySQL 会话存储、对象存储载荷、按用户认领的租约、写入代次校验、Redis 跨实例路由与保守恢复，工厂已启用每轮卸载。它不再只是包接入骨架，但真实工具、配置跨实例协调及生产联合验收不能由源码存在推定完成；以 Cloud 对应 SPEC 和验收记录为准。

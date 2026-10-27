@@ -204,8 +204,16 @@ export type InteractionRequest = {
 	message: string;
 	metadata?: Record<string, unknown>;
 };
+export type SessionExecution = {
+	modelStreaming: boolean;
+	activeTools: { toolCallId: string; toolName: string }[];
+	waitingForInteraction: boolean;
+	cancellationRequested: boolean;
+	recoveryBlockedReason?: string;
+};
 export type SessionSnapshot = SessionSummary & {
 	instanceId: string;
+	execution: SessionExecution;
 	assistant?: Assistant;
 	revision: number;
 	messages: WireMessage[];
@@ -286,6 +294,7 @@ export type SessionEvent = {
 	event?: { type: string; [key: string]: unknown };
 	activity?: ActivityRecord;
 	interaction?: InteractionRequest;
+	execution?: SessionExecution;
 	state?: SessionState;
 	snapshot?: SessionSnapshot;
 };
@@ -294,7 +303,7 @@ export type GlobalSessionEvent = Pick<
 	SessionEvent,
 	"type" | "sessionId" | "turnId" | "event" | "activity" | "interaction"
 > & {
-	snapshot: Pick<SessionSnapshot, "instanceId" | "revision" | "turn">;
+	snapshot: Pick<SessionSnapshot, "instanceId" | "revision" | "turn" | "execution">;
 };
 export type ServerInfo = {
 	protocolVersion: 1;

@@ -28,7 +28,13 @@ export function applySessionEvent(
 	if (current.instanceId !== packet.instanceId) return;
 	if (packet.revision <= current.revision) return current;
 	if (packet.revision !== current.revision + 1 || packet.event?.type === "history.reset") return;
-	const next: SessionSnapshot = { ...current, ...packet.state, revision: packet.revision, turn: packet.turn };
+	const next: SessionSnapshot = {
+		...current,
+		...packet.state,
+		...(packet.execution ? { execution: packet.execution } : {}),
+		revision: packet.revision,
+		turn: packet.turn,
+	};
 	const event = packet.event;
 	if (event?.type === "message_start" && event.message)
 		next.streamingMessage = structuredClone(event.message) as WireMessage;

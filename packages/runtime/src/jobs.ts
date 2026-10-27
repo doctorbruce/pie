@@ -33,6 +33,7 @@ export function formatJobStatus(job: BackgroundJobInfo): string {
 
 type MutableJob = BackgroundJobInfo & {
 	controller: AbortController;
+	notifyOnSettled: boolean;
 	readOffset: number;
 	settled: Promise<void>;
 	resolveSettled: () => void;
@@ -80,6 +81,7 @@ export class BackgroundJobs {
 			output: "",
 			details: input.details,
 			controller,
+			notifyOnSettled: true,
 			readOffset: 0,
 			settled,
 			resolveSettled,
@@ -111,7 +113,7 @@ export class BackgroundJobs {
 			.finally(() => {
 				job.finishedAt = Date.now();
 				job.resolveSettled();
-				void Promise.resolve(input.onSettled?.(this.snapshot(job))).catch(() => {});
+				if (job.notifyOnSettled) void Promise.resolve(input.onSettled?.(this.snapshot(job))).catch(() => {});
 			});
 		return this.snapshot(job);
 	}
@@ -153,10 +155,13 @@ export class BackgroundJobs {
 		return { job: this.snapshot(job), delta };
 	}
 
-	cancel(id: string): BackgroundJobInfo | undefined {
+	cancel(id: string, options?: { notify?: boolean }): BackgroundJobInfo | undefined {
 		const job = this.#jobs.get(id);
 		if (!job) return undefined;
-		if (job.status === "running") job.controller.abort();
+		if (job.status === "running") {
+			if (options?.notify === false) job.notifyOnSettled = false;
+			job.controller.abort();
+		}
 		return this.snapshot(job);
 	}
 

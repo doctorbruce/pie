@@ -152,7 +152,7 @@ function memoryStore() {
 	};
 }
 
-function agents(directory: string, onCall: (value: string) => void | Promise<void> = () => {}) {
+function agents(directory: string, onCall: (value: string, signal?: AbortSignal) => void | Promise<void> = () => {}) {
 	const parameters = Type.Object({
 		text: Type.String(),
 		confirm: Type.Optional(Type.Boolean()),
@@ -189,7 +189,7 @@ function agents(directory: string, onCall: (value: string) => void | Promise<voi
 						const args = input as Static<typeof parameters>;
 						if (args.confirm)
 							await context.ask({ type: "confirmation", title: "执行 SDK 工具", message: args.text }, signal);
-						await onCall(args.text);
+						await onCall(args.text, signal);
 						onUpdate?.({
 							content: [{ type: "text", text: "SDK running" }],
 							details: { sessionId: context.sessionId },
@@ -596,6 +596,209 @@ test("host subscriptions can approve and cancel SDK tools without an HTTP transp
 	assert.equal((await runtime.waitForTurn(session.id)).turn?.status, "cancelled");
 	assert(revisions.every((revision, index) => index === 0 || revision > revisions[index - 1]));
 	await assert.rejects(runtime.cancelTurn(session.id, { turnId: "stale" }), /turnId 不匹配/);
+});
+
+for (const historyTarget of ["same session", "another session"]) {
+	test(`running cancellation bypasses blocked history from ${historyTarget}`, { timeout: 10000 }, async (context) => {
+		const memory = memoryStore();
+		let started = () => {};
+		let aborted = () => {};
+		let settled = () => {};
+		let historyEntered = () => {};
+		let releaseHistory = () => {};
+		let abortedAt = 0;
+		const running = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const stopped = new Promise<void>((resolve) => {
+			aborted = resolve;
+		});
+		const completed = new Promise<void>((resolve) => {
+			settled = resolve;
+		});
+		const reading = new Promise<void>((resolve) => {
+			historyEntered = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			releaseHistory = resolve;
+		});
+		const runtime = await createRuntime({
+			store: memory.store,
+			agents: agents("unused", (_value, signal) => {
+				signal?.addEventListener(
+					"abort",
+					() => {
+						abortedAt = performance.now();
+						aborted();
+					},
+					{ once: true },
+				);
+				started();
+			}),
+		});
+		context.after(async () => {
+			releaseHistory();
+			await runtime.close();
+		});
+		await runtime.registerHostRuntimes([definition]);
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		const historySession =
+			historyTarget === "same session"
+				? session
+				: await runtime.createSession({ assistantId: definition.assistantId });
+		runtime.subscribeAll((packet) => {
+			if (
+				packet.sessionId === session.id &&
+				packet.type === "turn.settled" &&
+				packet.snapshot?.turn?.status === "cancelled"
+			)
+				settled();
+		});
+		const accepted = await runtime.submitTurn(session.id, { text: '调用工具 sdk_echo {"text":"wait","wait":true}' });
+		await running;
+		const readHistory = memory.store.readHistory;
+		memory.store.readHistory = async (...args) => {
+			historyEntered();
+			await blocked;
+			return readHistory(...args);
+		};
+		const pendingRead = runtime.getSession(historySession.id, { limit: 1 });
+		await reading;
+		const startedAt = performance.now();
+		const cancellation = runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+		const result = await Promise.race([
+			Promise.all([cancellation, stopped, completed]).then(([receipt]) => receipt),
+			delay(1000).then(() => "blocked" as const),
+		]);
+		assert.notEqual(
+			result,
+			"blocked",
+			"Cancellation delivery, acknowledgement and settlement must not wait for history I/O",
+		);
+		assert.deepEqual(result, { sessionId: session.id, turnId: accepted.turnId });
+		assert.equal(memory.sessions.get(session.id)?.turn?.status, "cancelled");
+		context.diagnostic(
+			`Cancellation reached the tool in ${(abortedAt - startedAt).toFixed(1)} ms while history was still blocked`,
+		);
+		releaseHistory();
+		await pendingRead;
+		await runtime.submitTurn(session.id, { text: "next" });
+		assert.equal((await runtime.waitForTurn(session.id)).turn?.status, "completed");
+	});
+}
+
+test(
+	"running cancellation sends abort before blocked persistence and shutdown waits for cleanup",
+	{ timeout: 10000 },
+	async (context) => {
+		const memory = memoryStore();
+		let started = () => {};
+		let aborted = () => {};
+		let writeEntered = () => {};
+		let releaseWrite = () => {};
+		let wasAborted = false;
+		const running = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const stopped = new Promise<void>((resolve) => {
+			aborted = resolve;
+		});
+		const writing = new Promise<void>((resolve) => {
+			writeEntered = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			releaseWrite = resolve;
+		});
+		const runtime = await createRuntime({
+			store: memory.store,
+			agents: agents("unused", (_value, signal) => {
+				signal?.addEventListener(
+					"abort",
+					() => {
+						wasAborted = true;
+						aborted();
+					},
+					{ once: true },
+				);
+				started();
+			}),
+		});
+		context.after(async () => {
+			releaseWrite();
+			await runtime.close();
+		});
+		await runtime.registerHostRuntimes([definition]);
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		const accepted = await runtime.submitTurn(session.id, { text: '调用工具 sdk_echo {"text":"wait","wait":true}' });
+		await running;
+		const save = memory.store.saveSession;
+		memory.store.saveSession = async (...args) => {
+			if (args[0].turnCheckpoint?.cancelRequested) {
+				writeEntered();
+				await blocked;
+			}
+			return save(...args);
+		};
+		await assert.rejects(runtime.cancelTurn(session.id, { turnId: "stale" }), { status: 409 });
+		assert.equal(wasAborted, false, "A stale turnId must not abort the current tool");
+		const cancellation = runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+		const repeated = runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+		assert.equal(
+			await Promise.race([stopped.then(() => true), delay(1000).then(() => false)]),
+			true,
+			"Abort must precede persistence",
+		);
+		await writing;
+		let acknowledged = false;
+		void cancellation.then(() => {
+			acknowledged = true;
+		});
+		const closing = runtime.close();
+		await delay(20);
+		assert.equal(acknowledged, false, "An uncommitted cancellation must not be acknowledged");
+		assert.equal(memory.closes, 0, "Shutdown must retain storage until cancellation cleanup finishes");
+		releaseWrite();
+		assert.deepEqual(await cancellation, { sessionId: session.id, turnId: accepted.turnId });
+		assert.deepEqual(await repeated, await cancellation);
+		await closing;
+		assert.equal(memory.closes, 1);
+	},
+);
+
+test("cancellation during MCP preparation cannot launch the model or tool after preparation finishes", async (context) => {
+	const memory = memoryStore();
+	const calls: string[] = [];
+	const factory = agents("unused", (value) => {
+		calls.push(value);
+	});
+	let entered = () => {};
+	let release = () => {};
+	const preparing = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const acquire = factory.mcp.acquire;
+	factory.mcp.acquire = async (...args) => {
+		entered();
+		await blocked;
+		return acquire(...args);
+	};
+	const runtime = await createRuntime({ store: memory.store, agents: factory, hostRuntimes: [definition] });
+	context.after(async () => {
+		release();
+		await runtime.close();
+	});
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const accepted = await runtime.submitTurn(session.id, { text: '调用工具 sdk_echo {"text":"must-not-run"}' });
+	await preparing;
+	await runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+	release();
+	const completed = await runtime.waitForTurn(session.id);
+	assert.equal(completed.turn?.status, "cancelled");
+	assert.deepEqual(calls, []);
+	assert.equal(completed.messages.filter((message) => message.role === "assistant").length, 0);
 });
 
 test("activation refuses an unrecovered Turn without blocking other sessions or replaying tools", async () => {

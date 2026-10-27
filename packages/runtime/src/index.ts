@@ -17,6 +17,7 @@ export {
 	type RuntimeAgents,
 	RuntimeError,
 	type RuntimeOptions,
+	type ToolStreamTrace,
 	type TurnInput,
 } from "./runtime.ts";
 export type {

@@ -284,6 +284,8 @@ test("a slow external cancellation cannot advance the model while its acknowledg
 		await acknowledgement;
 	};
 	const cancellation = host.runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+	let nextTurn: Promise<unknown> | undefined;
+	let repeated: Promise<unknown> | undefined;
 	try {
 		await until(async () => (entered ? true : undefined));
 		host.jobs.update(reference, {
@@ -295,10 +297,21 @@ test("a slow external cancellation cannot advance the model while its acknowledg
 		assert.equal(messages.filter((message) => message.role === "assistant").length, 1);
 		assert.equal(completeToolHistory(messages), true);
 		assert.equal(host.jobs.submissions, 1);
+		repeated = host.runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+		let admitted = false;
+		nextTurn = host.runtime.submitTurn(session.id, { text: "next after cancellation" }).then((receipt) => {
+			admitted = true;
+			return receipt;
+		});
+		await delay(30);
+		assert.equal(admitted, false, "The next Turn must wait for cancellation cleanup");
 	} finally {
 		acknowledge();
 		await cancellation;
+		await repeated;
 	}
+	await nextTurn;
+	assert.equal((await host.runtime.waitForTurn(session.id)).turn?.status, "completed");
 });
 
 test("submission acknowledgement and query failures retain the original job without fake tool results", async (context) => {

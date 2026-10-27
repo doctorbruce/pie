@@ -4,6 +4,7 @@
 
 ### Breaking Changes
 
+- Require `SessionSnapshot.execution` and include the same lightweight execution view in global events; session deltas can update it without copying history. Preserve native Turn outcomes instead of interpreting settlement as success.
 - Require `RuntimeStore.readToolExecutions` and atomic incremental journal appends through the third `saveSession` argument; Cloud adapters must persist execution facts alongside history and Turn metadata.
 
 - Replace `RuntimeStore.loadSessions` with scoped `readSession` and cursor-paged `listSessions`; runtime lists default to 50 entries and return `nextCursor`. Session `subscribe` is asynchronous; `subscribeAll` remains synchronous.
@@ -29,5 +30,9 @@
 - Added optional `sessionRetention: "release-after-turn"` to release idle Agents and working history after durable settlement and reload them through the injected store, while keeping local in-memory reuse by default.
 
 ### Fixed
+
+- Avoid duplicate model wakeups after explicit `job_kill` cancellation of local shell or subagent jobs; keep cancellation results and output readable, including when settlement follows the tool's bounded wait.
+
+- Deliver active-Turn cancellation before queued commands, history reads and persistence; retain cancellation acknowledgement, external-job cleanup and session-lifecycle barriers.
 
 - Classify empty, incomplete and cyclic Turn recovery paths as non-resumable instead of throwing during startup or recovery admission; preserve storage read errors and never start an Agent for invalid history.

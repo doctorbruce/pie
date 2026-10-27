@@ -21,6 +21,7 @@
 
 ## 接入方式
 
+- 运行摘要见 [运行状态投影 SPEC](runtime-state-projection.md)：快照的 `execution` 必填，会话增量可通过顶层 execution 更新，全局事件的 snapshot 同样携带摘要；不能用它替代原始 `Turn.status` 或独立执行账本。
 - HTTP 首屏：`GET /sessions/:id?limit=50`，limit 范围 1–200，返回 `history: { leafId, nextBeforeSeq }`；不传 limit 仍是显式完整读取。
 - 旧页：`GET /sessions/:id/history?limit=50&beforeSeq=<seq>&leafId=<leafId>`，返回 `SessionHistoryPage`：实例、版本、叶子、带 id / parentId / seq 的节点和下一游标。leafId 固定为首屏返回值；null 表示空路径。游标用尽为 null，不能拿 revision 当 seq。
 - 会话 SSE 先发最近 50 条的 snapshot；后续包在顶层带 instanceId / revision / turn，低频状态通过 state 更新，不再带完整 snapshot。message_update 不带 message / partial；message_end 只带当前完成的一条消息。类型名 snapshot 也可仅表示元信息变化，不保证有 snapshot 字段。

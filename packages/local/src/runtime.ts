@@ -14,15 +14,25 @@ export function createLocalHost(environment: NodeJS.ProcessEnv = process.env) {
 	const agents = createAgentFactory(env, { models: settings });
 	const plugins = createPlugins(env);
 	const store = openStore(env);
-	return { settings, agents, ready: createLocalRuntime({ agents, plugins, store }) };
+	return {
+		settings,
+		agents,
+		ready: createLocalRuntime({
+			agents,
+			plugins,
+			store,
+			traceToolStream: environment.PI_TOOL_STREAM_TRACE !== "0",
+		}),
+	};
 }
 
 async function createLocalRuntime(options: {
 	agents: ReturnType<typeof createAgentFactory>;
 	plugins: ReturnType<typeof createPlugins>;
 	store: ReturnType<typeof openStore>;
+	traceToolStream: boolean;
 }) {
-	const { agents: factory, plugins, store } = options;
+	const { agents: factory, plugins, store, traceToolStream } = options;
 	const assistants = new Map(store.assistants.map((assistant) => [assistant.id, structuredClone(assistant)]));
 	function localRuntime(assistant: Assistant) {
 		if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地助手配置");
@@ -49,6 +59,9 @@ async function createLocalRuntime(options: {
 		hostRuntimes: store.hostRuntimes,
 		saveHostRuntimes: async (definitions) => store.replaceHostRuntimes(definitions),
 		assistants: { list: () => [...assistants.values()], runtime: localRuntime },
+		toolStreamTrace: traceToolStream
+			? (event) => console.error(JSON.stringify({ type: "pie_tool_stream_trace", ...event }))
+			: undefined,
 	});
 	let commands = Promise.resolve();
 	let closing = false;

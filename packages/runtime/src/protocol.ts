@@ -83,6 +83,7 @@ export type AgentRuntimeConfig = {
 	language?: string;
 	toolIds: ToolId[];
 	skills: SkillBinding[];
+	allowedDirectories?: string[];
 	permissions?: PermissionPolicy;
 };
 export type HostSubagentBinding = {

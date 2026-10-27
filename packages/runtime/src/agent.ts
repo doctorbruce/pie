@@ -138,6 +138,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			const context = Object.freeze({
 				sessionId,
 				directory: native?.directory ?? process.cwd(),
+				allowedDirectories: runtime.allowedDirectories,
 				env,
 				Type,
 				ask: requestInteraction,

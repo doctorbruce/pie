@@ -19,13 +19,17 @@ export function containsPath(root: string, target: string): boolean {
 	return candidate === base || candidate.startsWith(base + sep);
 }
 
+function containsAllowedPath(runtime: ToolRuntime, target: string): boolean {
+	return [runtime.directory, ...(runtime.allowedDirectories ?? [])].some((root) => containsPath(root, target));
+}
+
 export async function authorizePath(
 	runtime: ToolRuntime,
 	target: string,
 	operation: "read" | "edit" | "execute",
 	signal?: AbortSignal,
 ): Promise<void> {
-	if (!containsPath(runtime.directory, target)) {
+	if (!containsAllowedPath(runtime, target)) {
 		await runtime.ask(
 			{
 				type: "confirmation",
@@ -44,7 +48,7 @@ export async function authorizeCommand(
 	workdir: string,
 	signal?: AbortSignal,
 ): Promise<void> {
-	if (!containsPath(runtime.directory, workdir)) {
+	if (!containsAllowedPath(runtime, workdir)) {
 		await runtime.ask(
 			{
 				type: "confirmation",
@@ -65,7 +69,7 @@ export async function authorizeCommand(
 				/^[a-z]:[\\/]/i.test(token) || /^\\\\/.test(token) || /^\//.test(token) || /^\.\.[\\/]/.test(token);
 			if (!pathLike) continue;
 			const candidate = resolve(workdir, token);
-			if (!containsPath(runtime.directory, candidate)) externalPaths.add(candidate);
+			if (!containsAllowedPath(runtime, candidate)) externalPaths.add(candidate);
 		}
 	}
 	if (externalPaths.size) {

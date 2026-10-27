@@ -35,6 +35,7 @@ export type ToolAsk = (request: Omit<InteractionRequest, "id">, signal?: AbortSi
 export type ToolRuntime = {
 	sessionId: string;
 	directory: string;
+	allowedDirectories?: readonly string[];
 	ask: ToolAsk;
 	jobs: BackgroundJobs;
 	notifyBackground?: (message: string) => Promise<void>;

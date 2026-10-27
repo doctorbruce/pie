@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fauxToolCall, validateToolArguments } from "@earendil-works/pi-ai";
+import { hydrateHostRuntime, parseHostRuntimeDefinition } from "@pie/runtime/config";
 import { BackgroundJobs } from "@pie/runtime/jobs";
 import { applyPermissionPolicy, type ToolRuntime } from "@pie/runtime/tools";
+import { createAgentFactory } from "../../local/src/agent.ts";
 import { systemTools } from "../../local/src/tools.ts";
 
 test("host permission policy allows configured operations but preserves explicit confirmations", async () => {
@@ -22,6 +24,119 @@ test("host permission policy allows configured operations but preserves explicit
 	});
 	await ask({ type: "confirmation", title: "question", message: "choose" });
 	assert.deepEqual(requested, ["credential", "question"]);
+});
+
+test("host directory grants are validated and subagents retain their own grants", () => {
+	const directories = [join(tmpdir(), "first", ".agents"), join(tmpdir(), "first", "plugins")];
+	const definition = {
+		assistantId: "helper",
+		assistantRevision: "1",
+		runtime: { systemPrompt: "", toolIds: [], skills: [], allowedDirectories: directories, subagents: [] },
+	};
+	const helper = parseHostRuntimeDefinition(definition, []);
+	assert.deepEqual(helper.runtime.allowedDirectories, directories);
+	const coordinator = parseHostRuntimeDefinition(
+		{
+			assistantId: "coordinator",
+			assistantRevision: "1",
+			runtime: {
+				...definition.runtime,
+				allowedDirectories: [join(tmpdir(), "coordinator")],
+				subagents: [{ id: "helper", name: "helper", description: "worker", assistantId: "helper" }],
+			},
+		},
+		[],
+	);
+	const registry = new Map([helper, coordinator].map((entry) => [entry.assistantId, entry]));
+	assert.deepEqual(hydrateHostRuntime(coordinator, registry).subagents[0].runtime.allowedDirectories, directories);
+	for (const invalid of ["not-an-array", ["relative/path"], [null], Array(129).fill(directories[0])]) {
+		assert.throws(() =>
+			parseHostRuntimeDefinition(
+				{ ...definition, runtime: { ...definition.runtime, allowedDirectories: invalid } },
+				[],
+			),
+		);
+	}
+});
+
+test("managed directories allow native file access and shell paths without granting neighboring paths", async (context) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-managed-permissions-"));
+	context.after(() => rm(directory, { recursive: true, force: true }));
+	const userRoot = join(directory, "users", "current");
+	const workspace = join(userRoot, "workspaces", "assistant");
+	const allowedDirectories = [join(userRoot, ".agents"), join(userRoot, "plugins")];
+	await Promise.all([workspace, ...allowedDirectories].map((path) => mkdir(path, { recursive: true })));
+	const definition = parseHostRuntimeDefinition(
+		{
+			assistantId: "helper",
+			assistantRevision: "1",
+			runtime: {
+				systemPrompt: "",
+				toolIds: ["read", "write", "edit", "bash"],
+				skills: [],
+				allowedDirectories,
+				permissions: { "*": "allow", external_directory: "ask", bash: "ask" },
+			},
+		},
+		["read", "write", "edit", "bash"],
+	);
+	const factory = createAgentFactory({ PI_DATA_DIR: directory });
+	context.after(() => factory.mcp.close());
+	const jobs = new BackgroundJobs();
+	context.after(() => jobs.close());
+	const requested: Record<string, unknown>[] = [];
+	const agent = factory.create(
+		"faux",
+		"managed-permissions",
+		hydrateHostRuntime(definition, new Map([[definition.assistantId, definition]])),
+		undefined,
+		[],
+		() => {},
+		async (request) => {
+			requested.push(request.metadata ?? {});
+			throw new Error(`denied:${request.metadata?.permission}`);
+		},
+		undefined,
+		undefined,
+		{ directory: workspace, jobs },
+	);
+	const tools = new Map(agent.state.tools.map((tool) => [tool.name, tool]));
+	const read = tools.get("read")!;
+	const write = tools.get("write")!;
+	const edit = tools.get("edit")!;
+	const shell = tools.get("bash")!;
+	for (const allowed of allowedDirectories) {
+		const path = join(allowed, "nested", "reference.txt");
+		await write.execute("write", { path, content: "before", artifactRole: "temporary" });
+		await edit.execute("edit", { path, edits: [{ oldText: "before", newText: "after" }], artifactRole: "temporary" });
+		assert.match(JSON.stringify(await read.execute("read", { path })), /after/);
+		assert.equal(requested.length, 0);
+		const command = `${process.platform === "win32" ? "Get-Item" : "ls"} "${path}"`;
+		await assert.rejects(shell.execute("shell", { command, workdir: allowed }), /denied:bash/);
+		assert.deepEqual(
+			requested.map((request) => request.permission),
+			["bash"],
+		);
+		requested.length = 0;
+	}
+	for (const path of [
+		join(userRoot, "state", "secret.txt"),
+		join(userRoot, "plugins-other", "secret.txt"),
+		join(directory, "users", "other", "plugins", "secret.txt"),
+		join(allowedDirectories[0], "..", "state", "secret.txt"),
+	]) {
+		await assert.rejects(read.execute("outside", { path }), /denied:external_directory/);
+		assert.equal(requested.at(-1)?.path, path);
+	}
+	requested.length = 0;
+	const outside = join(userRoot, "state");
+	const command = `ls "${allowedDirectories[0]}"; ls "${outside}"`;
+	await assert.rejects(shell.execute("mixed", { command }), /denied:external_directory/);
+	assert.deepEqual(requested[0].paths, [outside]);
+	requested.length = 0;
+	const risky = `${process.platform === "win32" ? "Remove-Item" : "rm"} "${allowedDirectories[0]}"`;
+	await assert.rejects(shell.execute("risky", { command: risky }), /denied:bash/);
+	assert.equal(typeof requested[0].risk, "string");
 });
 
 test("read, edit, write and grep expose optional user-visible activity descriptions", () => {

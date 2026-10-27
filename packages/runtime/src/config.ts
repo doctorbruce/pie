@@ -87,6 +87,12 @@ function parseAgentRuntimeConfig(
 	});
 	if (new Set(skills.map((skill) => skill.id)).size !== skills.length) throw new SkillConfigError("绑定 ID 不可重复");
 	const language = input.language === undefined ? undefined : text(input.language, "语言", 32);
+	let allowedDirectories: string[] | undefined;
+	if (input.allowedDirectories !== undefined) {
+		if (!Array.isArray(input.allowedDirectories) || input.allowedDirectories.length > 128)
+			throw new SkillConfigError("allowedDirectories 需要数组，最多 128 项");
+		allowedDirectories = input.allowedDirectories.map((path) => absolutePath(path, "授权目录"));
+	}
 	let compaction: AgentRuntimeConfig["compaction"];
 	if (input.compaction !== undefined) {
 		const threshold = object(input.compaction).thresholdTokens;
@@ -102,6 +108,7 @@ function parseAgentRuntimeConfig(
 		...(language ? { language } : {}),
 		toolIds,
 		skills,
+		...(allowedDirectories !== undefined ? { allowedDirectories } : {}),
 		permissions: parsePermissionPolicy(input.permissions),
 		...(input.mcp !== undefined ? { mcp: parseMcpServers(input.mcp) } : {}),
 		...(compaction !== undefined ? { compaction } : {}),
@@ -157,6 +164,9 @@ export function hydrateHostRuntime(
 					language: target.runtime.language,
 					toolIds: structuredClone(target.runtime.toolIds),
 					skills: structuredClone(target.runtime.skills),
+					...(target.runtime.allowedDirectories
+						? { allowedDirectories: structuredClone(target.runtime.allowedDirectories) }
+						: {}),
 					permissions: structuredClone(target.runtime.permissions),
 					...(target.runtime.mcp ? { mcp: structuredClone(target.runtime.mcp) } : {}),
 					...(target.runtime.compaction ? { compaction: structuredClone(target.runtime.compaction) } : {}),

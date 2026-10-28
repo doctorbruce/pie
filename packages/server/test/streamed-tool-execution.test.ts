@@ -23,7 +23,7 @@ async function until<Value>(read: () => Value | undefined): Promise<Value> {
 	throw new Error("Timed out waiting for streamed tool execution");
 }
 
-async function start(context: TestContext, rejectCheckpoint = false) {
+async function start(context: TestContext, rejectCheckpoint = false, ignoreAbort = false) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-streamed-tools-"));
 	const local = openStore({ PI_DATA_DIR: directory, PI_TURN_RECOVERY: "manual" });
 	const store = createSqliteRuntimeStore(local);
@@ -59,7 +59,7 @@ async function start(context: TestContext, rejectCheckpoint = false) {
 				agent.streamFunction = (_model, _context, options) => {
 					requests++;
 					if (requests === 1) {
-						options?.signal?.addEventListener("abort", () => finish("aborted"), { once: true });
+						if (!ignoreAbort) options?.signal?.addEventListener("abort", () => finish("aborted"), { once: true });
 						return stream;
 					}
 					const next = createAssistantMessageEventStream();
@@ -174,3 +174,59 @@ test(
 		assert.equal(host.requests, 1);
 	},
 );
+
+test(
+	"one cancellation settles SQLite and external jobs while the provider remains open",
+	{ timeout: 10000 },
+	async (context) => {
+		const host = await start(context, false, true);
+		const reference = await until(() => host.submitted);
+		const startedAt = performance.now();
+		await host.runtime.cancelTurn(host.session.id, { turnId: reference.turnId });
+		const completed = await Promise.race([
+			host.runtime.waitForTurn(host.session.id),
+			delay(500).then(() => undefined),
+		]);
+		assert(completed, "The provider must not hold up cancellation settlement");
+		assert.equal(completed.turn?.status, "cancelled");
+		assert.equal(host.local.readSession(host.session.id)?.turn?.status, "cancelled");
+		assert.equal((await host.jobs.executor.get(reference))?.status, "cancelled");
+		assert.equal(host.requests, 1);
+		context.diagnostic(`Cancellation and durable settlement took ${(performance.now() - startedAt).toFixed(1)} ms`);
+		await host.runtime.submitTurn(host.session.id, { text: "next" });
+		assert.equal((await host.runtime.waitForTurn(host.session.id)).turn?.status, "completed");
+		const snapshot = await host.runtime.getSession(host.session.id);
+		host.finish();
+		await delay(10);
+		assert.deepEqual(await host.runtime.getSession(host.session.id), snapshot);
+	},
+);
+
+test("a late external submission cannot change the next turn or its history", { timeout: 10000 }, async (context) => {
+	const host = await start(context, false, true);
+	let entered = false;
+	let release!: () => void;
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const submit = host.jobs.executor.submit;
+	host.jobs.executor.submit = async (...args) => {
+		entered = true;
+		await blocked;
+		await submit(...args);
+	};
+	try {
+		await until(() => entered || undefined);
+		const turnId = host.local.readSession(host.session.id)!.turn!.id;
+		await host.runtime.cancelTurn(host.session.id, { turnId });
+		assert.equal((await host.runtime.waitForTurn(host.session.id)).turn?.status, "cancelled");
+		await host.runtime.submitTurn(host.session.id, { text: "next" });
+		assert.equal((await host.runtime.waitForTurn(host.session.id)).turn?.status, "completed");
+		const snapshot = await host.runtime.getSession(host.session.id);
+		release();
+		await delay(20);
+		assert.deepEqual(await host.runtime.getSession(host.session.id), snapshot);
+	} finally {
+		release();
+	}
+});

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Interrupt model, tool, and hook waits on cancellation even when their promises ignore the abort signal. Preserve partial output, close started tool calls with interrupted results, and ignore late progress and completions before allowing another run.
+
 ### Added
 
 - Start complete, strictly parsed tool calls while the current model response is still streaming. Preserve batch ordering and wait for tool results before the next request; incomplete calls remain deferred and are not executed after a length cutoff.

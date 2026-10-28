@@ -666,7 +666,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		if (session.mcpAbort)
 			signal = signal ? AbortSignal.any([signal, session.mcpAbort.signal]) : session.mcpAbort.signal;
 		signal?.throwIfAborted();
+		const pendingAssistant = checkpoint.pendingAssistant;
+		await session.writePromise;
 		const tree = await store.readTurnPath(session.id, checkpoint.inputEntryId);
+		signal?.throwIfAborted();
 		const call =
 			tree.nodes
 				.flatMap((node) =>
@@ -674,8 +677,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 						? node.message.content.filter((part) => part.type === "toolCall" && part.id === toolCallId)
 						: [],
 				)
-				.at(-1) ??
-			checkpoint.pendingAssistant?.content.find((part) => part.type === "toolCall" && part.id === toolCallId);
+				.at(-1) ?? pendingAssistant?.content.find((part) => part.type === "toolCall" && part.id === toolCallId);
 		if (!call || call.type !== "toolCall") throw new Error("外部任务缺少已提交的工具调用");
 		const previous = checkpoint.jobs?.find((job) => job.toolCallId === toolCallId);
 		const reference = previous ?? {
@@ -697,6 +699,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					{ ...structuredClone(reference), arguments: structuredClone(call.arguments) },
 					signal,
 				);
+				signal?.throwIfAborted();
 			}
 			if (!previous)
 				await persist(session, false, undefined, [executionRecord(session, toolCallId, call.name, "submitted")]);
@@ -708,6 +711,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await delay(pollIntervalMs, undefined, { signal });
 			}
 		} catch (error) {
+			if (session.turn?.id !== reference.turnId || session.turn.status !== "running") throw error;
 			session.jobInterruption = error instanceof Error ? error.message : String(error);
 			session.agent?.abort();
 			if (!storageFailed)
@@ -722,12 +726,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		const turn = session.turn;
 		if (!checkpoint?.jobs?.length || !turn) return [];
 		const tree = await store.readTurnPath(session.id, checkpoint.inputEntryId);
-		return pendingDurableJobs(
-			session.id,
-			turn.id,
-			checkpoint.jobs,
-			tree.nodes.map((node) => node.message),
-		);
+		return pendingDurableJobs(session.id, turn.id, checkpoint.jobs, [
+			...tree.nodes.map((node) => node.message),
+			...(checkpoint.pendingAssistant ? [checkpoint.pendingAssistant] : []),
+		]);
 	}
 	async function cancelJobs(session: Session) {
 		const pending = await pendingJobs(session);
@@ -744,6 +746,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		await loadHistory(session);
 		if (session.jobInterruption) session.agent = undefined;
 		const messages = session.agent?.state.messages ?? session.messages;
+		if (session.turnCheckpoint?.pendingAssistant) {
+			messages.push({ ...structuredClone(session.turnCheckpoint.pendingAssistant), stopReason: "aborted" });
+			delete session.turnCheckpoint.pendingAssistant;
+		}
 		for (const reference of pending)
 			messages.push({
 				role: "toolResult",

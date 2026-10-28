@@ -25,6 +25,50 @@ import type {
 
 export type AgentEventSink = (event: AgentEvent) => Promise<void> | void;
 
+// Stop waiting even when a provider, tool, or hook ignores its AbortSignal.
+async function waitWithSignal<T>(operation: () => T | PromiseLike<T>, signal?: AbortSignal): Promise<T> {
+	signal?.throwIfAborted();
+	if (!signal) return await operation();
+	let onAbort!: () => void;
+	const cancelled = new Promise<never>((_, reject) => {
+		onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
+	try {
+		const result = await Promise.race([
+			Promise.resolve().then(() => {
+				signal.throwIfAborted();
+				return operation();
+			}),
+			cancelled,
+		]);
+		signal.throwIfAborted();
+		return result;
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
+async function* eventsWithSignal<T>(source: AsyncIterable<T>, signal?: AbortSignal): AsyncGenerator<T> {
+	const iterator = source[Symbol.asyncIterator]();
+	try {
+		while (true) {
+			const next = await waitWithSignal(() => iterator.next(), signal);
+			if (next.done) return;
+			yield next.value;
+		}
+	} finally {
+		const closing = iterator.return?.();
+		// A stuck next() can also stall return(); cancellation must not await it.
+		if (closing) {
+			await waitWithSignal(() => closing, signal).catch((error: unknown) => {
+				if (!signal?.aborted) throw error;
+				void closing.catch(() => {});
+			});
+		}
+	}
+}
+
 /**
  * Start an agent loop with a new prompt message.
  * The prompt is added to the context and events are emitted for it.
@@ -166,7 +210,7 @@ async function runLoop(
 	let config = initialConfig;
 	let lastCompletedTurn: PrepareNextTurnContext | undefined;
 	// Check for steering messages at start (user may have typed while waiting)
-	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
+	let pendingMessages: AgentMessage[] = (await waitWithSignal(() => config.getSteeringMessages?.(), signal)) || [];
 
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
@@ -175,7 +219,8 @@ async function runLoop(
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			if (lastCompletedTurn) {
-				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
+				const completedTurn = lastCompletedTurn;
+				const nextTurnSnapshot = await waitWithSignal(() => config.prepareNextTurn?.(completedTurn), signal);
 				if (nextTurnSnapshot) {
 					currentContext = nextTurnSnapshot.context ?? currentContext;
 					config = {
@@ -193,7 +238,7 @@ async function runLoop(
 				// queued while it ran. Only poll again if the earlier poll returned nothing;
 				// otherwise one-at-a-time mode would deliver two messages in this turn.
 				if (pendingMessages.length === 0) {
-					pendingMessages = (await config.getSteeringMessages?.()) || [];
+					pendingMessages = (await waitWithSignal(() => config.getSteeringMessages?.(), signal)) || [];
 				}
 				await emit({ type: "turn_start" });
 				lastCompletedTurn = undefined;
@@ -267,7 +312,7 @@ async function runLoop(
 				throw streamed.failure ?? error;
 			}
 			await emit({ type: "turn_end", message, toolResults });
-			if (message.stopReason === "error" || message.stopReason === "aborted") {
+			if (signal?.aborted || message.stopReason === "error" || message.stopReason === "aborted") {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -279,16 +324,17 @@ async function runLoop(
 				newMessages,
 			};
 
-			if (await config.shouldStopAfterTurn?.(lastCompletedTurn)) {
+			const completedTurn = lastCompletedTurn;
+			if (await waitWithSignal(() => config.shouldStopAfterTurn?.(completedTurn), signal)) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
 
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			pendingMessages = (await waitWithSignal(() => config.getSteeringMessages?.(), signal)) || [];
 		}
 
 		// Agent would stop here. Check for follow-up messages.
-		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
+		const followUpMessages = (await waitWithSignal(() => config.getFollowUpMessages?.(), signal)) || [];
 		if (followUpMessages.length > 0) {
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
@@ -326,11 +372,11 @@ async function streamAssistantResponse(
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
 	if (config.transformContext) {
-		messages = await config.transformContext(messages, signal);
+		messages = await waitWithSignal(() => config.transformContext!(messages, signal), signal);
 	}
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await config.convertToLlm(messages);
+	const llmMessages = await waitWithSignal(() => config.convertToLlm(messages), signal);
 
 	// Build LLM context
 	const llmContext: Context = {
@@ -341,24 +387,30 @@ async function streamAssistantResponse(
 
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+		(config.getApiKey ? await waitWithSignal(() => config.getApiKey!(config.model.provider), signal) : undefined) ||
+		config.apiKey;
 
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
+	const response = await waitWithSignal(
+		() =>
+			streamFunction(config.model, llmContext, {
+				...config,
+				apiKey: resolvedApiKey,
+				signal,
+			}),
 		signal,
-	});
+	);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
 	const argumentsByIndex = new Map<number, string>();
 	const queued = new Set<string>();
-	const finishResponse = async () => {
-		const finalMessage = await response.result();
+	const finishResponse = async (cancelledMessage?: AssistantMessage) => {
+		const finalMessage = cancelledMessage ?? (await waitWithSignal(() => response.result(), signal));
 		streamed.active = false;
 		if (finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted")
 			streamed.controller.abort(new Error(finalMessage.errorMessage || "Model response did not complete"));
 		for (const [callId, call] of streamed.confirmed) {
+			if (cancelledMessage && !streamed.started.has(callId)) continue;
 			const finalCalls = finalMessage.content.filter(
 				(block): block is AgentToolCall => block.type === "toolCall" && block.id === callId,
 			);
@@ -378,111 +430,122 @@ async function streamAssistantResponse(
 		return finalMessage;
 	};
 
-	for await (const event of response) {
-		if (event.type === "toolcall_delta")
-			argumentsByIndex.set(event.contentIndex, (argumentsByIndex.get(event.contentIndex) ?? "") + event.delta);
-		const completed = event.type === "toolcall_end" ? structuredClone(event) : undefined;
-		switch (event.type) {
-			case "start":
-				partialMessage = event.partial;
-				context.messages.push(partialMessage);
-				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
-				break;
-
-			case "text_start":
-			case "text_delta":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_delta":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_delta":
-			case "toolcall_end":
-				if (partialMessage) {
+	try {
+		for await (const event of eventsWithSignal(response, signal)) {
+			if (event.type === "toolcall_delta")
+				argumentsByIndex.set(event.contentIndex, (argumentsByIndex.get(event.contentIndex) ?? "") + event.delta);
+			const completed = event.type === "toolcall_end" ? structuredClone(event) : undefined;
+			switch (event.type) {
+				case "start":
 					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
-				}
-				break;
+					context.messages.push(partialMessage);
+					addedPartial = true;
+					await emit({ type: "message_start", message: { ...partialMessage } });
+					break;
 
-			case "done":
-			case "error":
-				return finishResponse();
-		}
-		if (!completed || ["length", "error", "aborted"].includes(completed.partial.stopReason)) continue;
-		let args: unknown;
-		try {
-			args = JSON.parse(argumentsByIndex.get(completed.contentIndex) ?? "");
-		} catch {
-			continue;
-		}
-		if (!args || typeof args !== "object" || Array.isArray(args)) continue;
-		const call: AgentToolCall = { ...completed.toolCall, arguments: args as Record<string, unknown> };
-		const previous = streamed.confirmed.get(call.id);
-		if (previous && JSON.stringify(previous) !== JSON.stringify(call))
-			throw new Error("Provider reused a completed tool call ID");
-		streamed.confirmed.set(call.id, call);
-		for (const block of completed.partial.content) {
-			if (block.type !== "toolCall") continue;
-			const confirmed = streamed.confirmed.get(block.id);
-			if (!confirmed) break;
-			if (queued.has(block.id)) continue;
-			queued.add(block.id);
-			const assistantMessage = structuredClone({
-				...completed.partial,
-				content: completed.partial.content
-					.slice(0, completed.partial.content.indexOf(block) + 1)
-					.map((part) => (part.type === "toolCall" ? streamed.confirmed.get(part.id)! : part)),
-				stopReason: "toolUse" as const,
-			});
-			const toolCall = assistantMessage.content.find(
-				(part): part is AgentToolCall => part.type === "toolCall" && part.id === confirmed.id,
-			)!;
-			streamed.tail = streamed.tail.then(async () => {
-				if (!streamed.active || signal?.aborted) return;
-				const outcome = (async () => {
-					await emit({
-						type: "tool_execution_start",
-						toolCallId: toolCall.id,
-						toolName: toolCall.name,
-						args: toolCall.arguments,
-						assistantMessage,
-					});
-					const toolContext = { ...context, messages: [...context.messages.slice(0, -1), assistantMessage] };
-					const preparation = await prepareToolCall(toolContext, assistantMessage, toolCall, config, signal);
-					let finalized: FinalizedToolCallOutcome;
-					if (preparation.kind === "immediate")
-						finalized = { toolCall, result: preparation.result, isError: preparation.isError };
-					else {
-						const executed = await executePreparedToolCall(preparation, signal, emit);
-						finalized = await finalizeExecutedToolCall(
-							toolContext,
-							assistantMessage,
-							preparation,
-							executed,
-							config,
-							signal,
-						);
+				case "text_start":
+				case "text_delta":
+				case "text_end":
+				case "thinking_start":
+				case "thinking_delta":
+				case "thinking_end":
+				case "toolcall_start":
+				case "toolcall_delta":
+				case "toolcall_end":
+					if (partialMessage) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+						await emit({
+							type: "message_update",
+							assistantMessageEvent: event,
+							message: { ...partialMessage },
+						});
 					}
-					await emitToolExecutionEnd(finalized, emit);
-					return finalized;
-				})();
-				streamed.started.set(toolCall.id, outcome);
-				await outcome;
-			});
-			void streamed.tail.catch((error: unknown) => {
-				streamed.failure ??= error;
-				streamed.controller.abort(error);
-			});
-		}
-	}
+					break;
 
-	return finishResponse();
+				case "done":
+				case "error":
+					return await finishResponse();
+			}
+			if (!completed || ["length", "error", "aborted"].includes(completed.partial.stopReason)) continue;
+			let args: unknown;
+			try {
+				args = JSON.parse(argumentsByIndex.get(completed.contentIndex) ?? "");
+			} catch {
+				continue;
+			}
+			if (!args || typeof args !== "object" || Array.isArray(args)) continue;
+			const call: AgentToolCall = { ...completed.toolCall, arguments: args as Record<string, unknown> };
+			const previous = streamed.confirmed.get(call.id);
+			if (previous && JSON.stringify(previous) !== JSON.stringify(call))
+				throw new Error("Provider reused a completed tool call ID");
+			streamed.confirmed.set(call.id, call);
+			for (const block of completed.partial.content) {
+				if (block.type !== "toolCall") continue;
+				const confirmed = streamed.confirmed.get(block.id);
+				if (!confirmed) break;
+				if (queued.has(block.id)) continue;
+				queued.add(block.id);
+				const assistantMessage = structuredClone({
+					...completed.partial,
+					content: completed.partial.content
+						.slice(0, completed.partial.content.indexOf(block) + 1)
+						.map((part) => (part.type === "toolCall" ? streamed.confirmed.get(part.id)! : part)),
+					stopReason: "toolUse" as const,
+				});
+				const toolCall = assistantMessage.content.find(
+					(part): part is AgentToolCall => part.type === "toolCall" && part.id === confirmed.id,
+				)!;
+				streamed.tail = streamed.tail.then(async () => {
+					if (!streamed.active || signal?.aborted) return;
+					const outcome = (async () => {
+						await emit({
+							type: "tool_execution_start",
+							toolCallId: toolCall.id,
+							toolName: toolCall.name,
+							args: toolCall.arguments,
+							assistantMessage,
+						});
+						const toolContext = { ...context, messages: [...context.messages.slice(0, -1), assistantMessage] };
+						const preparation = await prepareToolCall(toolContext, assistantMessage, toolCall, config, signal);
+						let finalized: FinalizedToolCallOutcome;
+						if (preparation.kind === "immediate")
+							finalized = { toolCall, result: preparation.result, isError: preparation.isError };
+						else {
+							const executed = await executePreparedToolCall(preparation, signal, emit);
+							finalized = await finalizeExecutedToolCall(
+								toolContext,
+								assistantMessage,
+								preparation,
+								executed,
+								config,
+								signal,
+							);
+						}
+						await emitToolExecutionEnd(finalized, emit);
+						return finalized;
+					})();
+					streamed.started.set(toolCall.id, outcome);
+					await outcome;
+				});
+				void streamed.tail.catch((error: unknown) => {
+					streamed.failure ??= error;
+					streamed.controller.abort(error);
+				});
+			}
+		}
+
+		return await finishResponse();
+	} catch (error) {
+		if (!signal?.aborted || !partialMessage) throw error;
+		const cancelledMessage = structuredClone(partialMessage);
+		cancelledMessage.content = cancelledMessage.content.filter(
+			(part) => part.type !== "toolCall" || streamed.started.has(part.id),
+		);
+		cancelledMessage.stopReason = "aborted";
+		cancelledMessage.errorMessage = signal.reason instanceof Error ? signal.reason.message : "Operation aborted";
+		return finishResponse(cancelledMessage);
+	}
 }
 
 /**
@@ -784,13 +847,17 @@ async function prepareToolCall(
 		const preparedToolCall = prepareToolCallArguments(tool, toolCall);
 		const validatedArgs = validateToolArguments(tool, preparedToolCall);
 		if (config.beforeToolCall) {
-			const beforeResult = await config.beforeToolCall(
-				{
-					assistantMessage,
-					toolCall,
-					args: validatedArgs,
-					context: currentContext,
-				},
+			const beforeResult = await waitWithSignal(
+				() =>
+					config.beforeToolCall!(
+						{
+							assistantMessage,
+							toolCall,
+							args: validatedArgs,
+							context: currentContext,
+						},
+						signal,
+					),
 				signal,
 			);
 			if (signal?.aborted) {
@@ -843,24 +910,23 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
-		const result = await prepared.tool.execute(
-			prepared.toolCall.id,
-			prepared.args as never,
+		const result = await waitWithSignal(
+			() =>
+				prepared.tool.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
+					if (!acceptingUpdates || signal?.aborted) return;
+					updateEvents.push(
+						Promise.resolve(
+							emit({
+								type: "tool_execution_update",
+								toolCallId: prepared.toolCall.id,
+								toolName: prepared.toolCall.name,
+								args: prepared.toolCall.arguments,
+								partialResult,
+							}),
+						),
+					);
+				}),
 			signal,
-			(partialResult) => {
-				if (!acceptingUpdates) return;
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					),
-				);
-			},
 		);
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
@@ -888,17 +954,21 @@ async function finalizeExecutedToolCall(
 	let result = executed.result;
 	let isError = executed.isError;
 
-	if (config.afterToolCall) {
+	if (config.afterToolCall && !signal?.aborted) {
 		try {
-			const afterResult = await config.afterToolCall(
-				{
-					assistantMessage,
-					toolCall: prepared.toolCall,
-					args: prepared.args,
-					result,
-					isError,
-					context: currentContext,
-				},
+			const afterResult = await waitWithSignal(
+				() =>
+					config.afterToolCall!(
+						{
+							assistantMessage,
+							toolCall: prepared.toolCall,
+							args: prepared.args,
+							result,
+							isError,
+							context: currentContext,
+						},
+						signal,
+					),
 				signal,
 			);
 			if (afterResult) {

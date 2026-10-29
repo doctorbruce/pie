@@ -68,8 +68,9 @@ async function createLocalRuntime(options: {
 	let closePromise: Promise<void> | undefined;
 	function execute<Result>(operation: () => Promise<Result>, mutating: boolean): Promise<Result> {
 		const result = commands.then(() => {
-			if (closing) throw new RuntimeError(503, "运行时正在关闭");
-			if (mutating && !runtime.storageAvailable) throw new RuntimeError(503, "存储不可用，请检查后重启运行时");
+			if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
+			if (mutating && !runtime.storageAvailable)
+				throw new RuntimeError(503, "存储不可用，请检查后重启运行时", "storage_unavailable");
 			return operation();
 		});
 		commands = result.then(
@@ -214,18 +215,19 @@ async function createLocalRuntime(options: {
 		renameSession: (...args: Parameters<PieRuntime["renameSession"]>) =>
 			execute(() => runtime.renameSession(...args), true),
 		cancelTurn: (...args: Parameters<PieRuntime["cancelTurn"]>) => {
-			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭"));
+			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭", "runtime_closing"));
 			return runtime.cancelTurn(...args);
 		},
-		steer: (...args: Parameters<PieRuntime["steer"]>) => execute(() => runtime.steer(...args), true),
+		steer: (...args: Parameters<PieRuntime["steer"]>) => execute(() => runtime.steer(...args), false),
 		replyInteraction: (...args: Parameters<PieRuntime["replyInteraction"]>) =>
 			execute(() => runtime.replyInteraction(...args), true),
-		submitTurn: (...args: Parameters<PieRuntime["submitTurn"]>) => execute(() => runtime.submitTurn(...args), true),
-		resumeTurn: (...args: Parameters<PieRuntime["resumeTurn"]>) => execute(() => runtime.resumeTurn(...args), true),
+		submitTurn: (...args: Parameters<PieRuntime["submitTurn"]>) => execute(() => runtime.submitTurn(...args), false),
+		resumeTurn: (...args: Parameters<PieRuntime["resumeTurn"]>) => execute(() => runtime.resumeTurn(...args), false),
 		deleteSession: (...args: Parameters<PieRuntime["deleteSession"]>) =>
 			execute(() => runtime.deleteSession(...args), true),
 		subscribe: runtime.subscribe,
 		subscribeAll: runtime.subscribeAll,
+		subscribeExecutions: runtime.subscribeExecutions,
 		waitForTurn: runtime.waitForTurn,
 		close() {
 			if (closePromise) return closePromise;

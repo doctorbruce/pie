@@ -7,7 +7,12 @@ import { type CreateSessionInput, type PieRuntime, RuntimeError, type TurnInput 
 import { ModelSettingsError } from "@pie/runtime/capabilities";
 import { SkillConfigError } from "@pie/runtime/config";
 import { McpConfigError } from "@pie/runtime/mcp";
-import type { GlobalSessionEvent, HostRuntimeDefinition, SessionEvent } from "@pie/runtime/protocol";
+import type {
+	ExecutionStreamEvent,
+	GlobalSessionEvent,
+	HostRuntimeDefinition,
+	SessionEvent,
+} from "@pie/runtime/protocol";
 import { historyMessageId } from "@pie/runtime/session-tree";
 import { ToolConfigError } from "@pie/runtime/tools";
 
@@ -110,21 +115,29 @@ function projectGlobalPacket(packet: GlobalSessionEvent) {
 	return base;
 }
 
-async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?: string) {
+async function streamEvents(
+	runtime: PieRuntime,
+	res: ServerResponse,
+	sessionId?: string,
+	executionSessionIds?: string[],
+) {
 	let initialized = false;
-	const pending: (GlobalSessionEvent | SessionEvent)[] = [];
-	const write = (packet: GlobalSessionEvent | SessionEvent) => {
+	const pending: (ExecutionStreamEvent | SessionEvent)[] = [];
+	const write = (packet: ExecutionStreamEvent | SessionEvent) => {
 		if (!initialized) {
 			pending.push(packet);
 			return;
 		}
-		const value = sessionId ? packet : projectGlobalPacket(packet as GlobalSessionEvent);
+		const value =
+			sessionId || packet.type === "execution.baseline" ? packet : projectGlobalPacket(packet as GlobalSessionEvent);
 		if (res.writableLength > 1024 * 1024) res.destroy();
 		else res.write(`data: ${JSON.stringify(value)}\n\n`);
 	};
 	const unsubscribe = sessionId
 		? await runtime.subscribe(sessionId, write, () => res.end())
-		: runtime.subscribeAll(write, () => res.end());
+		: executionSessionIds
+			? await runtime.subscribeExecutions(executionSessionIds, write, () => res.end())
+			: runtime.subscribeAll(write, () => res.end());
 	if (res.destroyed) {
 		unsubscribe();
 		return;
@@ -148,7 +161,11 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 			);
 		initialized = true;
 		for (const packet of pending)
-			if (!snapshot || ("revision" in packet ? packet.revision : packet.snapshot.revision) > snapshot.revision)
+			if (
+				!snapshot ||
+				(packet.type !== "execution.baseline" &&
+					("revision" in packet ? packet.revision : packet.snapshot.revision) > snapshot.revision)
+			)
 				write(packet);
 		pending.length = 0;
 		heartbeat = setInterval(() => res.write(": heartbeat\n\n"), 15000);
@@ -170,7 +187,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			res.end(JSON.stringify(value));
 		};
 		void (async () => {
-			if (closing) throw new RuntimeError(503, "服务正在关闭");
+			if (closing) throw new RuntimeError(503, "服务正在关闭", "runtime_closing");
 			const origin = req.headers.origin;
 			if (!/^127\.0\.0\.1:\d+$/.test(req.headers.host ?? "")) throw new RuntimeError(403, "只接受本地地址");
 			if (origin && origin !== (env.PI_WEB_ORIGIN ?? "http://127.0.0.1:5174"))
@@ -180,8 +197,12 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			const runtime = await ready;
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
 			const path = url.pathname;
-			if (!runtime.storageAvailable && req.method !== "GET")
-				throw new RuntimeError(503, "存储不可用，请检查后重启服务");
+			if (
+				!runtime.storageAvailable &&
+				req.method !== "GET" &&
+				!/^\/sessions\/[^/]+\/(turns|steer|resume|cancel)$/.test(path)
+			)
+				throw new RuntimeError(503, "存储不可用，请检查后重启服务", "storage_unavailable");
 			if (path === "/health" && req.method === "GET") return json(200, { healthy: true, ...runtime.info });
 			if (path === "/tools" && req.method === "GET") return json(200, { tools: runtime.tools });
 			if (path === "/plugins" && req.method === "GET") return json(200, { plugins: await runtime.listPlugins() });
@@ -207,7 +228,10 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				});
 				return json(200, { sessions });
 			}
-			if (path === "/events" && req.method === "GET") return streamEvents(runtime, res);
+			if (path === "/events" && req.method === "GET") {
+				const ids = url.searchParams.getAll("sessionId");
+				return streamEvents(runtime, res, undefined, ids.length ? ids : undefined);
+			}
 			if (path === "/mcp" && req.method === "GET") return json(200, factory.mcp.status());
 			if (path === "/host-runtimes" && req.method === "PUT") {
 				const body = await readJson(req, HOST_RUNTIME_REQUEST_LIMIT);
@@ -273,7 +297,10 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				return json(200, await runtime.setModelOverride(id, await readJson(req)));
 			if (req.method === "PATCH" && !action) return json(200, await runtime.renameSession(id, await readJson(req)));
 			if (req.method === "POST" && action === "cancel")
-				return json(202, await runtime.cancelTurn(id, (await readJson(req)) as { turnId: string }));
+				return json(
+					202,
+					await runtime.cancelTurn(id, (await readJson(req)) as { turnId: string; bestEffort?: boolean }),
+				);
 			if (req.method === "POST" && action === "resume")
 				return json(202, await runtime.resumeTurn(id, (await readJson(req)) as { turnId: string }));
 			if (req.method === "POST" && action === "steer")
@@ -303,7 +330,10 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 							error instanceof McpConfigError
 						? 400
 						: 500,
-				{ error: error instanceof Error ? error.message : "服务错误" },
+				{
+					error: error instanceof Error ? error.message : "服务错误",
+					...(error instanceof RuntimeError && error.reason ? { reason: error.reason } : {}),
+				},
 			);
 		});
 	});

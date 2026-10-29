@@ -15,10 +15,13 @@ import type {
 	Assistant,
 	CancellationReceipt,
 	ContextCompaction,
+	ControlRejectionReason,
+	ExecutionStreamEvent,
 	GlobalSessionEvent,
 	HostRuntimeDefinition,
 	ImagePart,
 	InteractionRequest,
+	SessionAction,
 	SessionActions,
 	SessionEvent,
 	SessionExecution,
@@ -53,9 +56,11 @@ import { recoverInterruptedTurn } from "./turn-recovery.ts";
 
 export class RuntimeError extends Error {
 	status: number;
-	constructor(status: number, message: string) {
+	reason?: ControlRejectionReason;
+	constructor(status: number, message: string, reason?: ControlRejectionReason) {
 		super(message);
 		this.status = status;
+		this.reason = reason ?? (status === 400 ? "invalid_request" : undefined);
 	}
 }
 
@@ -246,6 +251,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	type Session = SavedSession & {
 		historyLoaded?: boolean;
 		waiters?: number;
+		executionObservers?: number;
 		mcpAbort?: AbortController;
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
@@ -257,6 +263,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		writePromise?: Promise<void>;
 		publishPromise?: Promise<void>;
 		jobInterruption?: string;
+		projection?: { execution: SessionExecution; turn?: Turn; revision: number; leafId: string | null };
 	};
 	type PendingInteraction = {
 		request: InteractionRequest;
@@ -269,6 +276,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 		onAbort?: () => void;
 	};
 	const sessions = new Map<string, Session>();
+	// Retain only a watermark after eviction, never Agent state or history.
+	const revisionFloors = new Map<string, number>();
 	const waitingReads = new Set<Promise<SessionSnapshot>>();
 	let commandActive = false;
 	let queuedCommands = 0;
@@ -296,6 +305,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		return {
 			...turnReceipt(session, { accepted, started: false, ...(settled === undefined ? {} : { settled }) }),
 			cancellationRequested: accepted,
+			durable: accepted,
 		};
 	}
 	function actionAvailability(session: Session): SessionActions {
@@ -362,6 +372,30 @@ async function initializeRuntime(options: RuntimeOptions) {
 					: unavailable(status === "interrupted" ? "recovery_blocked" : turnReason),
 		};
 	}
+	function assertAction(
+		session: Session,
+		action: SessionAction,
+		turnId?: string,
+		exceptions: readonly ActionUnavailableReason[] = [],
+	) {
+		const availability = actionAvailability(session)[action];
+		if (!availability.available && availability.reason && !exceptions.includes(availability.reason)) {
+			const reason = availability.reason;
+			const messages: Partial<Record<ActionUnavailableReason, string>> = {
+				storage_unavailable: "存储不可用，请检查后重启运行时",
+				turn_running: "当前会话正在执行",
+				turn_interrupted: "请先恢复或取消中断的 Turn",
+				subagent_managed_by_parent: "子会话由父会话通过 task 管理，请取消父会话",
+			};
+			throw new RuntimeError(
+				reason === "storage_unavailable" || reason === "runtime_closing" ? 503 : 409,
+				messages[reason] ?? `当前 Turn 不接受 ${action}：${reason}`,
+				reason,
+			);
+		}
+		if (action !== "submit" && (!session.turn || turnId !== session.turn.id))
+			throw new RuntimeError(409, "turnId 不匹配", "turn_mismatch");
+	}
 	function releaseSession(session: Session) {
 		if (
 			options.sessionRetention !== "release-after-turn" ||
@@ -381,7 +415,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 		session.messages = [];
 		session.transferBase = undefined;
 		session.historyLoaded = false;
-		if (!commandActive && queuedCommands === 0 && session.clients.size === 0 && sessions.get(session.id) === session)
+		if (
+			!commandActive &&
+			queuedCommands === 0 &&
+			session.clients.size === 0 &&
+			!session.executionObservers &&
+			sessions.get(session.id) === session
+		)
 			sessions.delete(session.id);
 	}
 	async function loadHistory(session: Session) {
@@ -433,6 +473,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	const globalClients = new Set<RuntimeSubscriber<GlobalSessionEvent>>();
 	let storageFailed = false;
+	function assertStorageAvailable() {
+		if (storageFailed) throw new RuntimeError(503, "存储不可用，请检查后重启运行时", "storage_unavailable");
+	}
+	let storageFailurePublished = false;
 	let closing = false;
 	let closePromise: Promise<void> | undefined;
 	function summary(session: SessionSummary): SessionSummary {
@@ -541,8 +585,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 		toolExecutions: readonly ToolExecutionRecord[] = [],
 	) {
 		const pending = (session.writePromise ?? Promise.resolve()).then(async () => {
-			if (storageFailed) throw new Error("会话写入屏障已失败，请重启运行时后恢复");
+			assertStorageAvailable();
 			await loadHistory(session);
+			assertStorageAvailable();
 			const messages = session.jobInterruption
 				? session.messages
 				: (session.agent?.state.messages ?? session.messages);
@@ -568,7 +613,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				);
 			} catch (error) {
 				storageFailed = true;
-				throw error;
+				throw new RuntimeError(503, error instanceof Error ? error.message : String(error), "storage_unavailable");
 			}
 			session.messages = [...messages];
 			session.tree = { nodes: [], leafId: tree.leafId };
@@ -827,7 +872,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	async function cancelJobs(session: Session) {
 		const pending = await pendingJobs(session);
-		if (pending.length && !options.jobs) throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消");
+		if (pending.length && !options.jobs)
+			throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消", "external_executor_unavailable");
 		if (session.turn?.status === "running") {
 			session.jobInterruption = "外部任务取消已请求";
 			session.agent?.abort();
@@ -873,7 +919,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 		if (session.turnCheckpoint?.jobs?.length) session.jobInterruption = "外部任务取消已请求";
 		const cancellation = Promise.all([persist(session), pendingJobs(session), publish(session, "snapshot")]).then(
 			async ([, pending]) => {
-				if (pending.length && !options.jobs) throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消");
+				if (pending.length && !options.jobs)
+					throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消", "external_executor_unavailable");
 				for (const reference of pending) await options.jobs!.cancel(reference);
 				await rejectSessionInteractions(session.id, new Error("会话已取消"));
 				await persist(session);
@@ -1085,14 +1132,15 @@ async function initializeRuntime(options: RuntimeOptions) {
 		};
 	}
 	function sessionState(session: Session): SessionState {
+		const projection = publishedProjection(session);
 		return structuredClone({
 			instanceId,
-			execution: executionState(session),
+			execution: projection.execution,
 			...summary(session),
 			assistant: session.assistant,
-			revision: session.revision,
+			revision: projection.revision,
 			streamingMessage: session.agent?.state.streamingMessage,
-			turn: session.turn,
+			turn: projection.turn,
 			runtime: session.runtime,
 			activities: session.activities ?? [],
 			compaction: session.compaction,
@@ -1101,11 +1149,23 @@ async function initializeRuntime(options: RuntimeOptions) {
 				.map((interaction) => interaction.request),
 		});
 	}
+	function publishedProjection(session: Session) {
+		session.projection ??= structuredClone({
+			execution: executionState(session),
+			turn: session.turn,
+			revision: session.revision,
+			leafId: session.tree?.leafId ?? null,
+		});
+		revisionFloors.set(session.id, session.projection.revision);
+		return session.projection;
+	}
 	async function snapshot(session: Session, options?: { limit: number }): Promise<SessionSnapshot> {
 		const state = sessionState(session);
-		const leafId = session.tree?.leafId ?? null;
+		const leafId = publishedProjection(session).leafId;
 		const page = options ? await store.readHistory(session.id, { ...options, leafId }) : undefined;
-		const messages = page ? page.entries.map((entry) => entry.message) : await fullHistory(session);
+		const messages = page
+			? page.entries.map((entry) => entry.message)
+			: (await store.readPath(session.id, leafId)).nodes.map((node) => node.message);
 		return structuredClone({
 			...state,
 			messages: displayAgentMessages(messages),
@@ -1133,24 +1193,25 @@ async function initializeRuntime(options: RuntimeOptions) {
 	) {
 		const pending = (session.publishPromise ?? Promise.resolve()).then(async () => {
 			session.revision++;
-			const execution = executionState(session);
+			session.projection = undefined;
+			const { execution, turn } = publishedProjection(session);
 			const packet: GlobalSessionEvent = {
 				type,
 				sessionId: session.id,
-				turnId: session.turn?.id,
+				turnId: turn?.id,
 				event,
 				activity,
 				interaction,
-				snapshot: { instanceId, revision: session.revision, turn: session.turn, execution },
+				snapshot: { instanceId, revision: session.revision, turn, execution },
 			};
 			if (session.clients.size)
 				notifySubscribers(session.clients, {
 					type,
 					sessionId: session.id,
-					turnId: session.turn?.id,
+					turnId: turn?.id,
 					instanceId,
 					revision: session.revision,
-					turn: session.turn,
+					turn,
 					activity,
 					interaction,
 					execution,
@@ -1161,6 +1222,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 		});
 		session.publishPromise = pending.catch(() => {});
 		await pending;
+	}
+	async function publishStorageFailure() {
+		if (!storageFailed || storageFailurePublished) return;
+		storageFailurePublished = true;
+		await Promise.all([...sessions.values()].map((session) => publish(session, "snapshot")));
 	}
 
 	async function runSubagent(
@@ -1319,8 +1385,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		if (session.cancelRequested) mcpAbort.abort();
 		let releaseMcp: (() => void) | undefined;
 		try {
+			assertStorageAvailable();
 			releaseMcp = await agent.prepareMcp(mcpAbort.signal);
 			do {
+				assertStorageAvailable();
 				mcpAbort.signal.throwIfAborted();
 				await agent.continue();
 			} while (agent.hasQueuedMessages() && !session.cancelRequested && !session.jobInterruption);
@@ -1354,6 +1422,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				turn.status = "failed";
 				turn.error = "会话写入失败，请检查存储后重启服务。";
 			}
+			// Other commands may hold uncommitted state; their finally publishes after rollback.
+			if (!commandActive) await publishStorageFailure();
 			// Agent's agent_end listeners have settled; only now may another submit be admitted.
 			try {
 				if (session.jobInterruption) await publish(session, "snapshot", { type: "history.reset" });
@@ -1386,11 +1456,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 		queuedCommands++;
 		const result = commands.then(async () => {
 			try {
-				if (closing) throw new RuntimeError(503, "运行时正在关闭");
-				if (mutating && storageFailed) throw new RuntimeError(503, "存储不可用，请检查后重启运行时");
+				if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
+				if (mutating) assertStorageAvailable();
 				commandActive = true;
 				return await operation();
 			} finally {
+				await publishStorageFailure();
 				commandActive = false;
 				queuedCommands--;
 				if (options.sessionRetention === "release-after-turn" && queuedCommands === 0)
@@ -1412,6 +1483,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 			throw new RuntimeError(409, "持久会话仍有运行中回合，请由宿主完成归属核对与启动恢复后重试");
 		const loaded: Session = {
 			...structuredClone(metadata),
+			revision: revisionFloors.has(id)
+				? Math.max(metadata.revision, revisionFloors.get(id)!) + 1
+				: metadata.revision,
 			messages: [],
 			tree: { nodes: [], leafId: metadata.leafId },
 			historyLoaded: false,
@@ -1811,22 +1885,40 @@ async function initializeRuntime(options: RuntimeOptions) {
 				return await snapshot(session);
 			}, true);
 		},
-		async cancelTurn(sessionId: string, body: { turnId: string }) {
-			if (closing) throw new RuntimeError(503, "运行时正在关闭");
+		async cancelTurn(sessionId: string, body: { turnId: string; bestEffort?: boolean }) {
+			if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
+			if (body.bestEffort !== undefined && typeof body.bestEffort !== "boolean")
+				throw new RuntimeError(400, "bestEffort 必须为布尔值");
 			const active = sessions.get(sessionId);
 			if (active?.runPromise && (active.turn?.status === "running" || active.cancelPromise)) {
-				if (active.kind === "subagent") throw new RuntimeError(409, "请取消父会话");
-				if (body.turnId !== active.turn?.id) throw new RuntimeError(409, "turnId 不匹配");
+				if (body.bestEffort === true && active.kind === "subagent")
+					throw new RuntimeError(409, "请取消父会话", "subagent_managed_by_parent");
+				assertAction(
+					active,
+					"cancel",
+					body.turnId,
+					body.bestEffort === true && storageFailed
+						? ["storage_unavailable"]
+						: ["cancellation_in_progress", "cancellation_requested", "turn_terminal"],
+				);
+				if (storageFailed && body.bestEffort === true) {
+					active.cancelRequested = true;
+					active.agent?.clearAllQueues();
+					active.agent?.abort();
+					active.mcpAbort?.abort();
+					await rejectSessionInteractions(active.id, new Error("会话已停止，取消意图未持久化"));
+					await publish(active, "snapshot");
+					return { ...cancellationReceipt(active), durable: false };
+				}
 				return cancelRunningTurn(active);
 			}
 			return execute(async () => {
 				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "请取消父会话");
-
-				if (!session.turn || body.turnId !== session.turn.id) throw new RuntimeError(409, "turnId 不匹配");
-				if (session.turn.status === "running") {
+				assertAction(session, "cancel", body.turnId, ["turn_terminal"]);
+				const turn = session.turn!;
+				if (turn.status === "running") {
 					return await cancelRunningTurn(session);
-				} else if (session.turn.status === "interrupted") {
+				} else if (turn.status === "interrupted") {
 					let records: ToolExecutionRecord[] = [];
 					const previous = {
 						turn: session.turn,
@@ -1839,7 +1931,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 						await cancelJobs(session);
 						records = await closeCancelledJobs(session);
 					}
-					session.turn = { ...session.turn, status: "cancelled", error: undefined };
+					session.turn = { ...turn, status: "cancelled", error: undefined };
 					session.turnCheckpoint = undefined;
 					session.updatedAt = Date.now();
 					try {
@@ -1852,23 +1944,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 					return cancellationReceipt(session);
 				}
 				return cancellationReceipt(session, false);
-			}, true);
+			}, false);
 		},
 		steer(sessionId: string, body: TurnInput & { turnId: string }) {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话由父会话通过 task 管理");
-
 				const content = turnContent(body);
-				if (!session.turn || session.turn.status !== "running")
-					throw new RuntimeError(409, "当前会话没有正在执行的回合");
-				if (body.turnId !== session.turn.id) throw new RuntimeError(409, "turnId 不匹配");
-				const assertSteerAvailable = () => {
-					const availability = actionAvailability(session).steer;
-					if (!availability.available)
-						throw new RuntimeError(409, `当前 Turn 不接受 Steer：${availability.reason}`);
-				};
-				assertSteerAvailable();
+				assertAction(session, "steer", body.turnId);
 				const requestId = optionalRequestId(body);
 				const messageIdentity = optionalMessageIdentity(body);
 				if (session.turnCheckpoint) {
@@ -1876,7 +1958,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					await persist(session);
 				}
 				const agent = await attachAgent(session);
-				assertSteerAvailable();
+				assertAction(session, "steer", body.turnId);
 				const userMessage: Extract<AgentMessage, { role: "user" }> & {
 					displayContent?: string;
 				} & UserMessageIdentity = {
@@ -1886,14 +1968,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 					...messageIdentity,
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
-				if (requestId) session.turn.requestId = requestId;
+				if (requestId) session.turn!.requestId = requestId;
 				agent.steer(userMessage);
 				return {
 					...turnReceipt(session, { started: true, settled: false }),
 					queued: true,
 					durable: false,
 				} satisfies SteerReceipt;
-			}, true);
+			}, false);
 		},
 		replyInteraction(sessionId: string, interactionId: string, body: { approved: boolean }) {
 			return execute(async () => {
@@ -1915,15 +1997,19 @@ async function initializeRuntime(options: RuntimeOptions) {
 		resumeTurn(sessionId: string, body: { turnId: string }) {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
-				if (!session.turn || body.turnId !== session.turn.id) throw new RuntimeError(409, "turnId 不匹配");
-				if (session.turn.status !== "interrupted") throw new RuntimeError(409, "当前 Turn 不可恢复");
+				assertAction(session, "resume", body.turnId);
+				const turn = session.turn!;
 				await session.runPromise;
 				const tree = session.turnCheckpoint?.inputEntryId
 					? await store.readTurnPath(session.id, session.turnCheckpoint.inputEntryId)
 					: await store.readPath(session.id);
 				const recovered = recoverInterruptedTurn({ ...session, leafId: tree.leafId }, tree);
 				if (!recovered || (recovered.status !== "interrupted" && recovered.status !== "completed"))
-					throw new RuntimeError(409, recovered?.error ?? "当前 Turn 不在可恢复边界");
+					throw new RuntimeError(
+						409,
+						recovered?.error ?? "当前 Turn 不在可恢复边界",
+						"recovery_validation_failed",
+					);
 				const calls = new Map(
 					tree.nodes.flatMap(({ message }) =>
 						message.role === "assistant"
@@ -1942,13 +2028,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 				let afterSeq: number | undefined;
 				do {
 					const page = await store.readToolExecutions(session.id, {
-						turnId: session.turn.id,
+						turnId: turn.id,
 						limit: 200,
 						afterSeq,
 					});
 					for (const record of page.entries) {
 						try {
-							validateToolExecutionRecord(record, session.id, session.turn.id);
+							validateToolExecutionRecord(record, session.id, turn.id);
 							const result = savedResults.get(record.toolCallId);
 							if (
 								calls.get(record.toolCallId) !== record.toolName ||
@@ -1960,7 +2046,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 							)
 								throw new Error("工具执行账本与历史或外部关联不一致");
 						} catch (error) {
-							throw new RuntimeError(409, error instanceof Error ? error.message : String(error));
+							throw new RuntimeError(
+								409,
+								error instanceof Error ? error.message : String(error),
+								"recovery_validation_failed",
+							);
 						}
 					}
 					afterSeq = page.nextAfterSeq ?? undefined;
@@ -1968,16 +2058,18 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const results: AgentMessage[] = [];
 				const records: ToolExecutionRecord[] = [];
 				for (const reference of await pendingJobs(session)) {
-					if (!options.jobs) throw new RuntimeError(409, "宿主未配置外部任务执行器");
+					if (!options.jobs)
+						throw new RuntimeError(409, "宿主未配置外部任务执行器", "external_executor_unavailable");
 					const job = await options.jobs.get(reference);
 					let result: ReturnType<typeof durableJobResult>;
 					try {
 						result = durableJobResult(reference, job);
 					} catch (error) {
-						if (error instanceof DurableJobError) throw new RuntimeError(409, error.message);
+						if (error instanceof DurableJobError)
+							throw new RuntimeError(409, error.message, "recovery_validation_failed");
 						throw error;
 					}
-					if (!result) throw new RuntimeError(409, "外部任务仍在运行，请稍后查询后恢复");
+					if (!result) throw new RuntimeError(409, "外部任务仍在运行，请稍后查询后恢复", "external_job_running");
 					results.push(result);
 					records.push(
 						executionRecord(
@@ -2028,24 +2120,25 @@ async function initializeRuntime(options: RuntimeOptions) {
 					return turnReceipt(session, { started: true, settled: false });
 				}
 				return turnReceipt(session, { started: false });
-			}, true);
+			}, false);
 		},
 		submitTurn(sessionId: string, body: TurnInput) {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话由父会话通过 task 管理");
-
 				const content = turnContent(body);
 				const requestId = optionalRequestId(body);
-				if (requestId && (requestId === session.turn?.requestId || requestId === session.turn?.rootRequestId))
+				if (
+					session.kind === "root" &&
+					requestId &&
+					(requestId === session.turn?.requestId || requestId === session.turn?.rootRequestId)
+				)
 					return turnReceipt(session, { requestId });
+				assertAction(session, "submit");
 				if (
 					body.systemPrompt !== undefined &&
 					(typeof body.systemPrompt !== "string" || body.systemPrompt.length > 60000)
 				)
 					throw new RuntimeError(400, "systemPrompt 需要字符串，最多 60000 字符");
-				if (session.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行");
-				if (session.turn?.status === "interrupted") throw new RuntimeError(409, "请先恢复或取消中断的 Turn");
 				await session.runPromise;
 				const messageIdentity = optionalMessageIdentity(body);
 				const configuration = resolveTurnConfiguration(session, body);
@@ -2148,7 +2241,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await publish(session, "snapshot", projectSessionAgentEvent({ type: "message_end", message: userMessage }));
 				startRun(session);
 				return turnReceipt(session, { started: true, settled: false });
-			}, true);
+			}, false);
 		},
 		deleteSession(sessionId: string) {
 			return execute(async () => {
@@ -2198,6 +2291,66 @@ async function initializeRuntime(options: RuntimeOptions) {
 			return () => {
 				globalClients.delete(subscriber);
 			};
+		},
+		subscribeExecutions(
+			sessionIds: readonly string[],
+			next: (event: ExecutionStreamEvent) => void,
+			onClose: () => void = () => {},
+		) {
+			return execute(async () => {
+				if (
+					!Array.isArray(sessionIds) ||
+					sessionIds.length < 1 ||
+					sessionIds.length > 200 ||
+					sessionIds.some((id) => typeof id !== "string" || !id.trim() || id.length > 256)
+				)
+					throw new RuntimeError(400, "执行基线需要 1–200 个有效会话 ID");
+				const scope = new Set(sessionIds);
+				const watched: Session[] = [];
+				const watermarks = new Map<string, number>();
+				const deliver = (packet: GlobalSessionEvent) => {
+					if (!scope.has(packet.sessionId)) return;
+					if (packet.snapshot.revision <= (watermarks.get(packet.sessionId) ?? -1)) return;
+					watermarks.set(packet.sessionId, packet.snapshot.revision);
+					next(packet);
+				};
+				let closed = false;
+				const unsubscribe = () => {
+					if (closed) return;
+					closed = true;
+					globalClients.delete(subscriber);
+					for (const session of watched) {
+						session.executionObservers!--;
+						releaseSession(session);
+					}
+				};
+				const subscriber = {
+					next: deliver,
+					close: () => {
+						unsubscribe();
+						onClose();
+					},
+				};
+				try {
+					for (const id of scope) {
+						const session = await requireSession(id);
+						session.executionObservers = (session.executionObservers ?? 0) + 1;
+						watched.push(session);
+					}
+					// No await between subscription, capture and delivery: the baseline covers all earlier work.
+					globalClients.add(subscriber);
+					const baseline = watched.map((session) => {
+						const { revision, turn, execution } = publishedProjection(session);
+						watermarks.set(session.id, revision);
+						return { sessionId: session.id, revision, turn, execution };
+					});
+					next(structuredClone({ type: "execution.baseline", instanceId, sessions: baseline }));
+					return unsubscribe;
+				} catch (error) {
+					unsubscribe();
+					throw error;
+				}
+			}, false);
 		},
 		waitForTurn(sessionId: string) {
 			const pending = (async () => {

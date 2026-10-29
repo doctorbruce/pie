@@ -4,12 +4,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createAgentFactory, createLocalHost } from "@pie/local";
-import { createRuntime, type SessionEvent, type SessionSnapshot } from "@pie/runtime";
+import {
+	type CancellationReceipt,
+	createRuntime,
+	type ExecutionBaseline,
+	type SessionEvent,
+	type SessionSnapshot,
+	type TurnReceipt,
+} from "@pie/runtime";
 import { applySessionEvent } from "@pie/runtime/session-events";
 import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
 import { createCoreServer } from "../src/server.ts";
 
-async function* readEvents(response: Promise<Response>): AsyncGenerator<SessionEvent> {
+async function* readEvents<Packet = SessionEvent>(response: Promise<Response>): AsyncGenerator<Packet> {
 	const stream = await response;
 	assert.equal(stream.status, 200);
 	assert(stream.body);
@@ -306,3 +313,142 @@ test("global streaming does not read full history and permits cancellation follo
 		),
 	);
 });
+
+test(
+	"scoped global HTTP reconnect immediately bootstraps a Turn settled while disconnected",
+	{ timeout: 15000 },
+	async (context) => {
+		const directory = await mkdtemp(join(tmpdir(), "pie-scoped-http-"));
+		const core = createCoreServer({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });
+		const abort = new AbortController();
+		context.after(async () => {
+			abort.abort();
+			await core.close();
+			await rm(directory, { recursive: true, force: true });
+		});
+		await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+		const address = core.server.address();
+		assert(address && typeof address !== "string");
+		const base = `http://127.0.0.1:${address.port}`;
+		const runtime = await core.ready;
+		const session = await runtime.createSession({});
+		const connect = () =>
+			readEvents<ExecutionBaseline | SessionEvent>(
+				fetch(`${base}/events?sessionId=${session.id}`, { signal: abort.signal }),
+			);
+		const initial = connect();
+		const first = (await initial.next()).value;
+		assert(first?.type === "execution.baseline");
+		assert.equal(first.sessions[0].sessionId, session.id);
+		await initial.return(undefined);
+		await runtime.submitTurn(session.id, { text: "finish while disconnected" });
+		const completed = await runtime.waitForTurn(session.id);
+		const reconnected = connect();
+		const baseline = (await reconnected.next()).value;
+		assert(baseline?.type === "execution.baseline");
+		assert.equal(baseline.sessions.length, 1);
+		assert.deepEqual(
+			baseline.sessions[0],
+			JSON.parse(
+				JSON.stringify({
+					sessionId: session.id,
+					revision: completed.revision,
+					turn: completed.turn,
+					execution: completed.execution,
+				}),
+			),
+		);
+		assert.equal(JSON.stringify(baseline).includes('"messages"'), false);
+		const result = await fetch(`${base}/sessions/${session.id}/turns`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text: "next" }),
+		});
+		assert.equal(result.status, 202);
+		let previous = baseline.sessions[0].revision;
+		for await (const packet of reconnected) {
+			assert(packet.type !== "execution.baseline");
+			assert(packet.revision > previous);
+			previous = packet.revision;
+			if (packet.type === "turn.settled") {
+				assert.equal(packet.snapshot?.turn?.status, "completed");
+				break;
+			}
+		}
+		const missing = await fetch(`${base}/events?sessionId=missing`, { signal: abort.signal });
+		assert.equal(missing.status, 404);
+		assert.equal((await fetch(`${base}/events?sessionId=`, { signal: abort.signal })).status, 400);
+	},
+);
+
+test(
+	"HTTP control rejections retain projected reasons and current-Turn retries",
+	{ timeout: 15000 },
+	async (context) => {
+		const directory = await mkdtemp(join(tmpdir(), "pie-control-http-"));
+		const core = createCoreServer({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });
+		let entered = () => {};
+		const preparing = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const runtime = await core.ready;
+		// A confirmation keeps the real Local/HTTP Turn active without a paid provider.
+		await runtime.registerHostRuntimes([
+			{
+				assistantId: "control",
+				assistantRevision: "1",
+				runtime: { systemPrompt: "test", toolIds: ["bash"], skills: [], subagents: [] },
+			},
+		]);
+		const session = await runtime.createSession({ assistantId: "control" });
+		context.after(async () => {
+			await core.close();
+			await rm(directory, { recursive: true, force: true });
+		});
+		await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+		const address = core.server.address();
+		assert(address && typeof address !== "string");
+		const base = `http://127.0.0.1:${address.port}`;
+		const post = (action: string, body: unknown) =>
+			fetch(`${base}/sessions/${session.id}/${action}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+		const rejectionReason = async (response: Response) => ((await response.json()) as { reason?: string }).reason;
+		const invalid = await post("cancel", { turnId: "none", bestEffort: "yes" });
+		assert.equal(invalid.status, 400);
+		assert.equal(await rejectionReason(invalid), "invalid_request");
+		for (const action of ["steer", "cancel", "resume"]) {
+			const response = await post(action, { turnId: "none", text: "late" });
+			assert.equal(response.status, 409);
+			assert.equal(await rejectionReason(response), "no_turn");
+		}
+		const unsubscribe = await runtime.subscribe(session.id, (packet) => {
+			if (packet.type === "interaction.requested") entered();
+		});
+		const accepted = (await (
+			await post("turns", { text: '调用工具 bash {"command":"echo test"}', requestId: "original" })
+		).json()) as TurnReceipt;
+		await preparing;
+		const state = await runtime.getSession(session.id, { limit: 1 });
+		for (const [action, projected] of [
+			["turns", "submit"],
+			["resume", "resume"],
+		] as const) {
+			const response = await post(action, { turnId: accepted.turnId, text: "new" });
+			assert.equal(response.status, 409);
+			assert.equal(await rejectionReason(response), state.execution.actions[projected].reason);
+		}
+		const retry = await post("turns", { text: "same", requestId: "original" });
+		assert.equal(retry.status, 202);
+		assert.equal(((await retry.json()) as TurnReceipt).turnId, accepted.turnId);
+		const stale = await post("steer", { turnId: "stale", text: "new" });
+		assert.equal(await rejectionReason(stale), "turn_mismatch");
+		const cancellation = await post("cancel", { turnId: accepted.turnId });
+		assert.equal(cancellation.status, 202);
+		assert.equal(((await cancellation.json()) as CancellationReceipt).durable, true);
+		assert.equal((await runtime.waitForTurn(session.id)).turn?.status, "cancelled");
+		unsubscribe();
+	},
+);

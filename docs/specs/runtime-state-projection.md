@@ -1,6 +1,6 @@
 # 运行状态投影与控制语义
 
-状态：已完成 Pie 侧阶段 1–3 与边界收口，2026-10-29。阶段 4 未开始，不在本次范围。
+状态：Pie 侧已完成并通过本地验收。阶段 1–3 的版本切面、控制拒绝契约与全局重连基线已收口；阶段 4 未开始，不在本次范围。
 
 ## 问题与目标
 
@@ -27,6 +27,13 @@
 每阶段先运行定向 Node 测试，再运行 `npm run test:runtime`、`npm run test:server` 和 `npm run check`。不调用付费模型、不执行 build；验收记录只登记实际运行的结果。
 
 ## 实施记录
+
+### 版本与宿主边界收口（ub-mode，已完成）
+
+- First Make it Work：核对当前实现；先用阻塞存储复现工具开始、消息完成、取消及完整历史读取窗口，并验证跨会话写失败的传播。保留同版本同 execution / Turn 的承诺，发布时固定轻量投影及历史叶子，不新增持久状态或重放日志。
+- Then Make it Right：四个控制入口复用 `actionAvailability / assertAction`；新操作与当前请求幂等重试、恢复预检、终态取消无操作及显式尽力停止分别定义。`RuntimeError.reason` 贯穿 Local / HTTP；`CancellationReceipt.durable` 区分普通取消与存储故障后的进程内停止。
+- 全局重连采用 `subscribeExecutions(sessionIds)` 与 `/events?sessionId=A&sessionId=B`，仅装载 1–200 个指定会话元信息；同步注册、捕获并交付 `execution.baseline`，随后按会话水位对齐。不扫描历史、不积压冷读取期间的内容事件、不持久重放。订阅仅保留轻量元信息，闲置 Agent 仍可卸载；卸载后每个已观察会话只保留一个整数水位，防止旧 revision 复用。
+- 没有新增工作摘要的需求证据，维持现有执行轴；没有引入 CommandInbox、持久 steer 队列或新的状态机。最终验收与行动日志见文末。
 
 以下为此前阶段的验收记录；本次边界收口与重新验收见文末行动日志。
 
@@ -72,3 +79,25 @@
 - 定向验证：`node --conditions=source --test packages/server/test/global-stream.test.ts packages/server/test/execution-state.test.ts packages/runtime/test/runtime.test.ts` 首轮 39/39；补充断言后的 steer 定向 2/2，最终 global-stream 文件 4/4。共新增 5 项回归，全部纳入根测试脚本。
 - 完整验收：`npm run test:runtime` 62/62，`npm run test:server` 257/257；`npm run check` 通过（Biome 450 文件无额外修改，根与 Web 类型检查、模型数据校验通过）；`git diff --check` 通过。
 - 同步本 SPEC、`docs/agent-development.md`、`docs/runtime-embedding.md`、Server README 及 Runtime / Server changelog。保留全部未提交改动供审阅，未 commit；未修改 `/workspace/refs`，未调用付费模型，未 build 或部署，未开始阶段 4。Pie 侧无遗留待办；缺失分析工具的替代验证与模型数据环境恢复是本轮执行方式的偏差。
+
+## 本轮版本与控制契约行动日志（ub-mode）
+
+### First Make it Work
+
+- 从 `5d3122f1a` 的干净 main 核对 SPEC、分层文档及完整相关源码、测试；依赖与模型数据已就绪，没有安装或改动依赖。先新增并确认工具开始、消息完成、取消持久化、完整异步快照和跨会话失败共 5 项预期失败；随后固定发布版本的 `execution / turn / leafId`。
+- 先覆盖四入口状态组合，再合并准入逻辑。测试包含 48 组冷会话生命周期 / 恢复 / 根子会话组合，以及运行中、取消中、关闭与存储故障；区分新操作、重试、恢复深度校验和显式 `bestEffort`。
+- 用真实 HTTP / SSE 覆盖断线期间结算且重连后没有新事件；用真实 SQLite 写入失败验证 503 原因码、当前回执重试和 `durable: false`，并检查持久历史与 Turn 不变。
+
+### Then Make it Right
+
+- 全局存储故障为已装载会话发布新版本；新增卸载后再激活的回归，确认不能复用相同版本表达不同 availability。只保留轻量版本切面和整数水位，不复制正文或工具账本。
+- 补查异步窗口，另复现 3 项失败：历史读取期间跨会话故障丢结构化拒绝；故障通知发布另一命令随后回滚的 Turn；MCP 准备后越过存储屏障发起模型请求。统一存储拒绝，跨会话通知等命令回滚后发布，写入和模型启动在异步等待后重新检查屏障；不以未提交状态生成确定投影。
+- 先用回归固定轻量基线行为，再去掉多余内容事件缓冲；元信息装载后同步订阅和交付已足以形成切面。完整快照显式按已固定叶子读原文，避免读操作中途混入后续消息。
+- 环境没有 crapper / dryer / mutator。人工检查分支、重复和边界；用临时脚本撤掉投影缓存、固定叶子、故障通知、版本水位、submit gate、HTTP reason、重连基线、尽力停止的非持久标志、回滚屏障和模型启动屏障，10/10 均被断言检出；每项恢复前核对没有并发修改。未宣称取得缺失工具的 CRAP / 重复率评分。
+- 关键实现为 `packages/runtime/src/{runtime,protocol}.ts`、`packages/local/src/runtime.ts`、`packages/server/src/server.ts`；回归位于 Server 的 `execution-state / global-stream / store / turn-recovery.test.ts`。同步嵌入文档、开发文档、Server README 和两个现有 changelog。
+
+### Follow Practice
+
+- 最终验收：`node --conditions=source --test packages/server/test/execution-state.test.ts packages/server/test/global-stream.test.ts` 25/25；SQLite 故障 / 恢复定向 2/2；`npm run test:runtime` 62/62；`npm run test:server` 274/274；`npm run check` 通过（Biome 450 文件，根与 Web 类型检查、模型数据校验通过）；`git diff --check` 通过。共新增 17 项回归，全部纳入现有根脚本；48 组状态组合包含在同一回归内，不重复计为独立测试。
+- 旧回归中“写入失败不发事件 / 内存 revision 不变 / 首次失败返回 500”的断言按本次契约更新；继续严格校验持久数据不变、原 Turn 保留和不额外启动模型。临时脚本已删除；保留全部未提交改动，未 commit / push，未改 refs 或阶段 4。
+- Pie 本次范围无待办；没有调用付费模型、执行 build 或部署。缺失分析工具以人工审查和定向变异代替是执行方式偏差；没有工作摘要扩展的需求证据，维持原模型。宿主范围确认与阶段 4 验收仍由后续任务负责。

@@ -730,7 +730,7 @@ test("replacing history rolls back on failure and removes the old branches only 
 	}
 });
 
-test("failed turn persistence restores the live messages and leaves the durable tree and revision unchanged", async (context) => {
+test("failed turn persistence preserves durable history and publishes failure while HTTP retries and best-effort stop remain explicit", async (context) => {
 	const path = await directory(context);
 	const store = openStore({ PI_DATA_DIR: path });
 	try {
@@ -756,7 +756,7 @@ test("failed turn persistence restores the live messages and leaves the durable 
 				await fetch(`${base}/sessions/rollback/turns`, {
 					method: "POST",
 					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ text: "accepted" }),
+					body: JSON.stringify({ text: "accepted", requestId: "accepted" }),
 				})
 			).status,
 			202,
@@ -764,21 +764,70 @@ test("failed turn persistence restores the live messages and leaves the durable 
 		const before = await settled(base, "rollback");
 		assert.equal(before.turn?.status, "completed");
 		const tree = await (await fetch(`${base}/sessions/rollback/tree`)).json();
-		assert.equal(
-			(
-				await fetch(`${base}/sessions/rollback/turns`, {
-					method: "POST",
-					headers: { "Content-Type": "application/json" },
-					body: JSON.stringify({ text: "not saved", requestId: "reject" }),
-				})
-			).status,
-			500,
-		);
+		const runtime = await core.ready;
+		await runtime.registerHostRuntimes([
+			{
+				assistantId: "stop",
+				assistantRevision: "1",
+				runtime: {
+					systemPrompt: "test",
+					toolIds: ["bash"],
+					skills: [],
+					subagents: [],
+				},
+			},
+		]);
+		const active = await runtime.createSession({ assistantId: "stop" });
+		let entered = () => {};
+		const waiting = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const unsubscribe = await runtime.subscribe(active.id, (packet) => {
+			if (packet.type === "interaction.requested") entered();
+		});
+		const running = await runtime.submitTurn(active.id, { text: '调用工具 bash {"command":"echo test"}' });
+		await waiting;
+		const rejected = await fetch(`${base}/sessions/rollback/turns`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ text: "not saved", requestId: "reject" }),
+		});
+		assert.equal(rejected.status, 503);
+		assert.equal(((await rejected.json()) as { reason: string }).reason, "storage_unavailable");
 		const after = (await (await fetch(`${base}/sessions/rollback`)).json()) as SessionSnapshot;
 		assert.deepEqual(after.messages, before.messages);
 		assert.deepEqual(after.turn, before.turn);
-		assert.equal(after.revision, before.revision);
+		assert(after.revision > before.revision);
+		assert.deepEqual(after.execution.actions.submit, { available: false, reason: "storage_unavailable" });
 		assert.deepEqual(await (await fetch(`${base}/sessions/rollback/tree`)).json(), tree);
+		const retry = await fetch(`${base}/sessions/rollback/turns`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ text: "accepted", requestId: "accepted" }),
+		});
+		assert.equal(retry.status, 202);
+		assert.equal(((await retry.json()) as { turnId: string }).turnId, before.turn.id);
+		for (const bestEffort of [false, true]) {
+			const response = await fetch(`${base}/sessions/${active.id}/cancel`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ turnId: running.turnId, bestEffort }),
+			});
+			assert.equal(response.status, bestEffort ? 202 : 503);
+			const body = (await response.json()) as { durable?: boolean; reason?: string };
+			if (bestEffort) assert.equal(body.durable, false);
+			else assert.equal(body.reason, "storage_unavailable");
+		}
+		assert.equal((await runtime.waitForTurn(active.id)).turn?.status, "failed");
+		unsubscribe();
+		await core.close();
+		database(path, (db) => {
+			const saved = JSON.parse(
+				String(db.prepare("SELECT payload FROM sessions WHERE id = 'rollback'").get()!.payload),
+			) as SessionMetadata;
+			assert.equal(saved.revision, before.revision);
+			assert.deepEqual(saved.turn, before.turn);
+		});
 	} finally {
 		await core.close();
 	}

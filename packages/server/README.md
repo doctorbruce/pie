@@ -35,7 +35,7 @@
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
 | `PUT /sessions/:id/model-override` | `{ modelOverride: { providerId, model } \| null, initializeOnly? }` | 保存会话模型选择；null 跟随默认模型。initializeOnly 仅补入尚未初始化的历史会话，保留已存在的选择或 null |
 | `GET /sessions/:id` | 可选 `?limit=50` | 会话快照，含消息、当前部分消息、最近一次 turn 和 execution；limit 提供有界历史页 |
-| `GET /events` | 无 | 宿主使用的全局 SSE，只推送连接后的所有会话事件，不发送初始快照 |
+| `GET /events` | 可选重复参数 `?sessionId=A&sessionId=B` | 无参数只发送后续全局事件；指定 1–200 个会话时先发送轻量执行基线，再推送这些会话的新事件 |
 | `GET /sessions/:id/events` | 无 | SSE，第一条是最近 50 条消息与 execution 的快照，然后推送增量 |
 | `GET /sessions/:id/export` | 无 | 导出 canonical `SessionTransfer`；运行中的会话返回 409 |
 | `PUT /sessions/:id/import` | `SessionTransfer` | 用转储覆盖空闲会话历史并保留产品会话 ID；失败时回滚原状态 |
@@ -44,16 +44,18 @@
 | `POST /sessions/:id/tree` | `{ entryId }` 或 `{ messageId }` | 同会话切换当前分支，返回 `{ session, selectedText }`；用户节点回退到父节点并回填文本，其他节点切换到该节点，不自动发送 |
 | `POST /sessions/:id/turns` | `{ text?, images?, assistantId?, systemPrompt?, displayText?, requestId? }` | `202` + `TurnReceipt`；宿主会话在准入时读取已注册的最新 runtime，systemPrompt 是与助手提示词拼接的本轮附加系统规则 |
 | `POST /sessions/:id/steer` | `{ turnId, text?, images?, displayText?, requestId? }` | `202` + `SteerReceipt`，追加到当前运行回合的进程队列；turnId 必须匹配，取消期间返回 409 |
-| `POST /sessions/:id/cancel` | `{ "turnId": "要取消的 turn" }` | `202` + `CancellationReceipt`，请求取消；以最终 `turn.settled` 为准 |
+| `POST /sessions/:id/cancel` | `{ turnId, bestEffort?: boolean }` | `202` + `CancellationReceipt`；存储故障时显式 bestEffort 只尽力停止当前活跃根 Turn，以回执 durable 和最终结算为准 |
 | `POST /sessions/:id/resume` | `{ "turnId": "原 turn ID" }` | `202` + 原 Turn 的 `TurnReceipt`；只接受安全分类后的 interrupted Turn，其他状态或 ID 不匹配返回 409 |
 | `POST /sessions/:id/interactions/:interactionId` | `{ "approved": true/false }` | `202`，答复当前工具交互；以 SSE 的 `interaction.resolved` 为准 |
 | `DELETE /sessions/:id` | 无 | 删除空闲会话并关闭对应事件连接 |
 
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
-`TurnReceipt` 包含 `sessionId / turnId / requestId? / accepted / started / settled`；受理和启动不表示完成。`SteerReceipt` 另含 `queued: true, durable: false`，不承诺未持久化队列的崩溃重放；`CancellationReceipt` 另含 `cancellationRequested`，不代表工具已停止或外部副作用已撤销。`execution.actions` 投影四个入口的 Runtime 可请求条件和原因码；入口仍会重新校验，宿主权限另行叠加。
+`TurnReceipt` 包含 `sessionId / turnId / requestId? / accepted / started / settled`；受理和启动不表示完成。`SteerReceipt` 另含 `queued: true, durable: false`，不承诺未持久化队列的崩溃重放；`CancellationReceipt` 另含 `cancellationRequested / durable`，不代表工具已停止或外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；当前 request ID 的提交重试仅查询已有回执，在途取消复用同一操作，终态取消返回 `accepted: false`。`resume.available` 只允许恢复预检；宿主权限另行叠加。
 
-`400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或本地助手达到 32 个的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明" }`。
+存储故障时新操作以 `storage_unavailable` 拒绝。`bestEffort: true` 仅对当前活跃根 Turn 尽力停止本实例 Agent / MCP、清空输入和交互，回执 `durable: false`；不持久化取消意图、不调用外部持久执行器取消，也不承诺最终保存为 cancelled。存储正常时仍走普通持久取消。
+
+`400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或本地助手达到 32 个的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明", "reason"?: "稳定代码" }`；控制状态拒绝使用与 `execution.actions` 相同的原因码，另有 `turn_mismatch / invalid_request / recovery_validation_failed / external_executor_unavailable / external_job_running`。不要解析中文说明判断状态。
 
 助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
@@ -218,7 +220,11 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - `interaction.requested / interaction.resolved`：携带确认请求及其结束；execution 同步反映是否仍有待回答交互。
 - `turn.settled`：先持久化输入，再等待 `agent.continue()` 完成、Agent 空闲后发送。状态为 `completed`、`cancelled` 或 `failed`，会话增量中的失败原因在 `turn.error`。
 
-全局 `/events` 不发送启动快照。每个包携带同源的 `instanceId / revision / execution`；Agent 原始内容不公开时仍保留状态包，交互结束也不会被过滤。全局 `snapshot / turn.settled` 另带最小 `snapshot: { turn, execution }`，不携带完整历史或 assistant partial。同一版本的全局摘要、会话增量与 HTTP 快照一致；模型流与活动工具可以同时存在，结算后的瞬时活动归零。
+不带参数的全局 `/events` 不发送启动快照。每个包携带同源的 `instanceId / revision / execution`；Agent 原始内容不公开时仍保留状态包，交互结束也不会被过滤。全局 `snapshot / turn.settled` 另带最小 `snapshot: { turn, execution }`，不携带完整历史或 assistant partial。同一版本的全局摘要、会话增量与 HTTP 快照一致；模型流与活动工具可以同时存在，结算后的瞬时活动归零。
+
+指定 `GET /events?sessionId=A&sessionId=B` 时，首包为 `{ type: "execution.baseline", instanceId, sessions: [{ sessionId, revision, turn?, execution }] }`。后续只推送指定会话高于各自基线水位的事件；即使断线期间已经结算且重连后没有新事件，也能立即恢复终态。不读取历史、不扫描全部会话、不持久重放；不存在的会话返回 404，空 ID 或超过 200 个返回 400。调用方先按自己的权限确定会话范围。
+
+每次发布同步固定 `revision / execution / turn / leafId`，完整与有界快照都读取该历史叶子，异步读取期间不会混入后续消息。跨会话存储失败会发布新的不可写摘要；闲置会话重新装载的版本严格高于本实例已观察水位。
 
 `revision` 在服务进程的单个会话内递增；客户端在相同 `instanceId` 下丢弃旧包，版本缺口或服务重启时重新读取快照。每 15 秒发送 SSE 注释心跳。慢客户端的待发送缓冲超过 1 MiB 时断开，客户端重连获取新快照。
 

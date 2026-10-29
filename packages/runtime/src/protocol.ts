@@ -193,6 +193,7 @@ export type TurnReceipt = {
 };
 export type CancellationReceipt = TurnReceipt & {
 	cancellationRequested: boolean;
+	durable: boolean;
 };
 export type SteerReceipt = TurnReceipt & {
 	queued: boolean;
@@ -211,6 +212,13 @@ export type ActionUnavailableReason =
 	| "cancellation_in_progress"
 	| "recovery_blocked";
 export type SessionActionAvailability = { available: boolean; reason?: ActionUnavailableReason };
+export type ControlRejectionReason =
+	| ActionUnavailableReason
+	| "turn_mismatch"
+	| "invalid_request"
+	| "recovery_validation_failed"
+	| "external_executor_unavailable"
+	| "external_job_running";
 export type SessionActions = Record<SessionAction, SessionActionAvailability>;
 export type ContextCompaction = {
 	summary: string;
@@ -337,6 +345,12 @@ export type GlobalSessionEvent = Pick<
 > & {
 	snapshot: Pick<SessionSnapshot, "instanceId" | "revision" | "turn" | "execution">;
 };
+export type ExecutionBaseline = {
+	type: "execution.baseline";
+	instanceId: string;
+	sessions: { sessionId: string; revision: number; turn?: Turn; execution: SessionExecution }[];
+};
+export type ExecutionStreamEvent = ExecutionBaseline | GlobalSessionEvent;
 export type ServerInfo = {
 	protocolVersion: 1;
 	coreId: "pie";

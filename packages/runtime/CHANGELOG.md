@@ -16,6 +16,9 @@
 
 ### Added
 
+- Add scoped `subscribeExecutions` with a lightweight execution baseline and per-session event alignment, without history reads or persistent replay.
+- Return structured `RuntimeError.reason` codes and cancellation durability; allow an explicit best-effort local stop after storage failure while keeping ordinary commands rejected.
+
 - Return explicit Turn admission, execution, settlement, cancellation and in-memory steering receipts; deduplicate retries against the current Turn's original or latest request ID.
 
 - Expose Runtime-only `submit`, `steer`, `cancel` and `resume` availability with stable reason codes, including the same execution projection in global snapshot events.
@@ -34,6 +37,9 @@
 - Added optional `sessionRetention: "release-after-turn"` to release idle Agents and working history after durable settlement and reload them through the injected store, while keeping local in-memory reuse by default.
 
 ### Fixed
+
+- Pin published execution, Turn and history leaf to their revision, including asynchronous full snapshots; publish cross-session storage failure and preserve revision watermarks across eviction.
+- Share availability decisions across all four control entries while distinguishing new operations, idempotent retries, recovery preflight and best-effort cancellation.
 
 - Reject steering during cancellation using the same availability rules as execution projections, including after asynchronous persistence and Agent attachment; keep queued and late input out of the next Turn.
 

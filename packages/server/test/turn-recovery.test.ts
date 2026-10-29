@@ -8,7 +8,7 @@ import { type TestContext, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { createAgentFactory } from "@pie/local";
-import { createRuntime, RuntimeError, type RuntimeOptions, type TurnCheckpoint } from "@pie/runtime";
+import { createRuntime, RuntimeError, type RuntimeOptions, type SessionEvent, type TurnCheckpoint } from "@pie/runtime";
 import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
 import { createCoreServer } from "../src/server.ts";
 
@@ -293,19 +293,26 @@ test("a failed recovery admission never calls the model and retains the interrup
 	const saved = await crash(context, "user");
 	const store = createSqliteRuntimeStore(openStore(saved.environment));
 	const factory = createAgentFactory(saved.environment);
-	let events = 0;
+	const events: SessionEvent[] = [];
 	const options: RuntimeOptions = { store, agents: factory };
 	const runtime = await createRuntime(options);
 	saved.resources.push(runtime);
-	await runtime.subscribe(saved.sessionId, () => {
-		events++;
+	await runtime.subscribe(saved.sessionId, (packet) => {
+		events.push(packet);
 	});
+	const before = await runtime.getSession(saved.sessionId);
+	const durable = await store.readSession(saved.sessionId);
 	store.saveSession = async () => {
 		throw new Error("admission rejected");
 	};
 	await assert.rejects(runtime.resumeTurn(saved.sessionId, { turnId: saved.turnId }), /admission rejected/);
-	assert.equal(events, 0);
-	assert.equal((await runtime.getSession(saved.sessionId)).turn?.status, "interrupted");
-	assert.equal((await store.readSession(saved.sessionId))?.turn?.status, "interrupted");
+	assert.equal(events.length, 1);
+	assert.equal(events[0].type, "snapshot");
+	const after = await runtime.getSession(saved.sessionId);
+	assert.equal(after.turn?.status, "interrupted");
+	assert(after.revision > before.revision);
+	assert.deepEqual(after.execution.actions.resume, { available: false, reason: "storage_unavailable" });
+	assert.deepEqual(after.execution, events[0].execution);
+	assert.deepEqual(await store.readSession(saved.sessionId), durable);
 	await assert.rejects(runtime.resumeTurn(saved.sessionId, { turnId: saved.turnId }), /存储不可用/);
 });

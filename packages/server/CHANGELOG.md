@@ -8,6 +8,8 @@
 
 ### Added
 
+- Bootstrap scoped `/events?sessionId=...` subscriptions with a lightweight execution baseline and align subsequent events for reconnects after silent settlement.
+
 - Recover safe interrupted Turns through SQLite startup classification, `POST /sessions/:id/resume` and Web resume/cancel controls; keep the original Turn identity and configuration, and settle already committed final answers without another model call.
 
 - Add an embeddable runtime with asynchronous session storage and host-provided model, tool, skill, MCP and request-recording capabilities; reuse it in the local HTTP service.
@@ -32,6 +34,8 @@
 - Load session metadata at startup and read only the selected history path on demand; retain branch-aware history cursors in the store.
 
 ### Fixed
+
+- Preserve Runtime control rejection reason codes and cancellation durability through HTTP and Local wrappers, including current-Turn retries and explicit best-effort stops after storage failure.
 
 - Forward the same execution projection on every global SSE packet, retain interaction resolution and state-only Agent events, and include execution in session bootstraps.
 - Preserve immediate active-Turn cancellation through the Local host instead of waiting for queued reads or management commands; retain shutdown and settlement barriers.

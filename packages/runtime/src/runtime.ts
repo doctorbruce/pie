@@ -10,21 +10,27 @@ import { DurableJobError, type DurableJobExecutor, durableJobResult, pendingDura
 import { projectSessionAgentEvent } from "./event-projection.ts";
 import { type BackgroundJobInfo, BackgroundJobs } from "./jobs.ts";
 import type {
+	ActionUnavailableReason,
 	ActivityRecord,
 	Assistant,
+	CancellationReceipt,
 	ContextCompaction,
 	GlobalSessionEvent,
 	HostRuntimeDefinition,
 	ImagePart,
 	InteractionRequest,
+	SessionActions,
 	SessionEvent,
 	SessionExecution,
 	SessionSnapshot,
 	SessionState,
 	SessionSummary,
 	SessionTransfer,
+	SteerReceipt,
 	SubagentBinding,
 	ToolActivity,
+	Turn,
+	TurnReceipt,
 } from "./protocol.ts";
 import type { RuntimeStore, SavedSession, SessionCursor, SessionMetadata } from "./runtime-store.ts";
 import {
@@ -247,7 +253,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		activeTools?: Map<string, string>;
 		clients: Set<RuntimeSubscriber>;
 		runPromise?: Promise<string | undefined>;
-		cancelPromise?: Promise<{ sessionId: string; turnId: string }>;
+		cancelPromise?: Promise<CancellationReceipt>;
 		writePromise?: Promise<void>;
 		publishPromise?: Promise<void>;
 		jobInterruption?: string;
@@ -268,6 +274,94 @@ async function initializeRuntime(options: RuntimeOptions) {
 	let queuedCommands = 0;
 	const pendingInteractions = new Map<string, PendingInteraction>();
 	const entryIds = new WeakMap<AgentMessage, string>();
+	function turnHasSettled(status: Turn["status"] | undefined) {
+		return status === "completed" || status === "cancelled" || status === "failed";
+	}
+	function turnReceipt(
+		session: Session,
+		overrides: Partial<Pick<TurnReceipt, "accepted" | "started" | "settled" | "requestId">> = {},
+	): TurnReceipt {
+		if (!session.turn) throw new RuntimeError(409, "当前会话没有 Turn");
+		const requestId = overrides.requestId ?? session.turn.requestId;
+		return {
+			sessionId: session.id,
+			turnId: session.turn.id,
+			...(requestId ? { requestId } : {}),
+			accepted: overrides.accepted ?? true,
+			started: overrides.started ?? Boolean(session.runPromise),
+			settled: overrides.settled ?? turnHasSettled(session.turn.status),
+		};
+	}
+	function cancellationReceipt(session: Session, accepted = true, settled?: boolean): CancellationReceipt {
+		return {
+			...turnReceipt(session, { accepted, started: false, ...(settled === undefined ? {} : { settled }) }),
+			cancellationRequested: accepted,
+		};
+	}
+	function actionAvailability(session: Session): SessionActions {
+		const unavailable = (reason: ActionUnavailableReason) => ({ available: false, reason });
+		const available = { available: true };
+		const blocked = closing ? "runtime_closing" : storageFailed ? "storage_unavailable" : undefined;
+		if (blocked)
+			return {
+				submit: unavailable(blocked),
+				steer: unavailable(blocked),
+				cancel: unavailable(blocked),
+				resume: unavailable(blocked),
+			};
+		if (session.kind === "subagent") {
+			const reason = "subagent_managed_by_parent" as const;
+			return {
+				submit: unavailable(reason),
+				steer: unavailable(reason),
+				cancel: unavailable(reason),
+				resume: unavailable(reason),
+			};
+		}
+		const status = session.turn?.status;
+		const turnReason =
+			status === undefined
+				? "no_turn"
+				: status === "running"
+					? "turn_running"
+					: status === "interrupted"
+						? "turn_interrupted"
+						: "turn_terminal";
+		return {
+			submit:
+				status === undefined || status === "completed" || status === "cancelled" || status === "failed"
+					? available
+					: unavailable(turnReason),
+			steer:
+				status === "running" && !session.cancelRequested && !session.cancelPromise
+					? available
+					: unavailable(
+							status === "running"
+								? session.cancelPromise
+									? "cancellation_in_progress"
+									: session.cancelRequested
+										? "cancellation_requested"
+										: "turn_running"
+								: turnReason,
+						),
+			cancel:
+				status === "running" && !session.cancelRequested
+					? available
+					: status === "interrupted"
+						? available
+						: unavailable(
+								status === "running"
+									? session.cancelPromise
+										? "cancellation_in_progress"
+										: "cancellation_requested"
+									: turnReason,
+							),
+			resume:
+				status === "interrupted" && session.turnCheckpoint && !session.turnCheckpoint.blockedReason
+					? available
+					: unavailable(status === "interrupted" ? "recovery_blocked" : turnReason),
+		};
+	}
 	function releaseSession(session: Session) {
 		if (
 			options.sessionRetention !== "release-after-turn" ||
@@ -773,7 +867,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	function cancelRunningTurn(session: Session) {
 		if (session.cancelPromise) return session.cancelPromise;
-		const turnId = session.turn!.id;
 		const running = session.runPromise;
 		session.cancelRequested = true;
 		if (session.turnCheckpoint) session.turnCheckpoint.cancelRequested = true;
@@ -784,7 +877,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				for (const reference of pending) await options.jobs!.cancel(reference);
 				await rejectSessionInteractions(session.id, new Error("会话已取消"));
 				await persist(session);
-				return { sessionId: session.id, turnId };
+				return cancellationReceipt(session, true, false);
 			},
 		);
 		session.cancelPromise = cancellation;
@@ -979,6 +1072,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function executionState(session: Session): SessionExecution {
 		const running = session.turn?.status === "running";
 		return {
+			actions: actionAvailability(session),
 			modelStreaming: running && session.modelStreaming === true,
 			activeTools: running
 				? [...(session.activeTools ?? [])].map(([toolCallId, toolName]) => ({ toolCallId, toolName }))
@@ -1755,8 +1849,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 						throw error;
 					}
 					await publish(session, "turn.settled");
+					return cancellationReceipt(session);
 				}
-				return { sessionId: session.id, turnId: session.turn.id };
+				return cancellationReceipt(session, false);
 			}, true);
 		},
 		steer(sessionId: string, body: TurnInput & { turnId: string }) {
@@ -1786,7 +1881,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
 				if (requestId) session.turn.requestId = requestId;
 				agent.steer(userMessage);
-				return { sessionId: session.id, turnId: session.turn.id, requestId };
+				return {
+					...turnReceipt(session, { started: true, settled: false }),
+					queued: true,
+					durable: false,
+				} satisfies SteerReceipt;
 			}, true);
 		},
 		replyInteraction(sessionId: string, interactionId: string, body: { approved: boolean }) {
@@ -1917,9 +2016,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 						"agent.event",
 						projectSessionAgentEvent({ type: "message_end", message: result }),
 					);
-				const accepted = { sessionId: session.id, turnId: session.turn.id, requestId: session.turn.requestId };
-				if (session.turn.status === "running") startRun(session);
-				return accepted;
+				if (session.turn.status === "running") {
+					startRun(session);
+					return turnReceipt(session, { started: true, settled: false });
+				}
+				return turnReceipt(session, { started: false });
 			}, true);
 		},
 		submitTurn(sessionId: string, body: TurnInput) {
@@ -1928,6 +2029,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (session.kind === "subagent") throw new RuntimeError(409, "子会话由父会话通过 task 管理");
 
 				const content = turnContent(body);
+				const requestId = optionalRequestId(body);
+				if (requestId && (requestId === session.turn?.requestId || requestId === session.turn?.rootRequestId))
+					return turnReceipt(session, { requestId });
 				if (
 					body.systemPrompt !== undefined &&
 					(typeof body.systemPrompt !== "string" || body.systemPrompt.length > 60000)
@@ -1936,7 +2040,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (session.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行");
 				if (session.turn?.status === "interrupted") throw new RuntimeError(409, "请先恢复或取消中断的 Turn");
 				await session.runPromise;
-				const requestId = optionalRequestId(body);
 				const messageIdentity = optionalMessageIdentity(body);
 				const configuration = resolveTurnConfiguration(session, body);
 				await loadHistory(session);
@@ -1997,7 +2100,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
 				agent.state.messages = [...oldMessages, userMessage];
-				session.turn = { id: randomUUID(), requestId, status: "running" };
+				session.turn = {
+					id: randomUUID(),
+					...(requestId ? { requestId, rootRequestId: requestId } : {}),
+					status: "running",
+				};
 				const update = historyUpdate(session, agent.state.messages);
 				const systemPrompt = factory.composeSystemPrompt(
 					configuration.runtime,
@@ -2032,9 +2139,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				}
 				agent.state.systemPrompt = systemPrompt;
 				await publish(session, "snapshot", projectSessionAgentEvent({ type: "message_end", message: userMessage }));
-				const accepted = { sessionId: session.id, turnId: session.turn.id, requestId };
 				startRun(session);
-				return accepted;
+				return turnReceipt(session, { started: true, settled: false });
 			}, true);
 		},
 		deleteSession(sessionId: string) {

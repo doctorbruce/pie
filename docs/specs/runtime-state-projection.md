@@ -1,6 +1,6 @@
 # 运行状态投影与控制语义
 
-状态：进行中，2026-10-27。先在 Pie 完成共享实现与验证；Cloud 暂不修改，后续按共享包差量同步，不覆盖宿主已有改动。
+状态：进行中，2026-10-29。先在 Pie 完成共享实现与验证；Cloud 暂不修改，后续按共享包差量同步，不覆盖宿主已有改动。
 
 ## 问题与目标
 
@@ -19,9 +19,9 @@
 
 ## 实施顺序与验收
 
-1. **运行摘要与事件一致性（本阶段）**：新增 `SessionExecution`；`SessionSnapshot.execution` 必填，会话增量可携带 execution 更新，全局事件携带同源摘要。取消请求发出状态变化，回合结算后清除瞬时活动；重启只从当前事实重建，不复活旧工具或交互 Promise。覆盖模型 / 工具重叠、并行工具、等待确认、取消未结算、各类 Turn 终态、事件合并及重连；常规投影不得读历史或账本。
-2. **输入与控制回执（待实施）**：基于现有身份明确 accepted / started / settled，以及 cancellation requested / turn settled；重试去重沿用既有持久化事实，不把“收到”伪装成“完成”。新增和 steer 的承诺分别说明，不承诺未持久化队列的 crash-safe 重放。
-3. **操作可用性（待实施）**：统一 send / steer / cancel / resume 的 Runtime 可请求条件与稳定 reason code；与实际命令校验共用规则，仍以命令执行时的校验为准。不可凭一个 canResume 绕过恢复核对。
+1. **运行摘要与事件一致性（已完成）**：新增 `SessionExecution`；`SessionSnapshot.execution` 必填，会话增量可携带 execution 更新，全局事件携带同源摘要。取消请求发出状态变化，回合结算后清除瞬时活动；重启只从当前事实重建，不复活旧工具或交互 Promise。覆盖模型 / 工具重叠、并行工具、等待确认、取消未结算、各类 Turn 终态、事件合并及重连；常规投影不得读历史或账本。
+2. **输入与控制回执（本阶段）**：基于现有身份明确 accepted / started / settled，以及 cancellation requested / turn settled；重试去重沿用当前持久 Turn 的 `requestId`，不新增 CommandInbox。新增输入在成功持久化后返回，steer 只承诺已进入当前进程队列，不承诺未持久化队列的 crash-safe 重放。
+3. **操作可用性（本阶段）**：在 `execution.actions` 投影 `submit / steer / cancel / resume` 的 Runtime 约束和稳定 reason code；宿主仍须叠加租户与产品授权，且命令执行时再次校验。`resume.available` 只表示进入恢复核对的边界，不代表历史、账本或外部任务一定通过。
 4. **共享包同步与宿主验收（Pie 完成后）**：差量同步，不重写 Cloud 业务；检查宿主不会把 interrupted 或未知状态兜底为成功，补充断连、恢复及取消的联合验收。此项不能由 Pie 本地测试替代。
 
 每阶段先运行定向 Node 测试，再运行 `npm run test:runtime`、`npm run test:server` 和 `npm run check`。不调用付费模型、不执行 build；验收记录只登记实际运行的结果。
@@ -37,4 +37,14 @@
   - 新增 `packages/server/test/execution-state.test.ts` 并纳入 `test:server`，补充事件合并测试，更新 Web 测试快照及 Runtime changelog。没有修改存储 schema、模型 / 工具执行协议或 Cloud。
   - 验证：定向 Node 测试 13/13；`npm run test:runtime` 59/59；`npm run test:server` 241/241；`npm run check` 全部通过，Biome 未额外修改文件。测试覆盖模型 / 工具重叠及工具先结束、多工具并行、确认等待、取消已返回但工具未结算、原始终态、重新激活与事件投影一致性；常规投影没有新增历史或账本读取。
   - 验证边界：共享协议与事件边界使用假模型、受控工具及真实 SQLite 回归；未调用付费模型、未运行 build、未部署 Sidecar、未验证宿主 UI。阶段 1 没有偏离范围，不把后续回执或操作可用性标为完成。
-- 阶段 2–4：未开始。Cloud 保持不动。
+- 阶段 2：已完成 Pie 侧实现与本地验收。
+  - `protocol.ts` 新增 `TurnReceipt / CancellationReceipt / SteerReceipt`；`runtime.ts` 在提交、恢复、steer 和取消入口返回明确回执，不把受理或取消请求当成完成。
+  - 当前 Turn 保存原始 `rootRequestId`，保留 steer 更新的最近 `requestId`；相同原始或最近 ID 重试返回现有 Turn，不追加用户消息或再次启动。范围仅限当前 Turn，不新增跨 Turn 收件箱；steer 队列仍不承诺崩溃重放。
+  - `runtime.test.ts` 覆盖受理、启动、排队、取消、结算和 steer 后原始请求重试；嵌入文档与 Runtime changelog 同步说明。
+  - 验证：定向 Node 测试 46/46、`npm run test:core` 71/71；本轮追加回执、重试去重及操作可用性测试，`npm run test:runtime` 60/60、`npm run test:server` 252/252、`npm run check` 全部通过。
+  - 未调用付费模型，未修改 Cloud / Astron、未构建或部署；阶段 3 已在 Pie 侧完成。
+- 阶段 3：已完成 Pie 侧实现与本地验收。
+  - `execution.actions` 暴露四个 Runtime 操作的可请求条件和稳定原因码；`resume.available` 只代表进入恢复核对边界，不替代历史、账本和外部任务校验。
+  - `packages/server` 的全局事件快照同步携带 `execution`，使云端或宿主可读取同一操作可用性投影；未新增宿主权限判断。
+  - 验证：`npm run test:runtime` 60/60、`npm run test:server` 252/252、`npm run check` 全部通过；未修改 Cloud / Astron，未构建或部署。
+- 阶段 4：未开始。Cloud 保持不动。

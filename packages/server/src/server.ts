@@ -98,7 +98,8 @@ function projectGlobalPacket(packet: GlobalSessionEvent) {
 		const projected = globalAgentEvent(event);
 		return projected ? { ...base, event: projected } : undefined;
 	}
-	if (type === "snapshot" || type === "turn.settled") return { ...base, snapshot: { turn: snapshot.turn } };
+	if (type === "snapshot" || type === "turn.settled")
+		return { ...base, snapshot: { turn: snapshot.turn, execution: snapshot.execution } };
 	if (type === "interaction.requested") return { ...base, interaction };
 	if (type.startsWith("compaction.")) return { ...base, event };
 	return undefined;

@@ -16,6 +16,10 @@
 
 ### Added
 
+- Return explicit Turn admission, execution, settlement, cancellation and in-memory steering receipts; deduplicate retries against the current Turn's original or latest request ID.
+
+- Expose Runtime-only `submit`, `steer`, `cancel` and `resume` availability with stable reason codes, including the same execution projection in global snapshot events.
+
 - Persist a pending assistant-call snapshot before streamed tool side effects; clear it when the final response commits and refuse blind recovery if the process stops mid-response. Durable jobs can use the committed snapshot before canonical assistant history is available.
 
 - Record Turn-scoped tool execution facts for inline, delegated and durable tools; retain a cursor-paged journal after Turn completion without enlarging session metadata or event packets. Validate journal/history consistency before external-task recovery and refuse result-only commits after a persistence barrier fails.

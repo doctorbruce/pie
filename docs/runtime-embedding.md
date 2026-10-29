@@ -109,7 +109,9 @@ await runtime.close();
 
 ## 事件、隔离与生命周期
 
-- `submitTurn` 返回已接纳的 turn 标识；不等于模型完成。用 `turn.settled` 或 `waitForTurn` 判断终态；运行时仍使用同一份 Agent Loop。
+- `submitTurn` / `resumeTurn` 返回 `TurnReceipt`：包含会话、Turn、可选 request ID，以及 `accepted / started / settled`。启动表示已发起本实例的执行，不表示模型完成；用 `turn.settled` 或 `waitForTurn` 读取实际结果。
+- `submitTurn` 的同一 request ID 重试只在当前 Turn 的原始或最近 request ID 范围内去重，复用该 Turn 回执，不追加输入或重跑。`steer` 返回 `queued: true, durable: false`，只承诺已进入当前进程队列；`cancelTurn` 另返回 `cancellationRequested`，不能据此推断工具副作用已撤销。
+- `SessionSnapshot.execution.actions` 暴露 `submit / steer / cancel / resume` 的 Runtime 可请求条件和稳定原因码；它只描述当前实例状态，不替代宿主权限、恢复前的历史与账本校验，`resume` 可用也不代表恢复一定会被接纳。
 - `await subscribe(...)` 装载目标元信息并返回取消订阅函数；`subscribeAll(...)` 仍同步返回。两者不自动发送初始快照，也不持久重放事件。宿主可用 `getSession` 读取快照；订阅回调不应阻塞或抛错，异步投递与背压由宿主承担。
 - `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。活跃 Turn 的取消在内存中校验身份后立即向 Agent / MCP 发出停止信号，不等待普通命令队列、历史读取或持久化；重复请求复用同一取消操作。取消确认仍等待意图保存与必要清理，外部任务仍先保存意图再请求执行器取消；SDK / Worker 必须核对实际停止状态。
 - 当前单实例按顺序接纳普通控制操作，避免异步存储下重复提交；不同会话的模型执行可并行。活跃取消独立于该队列，其清理仍属于当前回合的生命周期屏障，下一 Turn、会话卸载和关闭不能越过；未激活会话与中断 Turn 的取消继续串行处理。此处不是分布式锁，也不是跨节点调度器。

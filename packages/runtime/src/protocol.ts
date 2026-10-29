@@ -179,9 +179,39 @@ export type ModelCatalog = {
 export type Turn = {
 	id: string;
 	requestId?: string;
+	rootRequestId?: string;
 	status: "running" | "interrupted" | "completed" | "cancelled" | "failed";
 	error?: string;
 };
+export type TurnReceipt = {
+	sessionId: string;
+	turnId: string;
+	requestId?: string;
+	accepted: boolean;
+	started: boolean;
+	settled: boolean;
+};
+export type CancellationReceipt = TurnReceipt & {
+	cancellationRequested: boolean;
+};
+export type SteerReceipt = TurnReceipt & {
+	queued: boolean;
+	durable: boolean;
+};
+export type SessionAction = "submit" | "steer" | "cancel" | "resume";
+export type ActionUnavailableReason =
+	| "runtime_closing"
+	| "storage_unavailable"
+	| "subagent_managed_by_parent"
+	| "no_turn"
+	| "turn_running"
+	| "turn_interrupted"
+	| "turn_terminal"
+	| "cancellation_requested"
+	| "cancellation_in_progress"
+	| "recovery_blocked";
+export type SessionActionAvailability = { available: boolean; reason?: ActionUnavailableReason };
+export type SessionActions = Record<SessionAction, SessionActionAvailability>;
 export type ContextCompaction = {
 	summary: string;
 	firstKeptMessage: number;
@@ -211,6 +241,7 @@ export type SessionExecution = {
 	waitingForInteraction: boolean;
 	cancellationRequested: boolean;
 	recoveryBlockedReason?: string;
+	actions: SessionActions;
 };
 export type SessionSnapshot = SessionSummary & {
 	instanceId: string;

@@ -138,6 +138,7 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	assert(received.some((p) => p.event?.type === "tool_execution_start"));
 	assert(received.some((p) => p.event?.type === "message_update"));
 	assert.equal(received.find((p) => p.event?.type === "agent_end")?.snapshot.turn?.status, "running");
+	assert(received.every((packet) => packet.snapshot.execution));
 	const final = received.at(-1)?.snapshot;
 	assert(final);
 	assert.equal(final.turn?.status, "completed");
@@ -303,7 +304,7 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 	while (!next.done) {
 		const packet = next.value;
 		assert(Buffer.byteLength(JSON.stringify(packet)) < 64 * 1024);
-		if (packet.snapshot) assert.deepEqual(Object.keys(packet.snapshot), ["turn"]);
+		if (packet.snapshot) assert.deepEqual(Object.keys(packet.snapshot), ["turn", "execution"]);
 		if (packet.type === "agent.event") {
 			receivedAgentEvent = true;
 			assert.equal("snapshot" in packet, false);

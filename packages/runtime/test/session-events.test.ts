@@ -17,7 +17,18 @@ const snapshot: SessionSnapshot = {
 	updatedAt: 0,
 	messages: [{ role: "user", content: "history", timestamp: 1 }],
 	interactions: [],
-	execution: { modelStreaming: false, activeTools: [], waitingForInteraction: false, cancellationRequested: false },
+	execution: {
+		modelStreaming: false,
+		activeTools: [],
+		waitingForInteraction: false,
+		cancellationRequested: false,
+		actions: {
+			submit: { available: true },
+			steer: { available: false, reason: "turn_running" },
+			cancel: { available: true },
+			resume: { available: false, reason: "turn_running" },
+		},
+	},
 	history: { leafId: "leaf", nextBeforeSeq: 5 },
 };
 const packet = (revision: number, event?: SessionEvent["event"]): SessionEvent => ({
@@ -94,6 +105,7 @@ test("execution deltas preserve orthogonal work and every native Turn outcome", 
 		activeTools: [{ toolCallId: "call", toolName: "remote" }],
 		waitingForInteraction: true,
 		cancellationRequested: true,
+		actions: snapshot.execution.actions,
 	};
 	const running = applySessionEvent(snapshot, { ...packet(2), execution });
 	assert(running);

@@ -598,6 +598,77 @@ test("host subscriptions can approve and cancel SDK tools without an HTTP transp
 	await assert.rejects(runtime.cancelTurn(session.id, { turnId: "stale" }), /turnId 不匹配/);
 });
 
+test("turn receipts distinguish accepted, started, queued and settled, and retry the current requestId", async (context) => {
+	const memory = memoryStore();
+	let running = () => {};
+	const entered = new Promise<void>((resolve) => {
+		running = resolve;
+	});
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", () => running()),
+	});
+	context.after(() => runtime.close());
+	await runtime.registerHostRuntimes([definition]);
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const accepted = await runtime.submitTurn(session.id, {
+		text: '调用工具 sdk_echo {"text":"wait","wait":true}',
+		requestId: "request-retry",
+	});
+	assert.deepEqual(accepted, {
+		sessionId: session.id,
+		turnId: accepted.turnId,
+		requestId: "request-retry",
+		accepted: true,
+		started: true,
+		settled: false,
+	});
+	await entered;
+	const runningState = await runtime.getSession(session.id, { limit: 1 });
+	assert.equal(runningState.execution.actions.submit.available, false);
+	assert.equal(runningState.execution.actions.submit.reason, "turn_running");
+	assert.equal(runningState.execution.actions.steer.available, true);
+	assert.equal(runningState.execution.actions.cancel.available, true);
+	assert.equal(runningState.execution.actions.resume.reason, "turn_running");
+	const retry = await runtime.submitTurn(session.id, {
+		text: '调用工具 sdk_echo {"text":"wait","wait":true}',
+		requestId: "request-retry",
+	});
+	assert.deepEqual(retry, accepted);
+	const steer = await runtime.steer(session.id, {
+		turnId: accepted.turnId,
+		text: "稍后继续",
+		requestId: "steer-request",
+	});
+	assert.deepEqual(steer, {
+		sessionId: session.id,
+		turnId: accepted.turnId,
+		requestId: "steer-request",
+		accepted: true,
+		started: true,
+		settled: false,
+		queued: true,
+		durable: false,
+	});
+	const cancellation = await runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+	assert.equal(cancellation.accepted, true);
+	assert.equal(cancellation.cancellationRequested, true);
+	assert.equal(cancellation.turnId, accepted.turnId);
+	assert.equal(cancellation.settled, false);
+	const settled = await runtime.waitForTurn(session.id);
+	assert.equal(settled.turn?.status, "cancelled");
+	assert.equal(settled.execution.actions.submit.available, true);
+	assert.equal(settled.execution.actions.cancel.reason, "turn_terminal");
+	assert.equal(settled.execution.actions.resume.reason, "turn_terminal");
+	const settledRetry = await runtime.submitTurn(session.id, {
+		text: '调用工具 sdk_echo {"text":"wait","wait":true}',
+		requestId: "request-retry",
+	});
+	assert.equal(settledRetry.turnId, accepted.turnId);
+	assert.equal(settledRetry.settled, true);
+	assert.equal(settledRetry.started, false);
+});
+
 for (const historyTarget of ["same session", "another session"]) {
 	test(`running cancellation bypasses blocked history from ${historyTarget}`, { timeout: 10000 }, async (context) => {
 		const memory = memoryStore();
@@ -670,12 +741,12 @@ for (const historyTarget of ["same session", "another session"]) {
 			Promise.all([cancellation, stopped, completed]).then(([receipt]) => receipt),
 			delay(1000).then(() => "blocked" as const),
 		]);
-		assert.notEqual(
-			result,
-			"blocked",
-			"Cancellation delivery, acknowledgement and settlement must not wait for history I/O",
-		);
-		assert.deepEqual(result, { sessionId: session.id, turnId: accepted.turnId });
+		if (result === "blocked")
+			assert.fail("Cancellation delivery, acknowledgement and settlement must not wait for history I/O");
+		assert.equal(result.sessionId, session.id);
+		assert.equal(result.turnId, accepted.turnId);
+		assert.equal(result.accepted, true);
+		assert.equal(result.cancellationRequested, true);
 		assert.equal(memory.sessions.get(session.id)?.turn?.status, "cancelled");
 		context.diagnostic(
 			`Cancellation reached the tool in ${(abortedAt - startedAt).toFixed(1)} ms while history was still blocked`,
@@ -758,7 +829,10 @@ test(
 		assert.equal(acknowledged, false, "An uncommitted cancellation must not be acknowledged");
 		assert.equal(memory.closes, 0, "Shutdown must retain storage until cancellation cleanup finishes");
 		releaseWrite();
-		assert.deepEqual(await cancellation, { sessionId: session.id, turnId: accepted.turnId });
+		assert.equal((await cancellation).sessionId, session.id);
+		assert.equal((await cancellation).turnId, accepted.turnId);
+		assert.equal((await cancellation).accepted, true);
+		assert.equal((await cancellation).cancellationRequested, true);
 		assert.deepEqual(await repeated, await cancellation);
 		await closing;
 		assert.equal(memory.closes, 1);

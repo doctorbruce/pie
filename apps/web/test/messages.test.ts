@@ -37,7 +37,18 @@ const snapshot: SessionSnapshot = {
 	messages: [{ role: "user", content: "测试错误", timestamp: 0 }, assistant],
 	turn: { id: "turn-1", status: "running" },
 	interactions: [],
-	execution: { modelStreaming: false, activeTools: [], waitingForInteraction: false, cancellationRequested: false },
+	execution: {
+		modelStreaming: false,
+		activeTools: [],
+		waitingForInteraction: false,
+		cancellationRequested: false,
+		actions: {
+			submit: { available: true },
+			steer: { available: false, reason: "turn_running" },
+			cancel: { available: true },
+			resume: { available: false, reason: "turn_running" },
+		},
+	},
 };
 
 test("tool results join their call and preserve reasoning, errors and stable message ids", () => {

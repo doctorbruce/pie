@@ -227,6 +227,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 					const tail = truncateTail(job.output).content || "(no output)";
 					await runtime.notifyBackground(
 						`<background_job id="${job.id}" type="bash" state="${job.status}">\n${formatJobStatus(job)}\n\n${tail}\n\noutput=${outputPath}\n</background_job>`,
+						job.id,
 					);
 				},
 			});

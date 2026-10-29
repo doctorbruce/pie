@@ -123,6 +123,15 @@ export class BackgroundJobs {
 		return job ? this.snapshot(job) : undefined;
 	}
 
+	acknowledge(id: string): void {
+		const job = this.#jobs.get(id);
+		if (job && job.status !== "running") job.notifyOnSettled = false;
+	}
+
+	shouldNotify(id: string): boolean {
+		return this.#jobs.get(id)?.notifyOnSettled !== false;
+	}
+
 	async wait(id: string, waitMs?: number, signal?: AbortSignal): Promise<BackgroundJobInfo | undefined> {
 		signal?.throwIfAborted();
 		const job = this.#jobs.get(id);

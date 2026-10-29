@@ -153,8 +153,8 @@ class PendingMessageQueue {
 		return [first];
 	}
 
-	clear(): void {
-		this.messages = [];
+	clear(predicate?: (message: AgentMessage) => boolean): void {
+		this.messages = predicate ? this.messages.filter((message) => !predicate(message)) : [];
 	}
 }
 
@@ -313,9 +313,9 @@ export class Agent {
 		this.steeringQueue.clear();
 	}
 
-	/** Remove all queued follow-up messages. */
-	clearFollowUpQueue(): void {
-		this.followUpQueue.clear();
+	/** Remove queued follow-up messages matching the predicate, or all if omitted. */
+	clearFollowUpQueue(predicate?: (message: AgentMessage) => boolean): void {
+		this.followUpQueue.clear(predicate);
 	}
 
 	/** Remove all queued steering and follow-up messages. */

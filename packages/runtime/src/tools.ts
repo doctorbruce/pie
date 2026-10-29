@@ -38,7 +38,7 @@ export type ToolRuntime = {
 	allowedDirectories?: readonly string[];
 	ask: ToolAsk;
 	jobs: BackgroundJobs;
-	notifyBackground?: (message: string) => Promise<void>;
+	notifyBackground?: (message: string, jobId?: string) => Promise<void>;
 	runJob?: (toolCallId: string, signal?: AbortSignal) => Promise<AgentToolResult<unknown>>;
 };
 

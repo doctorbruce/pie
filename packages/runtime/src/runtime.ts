@@ -652,7 +652,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			{
 				directory: session.workspacePath ?? process.cwd(),
 				jobs,
-				notifyBackground: (message) => notifyBackground(session, message),
+				notifyBackground: (message, jobId) => notifyBackground(session, message, jobId),
 				runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 			},
 		);
@@ -805,9 +805,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		session.mcpAbort?.abort();
 		return cancellation;
 	}
-	async function notifyBackground(session: Session, text: string) {
+	async function notifyBackground(session: Session, text: string, jobId?: string) {
 		if (closing) return;
 		const started = await execute(async () => {
+			if (jobId && !jobs.shouldNotify(jobId)) return;
 			session = await requireSession(session.id);
 			if (session.turn?.status !== "running") await session.runPromise;
 			if (session.turnCheckpoint) {
@@ -815,7 +816,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await persist(session);
 			}
 			const agent = await attachAgent(session);
-			const content = [{ type: "text" as const, text, synthetic: true as const }];
+			if (jobId && !jobs.shouldNotify(jobId)) return;
+			const content = [{ type: "text" as const, text, synthetic: true as const, backgroundJobId: jobId }];
 			agent.followUp({ role: "user", content, timestamp: Date.now() });
 			if (agent.state.isStreaming || session.turn?.status === "running") return;
 			session.turn = { id: randomUUID(), status: "running" };
@@ -830,6 +832,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	function bindAgent(session: Session, agent: ReturnType<typeof factory.create>) {
 		session.agent = agent;
+		agent.followUpMode = "all";
 		session.modelStreaming = false;
 		session.activeTools = new Map();
 		agent.subscribe(async (event) => {
@@ -869,6 +872,34 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (session.turnCheckpoint && jobs.list(session.id).some((job) => job.status === "running"))
 					session.turnCheckpoint.blockedReason = "包含后台任务，尚不支持接管";
 				const message = event.message;
+				if (
+					message.role === "toolResult" &&
+					(message.toolName === "job_output" || message.toolName === "job_kill") &&
+					!message.isError &&
+					message.details &&
+					typeof message.details === "object"
+				) {
+					const jobId = Reflect.get(message.details, "jobId");
+					const status = Reflect.get(message.details, "status");
+					if (
+						typeof jobId === "string" &&
+						(status === "completed" || status === "failed" || status === "cancelled") &&
+						jobs.get(jobId)?.ownerSessionId === session.id
+					) {
+						jobs.acknowledge(jobId);
+						agent.clearFollowUpQueue(
+							(pending) =>
+								pending.role === "user" &&
+								Array.isArray(pending.content) &&
+								pending.content.some(
+									(part) =>
+										part.type === "text" &&
+										Reflect.get(part, "synthetic") === true &&
+										Reflect.get(part, "backgroundJobId") === jobId,
+								),
+						);
+					}
+				}
 				const background =
 					message.role === "toolResult" &&
 					message.details &&
@@ -1149,6 +1180,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await notifyBackground(
 					parent,
 					`<task id="${child.id}" state="${state}">\n<summary>${state === "completed" ? "Background task completed" : "Background task failed"}: ${description}</summary>\n<task_result>\n${job.error ?? job.output}\n</task_result>\n</task>`,
+					job.id,
 				);
 			},
 		});
@@ -1446,7 +1478,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					{
 						directory: typeof body.workspacePath === "string" ? body.workspacePath.trim() : process.cwd(),
 						jobs,
-						notifyBackground: (message) => notifyBackground(session, message),
+						notifyBackground: (message, jobId) => notifyBackground(session, message, jobId),
 						runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 					},
 				);

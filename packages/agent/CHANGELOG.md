@@ -8,6 +8,8 @@
 
 ### Added
 
+- Allow `clearFollowUpQueue` to remove matching pending messages without discarding unrelated follow-ups or steering.
+
 - Start complete, strictly parsed tool calls while the current model response is still streaming. Preserve batch ordering and wait for tool results before the next request; incomplete calls remain deferred and are not executed after a length cutoff.
 - Add `Agent.replaceMessages()` to replace persisted working history between provider requests, releasing live loop and accumulated result references as well as state. Subsequent `agent_end.messages` contains only retained messages produced by that run.
 

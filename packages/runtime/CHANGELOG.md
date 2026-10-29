@@ -33,6 +33,8 @@
 
 - Cancel external jobs started during model streaming using their checkpointed assistant message, retain matching interrupted history, and settle cancellation persistence before releasing the turn. Late external submissions cannot write into a subsequent turn.
 
+- Withdraw queued or late local-job receipts after `job_output` or `job_kill` delivers a terminal result; batch unread background notifications into one follow-up request while preserving running-job completion delivery.
+
 - Avoid duplicate model wakeups after explicit `job_kill` cancellation of local shell or subagent jobs; keep cancellation results and output readable, including when settlement follows the tool's bounded wait.
 
 - Deliver active-Turn cancellation before queued commands, history reads and persistence; retain cancellation acknowledgement, external-job cleanup and session-lifecycle barriers.

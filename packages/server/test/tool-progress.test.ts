@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { type TestContext, test } from "node:test";
 import {
 	Agent,
 	type AgentEvent,
@@ -11,6 +11,7 @@ import {
 	type AgentToolUpdateCallback,
 } from "@earendil-works/pi-agent-core";
 import {
+	createAssistantMessageEventStream,
 	createModels,
 	fauxAssistantMessage,
 	fauxProvider,
@@ -19,8 +20,10 @@ import {
 	Type,
 } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "@pie/local/agent";
+import { createRuntime } from "@pie/runtime";
 import { BackgroundJobs } from "@pie/runtime/jobs";
 import { withToolProgress } from "@pie/runtime/tool-progress";
+import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
 import { jobTools } from "../../local/src/tools/job.ts";
 
 function deferred<Value>() {
@@ -32,6 +35,164 @@ function deferred<Value>() {
 	});
 	return { promise, resolve, reject };
 }
+
+async function notificationRuntime(context: TestContext) {
+	const directory = await mkdtemp(join(tmpdir(), "pie-job-notifications-"));
+	const factory = createAgentFactory({ PI_DATA_DIR: directory });
+	const first = createAssistantMessageEventStream();
+	let native!: NonNullable<Parameters<typeof factory.create>[9]>;
+	let agent!: ReturnType<typeof factory.create>;
+	let requests = 0;
+	const runtime = await createRuntime({
+		store: createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory })),
+		agents: {
+			...factory,
+			create(...args: Parameters<typeof factory.create>) {
+				native = args[9]!;
+				agent = factory.create(...args);
+				agent.streamFunction = () => {
+					if (++requests === 1) return first;
+					const stream = createAssistantMessageEventStream();
+					stream.push({ type: "done", reason: "stop", message: fauxAssistantMessage("finished") });
+					return stream;
+				};
+				return agent;
+			},
+		},
+		hostRuntimes: [
+			{
+				assistantId: "assistant",
+				assistantRevision: "1",
+				runtime: { systemPrompt: "Test", toolIds: ["bash"], skills: [], subagents: [] },
+			},
+		],
+	});
+	context.after(async () => {
+		await runtime.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	const session = await runtime.createSession({ assistantId: "assistant" });
+	await runtime.submitTurn(session.id, { text: "Finish the work" });
+	return {
+		runtime,
+		session,
+		native,
+		agent,
+		get requests() {
+			return requests;
+		},
+		respond(message: ReturnType<typeof fauxAssistantMessage>) {
+			first.push({ type: "done", reason: message.stopReason === "toolUse" ? "toolUse" : "stop", message });
+		},
+	};
+}
+
+test("terminal job_output removes queued receipts without removing other follow-ups", async (context) => {
+	const host = await notificationRuntime(context);
+	const ids: string[] = [];
+	for (const failed of [false, true]) {
+		const notified = deferred<void>();
+		const job = host.native.jobs.start({
+			ownerSessionId: host.session.id,
+			type: "task",
+			title: "Old screenshot",
+			async run() {
+				if (failed) throw new Error("render failed");
+				return { output: "render finished" };
+			},
+			async onSettled(settled) {
+				await host.native.notifyBackground!(`Receipt ${settled.id}`, settled.id);
+				notified.resolve();
+			},
+		});
+		ids.push(job.id);
+		await notified.promise;
+	}
+	host.agent.followUp({ role: "user", content: "Keep this separate follow-up", timestamp: Date.now() });
+	host.respond(
+		fauxAssistantMessage(
+			ids.map((job_id) => fauxToolCall("job_output", { job_id })),
+			{ stopReason: "toolUse" },
+		),
+	);
+	await host.runtime.waitForTurn(host.session.id);
+	assert.equal(host.requests, 3);
+	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 2);
+	assert.doesNotMatch(JSON.stringify(host.agent.state.messages), /Receipt /);
+});
+
+test("late completion receipts do not wake a model after terminal job_output", async (context) => {
+	const host = await notificationRuntime(context);
+	const release = deferred<void>();
+	const notified = deferred<void>();
+	const job = host.native.jobs.start({
+		ownerSessionId: host.session.id,
+		type: "task",
+		title: "Screenshot",
+		async run() {
+			return { output: "finished" };
+		},
+		async onSettled(settled) {
+			await release.promise;
+			await host.native.notifyBackground!(`Late receipt ${settled.id}`, settled.id);
+			notified.resolve();
+		},
+	});
+	await host.native.jobs.wait(job.id);
+	host.respond(fauxAssistantMessage([fauxToolCall("job_output", { job_id: job.id })], { stopReason: "toolUse" }));
+	await host.runtime.waitForTurn(host.session.id);
+	release.resolve();
+	await notified.promise;
+	assert.equal(host.requests, 2);
+	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 1);
+});
+
+test("unread completion receipts are delivered together in one follow-up model request", async (context) => {
+	const host = await notificationRuntime(context);
+	for (let index = 0; index < 3; index++) {
+		const notified = deferred<void>();
+		host.native.jobs.start({
+			ownerSessionId: host.session.id,
+			type: "task",
+			title: "Unread result",
+			async run() {
+				return { output: "finished" };
+			},
+			async onSettled(settled) {
+				await host.native.notifyBackground!(`Unread receipt ${settled.id}`, settled.id);
+				notified.resolve();
+			},
+		});
+		await notified.promise;
+	}
+	host.respond(fauxAssistantMessage("Initial answer"));
+	await host.runtime.waitForTurn(host.session.id);
+	assert.equal(host.requests, 2);
+	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 4);
+});
+
+test("running job_output preserves the later completion notification", async (context) => {
+	const host = await notificationRuntime(context);
+	const completion = deferred<{ output: string }>();
+	const notified = deferred<void>();
+	const job = host.native.jobs.start({
+		ownerSessionId: host.session.id,
+		type: "task",
+		title: "Still running",
+		run: () => completion.promise,
+		async onSettled(settled) {
+			await host.native.notifyBackground!(`Real completion ${settled.id}`, settled.id);
+			notified.resolve();
+		},
+	});
+	host.respond(fauxAssistantMessage([fauxToolCall("job_output", { job_id: job.id })], { stopReason: "toolUse" }));
+	await host.runtime.waitForTurn(host.session.id);
+	assert.equal(host.requests, 2);
+	completion.resolve({ output: "finished" });
+	await notified.promise;
+	assert.equal(host.requests, 3);
+	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 2);
+});
 
 function tool(execute: AgentTool["execute"]): AgentTool {
 	return {

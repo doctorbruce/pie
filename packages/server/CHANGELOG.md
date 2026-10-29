@@ -33,6 +33,9 @@
 
 ### Fixed
 
+- Forward the same execution projection on every global SSE packet, retain interaction resolution and state-only Agent events, and include execution in session bootstraps.
+- Preserve immediate active-Turn cancellation through the Local host instead of waiting for queued reads or management commands; retain shutdown and settlement barriers.
+
 - Bound SQLite history pagination and compaction working-path traversal to the requested page or checkpoint boundaries instead of walking the full parent chain.
 - Stop SQLite recovery path traversal at the Turn input and reject missing or off-branch checkpoints without blocking startup or replaying tools.
 - Expose webfetch HTTP status, final URL, body size and empty-content boundaries without guessing application success from response text.

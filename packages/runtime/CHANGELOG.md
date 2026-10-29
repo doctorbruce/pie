@@ -35,6 +35,8 @@
 
 ### Fixed
 
+- Reject steering during cancellation using the same availability rules as execution projections, including after asynchronous persistence and Agent attachment; keep queued and late input out of the next Turn.
+
 - Cancel external jobs started during model streaming using their checkpointed assistant message, retain matching interrupted history, and settle cancellation persistence before releasing the turn. Late external submissions cannot write into a subsequent turn.
 
 - Withdraw queued or late local-job receipts after `job_output` or `job_kill` delivers a terminal result; batch unread background notifications into one follow-up request while preserving running-job completion delivery.

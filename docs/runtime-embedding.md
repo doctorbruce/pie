@@ -112,9 +112,12 @@ await runtime.close();
 - `submitTurn` / `resumeTurn` 返回 `TurnReceipt`：包含会话、Turn、可选 request ID，以及 `accepted / started / settled`。启动表示已发起本实例的执行，不表示模型完成；用 `turn.settled` 或 `waitForTurn` 读取实际结果。
 - `submitTurn` 的同一 request ID 重试只在当前 Turn 的原始或最近 request ID 范围内去重，复用该 Turn 回执，不追加输入或重跑。`steer` 返回 `queued: true, durable: false`，只承诺已进入当前进程队列；`cancelTurn` 另返回 `cancellationRequested`，不能据此推断工具副作用已撤销。
 - `SessionSnapshot.execution.actions` 暴露 `submit / steer / cancel / resume` 的 Runtime 可请求条件和稳定原因码；它只描述当前实例状态，不替代宿主权限、恢复前的历史与账本校验，`resume` 可用也不代表恢复一定会被接纳。
+- `steer` 与投影复用同一准入规则，并在持久化、Agent 装载等异步等待后再次校验；取消已请求或仍在清理时拒绝追加输入，迟到输入不会进入下一 Turn。
+- HTTP 会话 SSE 用最近 50 条消息的快照启动，后续发送增量；全局 `/events` 不发送初始快照，每个包都携带同源 `execution`，包括仅有状态变化的模型事件及交互请求、交互结束。全局包不包含完整历史或 assistant partial；读取同一 `instanceId / revision` 时，其摘要与会话增量及快照一致。
 - `await subscribe(...)` 装载目标元信息并返回取消订阅函数；`subscribeAll(...)` 仍同步返回。两者不自动发送初始快照，也不持久重放事件。宿主可用 `getSession` 读取快照；订阅回调不应阻塞或抛错，异步投递与背压由宿主承担。
 - `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。活跃 Turn 的取消在内存中校验身份后立即向 Agent / MCP 发出停止信号，不等待普通命令队列、历史读取或持久化；重复请求复用同一取消操作。取消确认仍等待意图保存与必要清理，外部任务仍先保存意图再请求执行器取消；SDK / Worker 必须核对实际停止状态。
 - 当前单实例按顺序接纳普通控制操作，避免异步存储下重复提交；不同会话的模型执行可并行。活跃取消独立于该队列，其清理仍属于当前回合的生命周期屏障，下一 Turn、会话卸载和关闭不能越过；未激活会话与中断 Turn 的取消继续串行处理。此处不是分布式锁，也不是跨节点调度器。
+- Local 封装直接转交 `cancelTurn`，不经过助手管理和会话读取的外层队列；关闭开始后仍拒绝新的取消请求，Runtime 继续负责取消身份校验、持久化与关闭屏障。
 - `sessionRetention` 默认 `"retain"`，本地继续复用内存中的 Agent 和工作历史；宿主可显式传入 `"release-after-turn"`，在回合结果提交、事件收尾完成后解除 Agent 和消息引用，下一轮通过 `store.readWorkingPath` 加载 checkpoint 工作窗口并重建。该策略不选择数据库，Redis / SQL 仍由宿主实现 `RuntimeStore`。
 - 卸载不调用 `deleteSession`、不关闭共享 MCP / 存储。没有执行、后台工作、确认、读操作或订阅引用时，从实例缓存移除整个 Session；下一次访问通过 `readSession` 重建元信息。订阅期间保留轻量 Session，但仍回收已提交工作正文。创建、导入、分叉、分支选择和闲置元信息写入遵循同一策略。完整历史浏览和导出仍临时读取持久数据；本地 HTTP 默认完整会话列表由 Local 分页汇总，不因此预载执行对象。
 - 运行中、排队输入、待确认或相关后台任务会阻止卸载；Subagent 先提取结果再释放，后台完成通知进入同一接纳通道。成功、失败和取消都以最终保存成功为释放前提；写入失败保留内存并停止接受后续写入。调用方自行持有的快照不受此策略管理，也不保证 RSS 立即下降。

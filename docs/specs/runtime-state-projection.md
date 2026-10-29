@@ -1,6 +1,6 @@
 # 运行状态投影与控制语义
 
-状态：进行中，2026-10-29。先在 Pie 完成共享实现与验证；Cloud 暂不修改，后续按共享包差量同步，不覆盖宿主已有改动。
+状态：已完成 Pie 侧阶段 1–3 与边界收口，2026-10-29。阶段 4 未开始，不在本次范围。
 
 ## 问题与目标
 
@@ -20,13 +20,15 @@
 ## 实施顺序与验收
 
 1. **运行摘要与事件一致性（已完成）**：新增 `SessionExecution`；`SessionSnapshot.execution` 必填，会话增量可携带 execution 更新，全局事件携带同源摘要。取消请求发出状态变化，回合结算后清除瞬时活动；重启只从当前事实重建，不复活旧工具或交互 Promise。覆盖模型 / 工具重叠、并行工具、等待确认、取消未结算、各类 Turn 终态、事件合并及重连；常规投影不得读历史或账本。
-2. **输入与控制回执（本阶段）**：基于现有身份明确 accepted / started / settled，以及 cancellation requested / turn settled；重试去重沿用当前持久 Turn 的 `requestId`，不新增 CommandInbox。新增输入在成功持久化后返回，steer 只承诺已进入当前进程队列，不承诺未持久化队列的 crash-safe 重放。
-3. **操作可用性（本阶段）**：在 `execution.actions` 投影 `submit / steer / cancel / resume` 的 Runtime 约束和稳定 reason code；宿主仍须叠加租户与产品授权，且命令执行时再次校验。`resume.available` 只表示进入恢复核对的边界，不代表历史、账本或外部任务一定通过。
-4. **共享包同步与宿主验收（Pie 完成后）**：差量同步，不重写 Cloud 业务；检查宿主不会把 interrupted 或未知状态兜底为成功，补充断连、恢复及取消的联合验收。此项不能由 Pie 本地测试替代。
+2. **输入与控制回执（已完成）**：基于现有身份明确 accepted / started / settled，以及 cancellation requested / turn settled；重试去重沿用当前持久 Turn 的 `requestId`，不新增 CommandInbox。新增输入在成功持久化后返回，steer 只承诺已进入当前进程队列，不承诺未持久化队列的 crash-safe 重放。
+3. **操作可用性（已完成）**：在 `execution.actions` 投影 `submit / steer / cancel / resume` 的 Runtime 约束和稳定 reason code；宿主仍须叠加租户与产品授权，且命令执行时再次校验。`resume.available` 只表示进入恢复核对的边界，不代表历史、账本或外部任务一定通过。
+4. **共享包同步与宿主验收（未开始，本次范围外）**：差量同步，不重写 Cloud 业务；检查宿主不会把 interrupted 或未知状态兜底为成功，补充断连、恢复及取消的联合验收。此项不能由 Pie 本地测试替代。
 
 每阶段先运行定向 Node 测试，再运行 `npm run test:runtime`、`npm run test:server` 和 `npm run check`。不调用付费模型、不执行 build；验收记录只登记实际运行的结果。
 
 ## 实施记录
+
+以下为此前阶段的验收记录；本次边界收口与重新验收见文末行动日志。
 
 - 阶段 1：已完成 Pie 侧实现与本地验收。
   - `packages/runtime/src/protocol.ts` 定义必填的 `SessionSnapshot.execution`；`runtime.ts` 用当前模型边界、活动工具集合、待确认请求和 checkpoint 投影，不读历史或账本，不保存第二份运行状态。
@@ -48,3 +50,25 @@
   - `packages/server` 的全局事件快照同步携带 `execution`，使云端或宿主可读取同一操作可用性投影；未新增宿主权限判断。
   - 验证：`npm run test:runtime` 60/60、`npm run test:server` 252/252、`npm run check` 全部通过；未修改 Cloud / Astron，未构建或部署。
 - 阶段 4：未开始。Cloud 保持不动。
+
+## Pie 边界收口行动日志（ub-mode）
+
+### First Make it Work
+
+- 核对 `6f72548c0` 上的 SPEC、嵌入与开发文档，完整阅读相关实现及测试。用 `npm install --ignore-scripts` 补齐 workspace 依赖，依赖声明和锁文件无变化。
+- 恢复被忽略的模型数据以运行真实 Local / HTTP 测试：常规 hydrate 因公开目录重命名 Kimi provider 失败，临时映射后生成的最新目录又与当前测试引用不匹配；最终使用官方 npm 同版本 `0.85.1` 数据，按本仓库现有生成规则修正 Copilot GPT 的 Responses 分组并重建 manifest。校验通过，未改 AI 源码或测试。临时下载与脚本已清理。
+- 先新增回归并确认预期失败：两种取消 / steer 窗口均错误接纳；Local 取消未立即传递 AbortSignal；HTTP 全局流丢 revision。随后最小修改 `packages/runtime/src/runtime.ts`、`packages/local/src/runtime.ts`、`packages/server/src/server.ts`，分别复用准入投影、直接转交取消、持续转发同源摘要。
+
+### Then Make it Right
+
+- `steer` 在入口及持久化 / Agent 装载后复用 `actionAvailability` 校验，覆盖 `cancelRequested / cancelPromise`；已拒绝输入不写队列 checkpoint，取消前排队和取消后迟到的输入均不进入下一 Turn。
+- Local 直达路径仍核对关闭状态，Runtime 继续校验 Turn 身份、持久化取消意图并维持关闭 / 下一 Turn 屏障。回归覆盖错误 Turn ID 不取消、取消先于排队读取到达、关闭后拒绝取消和最终结算。
+- HTTP 每个全局包携带 `instanceId / revision / execution`，不因内容事件不可公开而丢状态；交互请求、交互结束和活动更新均保留。会话 SSE 启动包也带顶层 execution，不扩大历史或 assistant partial 载荷。
+- 新增真实 HTTP / SSE 回归，覆盖批准确认后取消、等待确认时直接取消；对照空闲、等待中与结算后的 HTTP 快照、SSE 启动 / 重连及会话 / 全局流。模型结束可能在交互请求后继续推进 revision，因此按同一 revision 比较，不假设网络接收时间一致。现有无历史扫描、活动重叠和并行工具测试保持通过。
+- 环境未提供 crapper / dryer / mutator；人工检查新增函数的分支和重复，未新增独立状态或另一套准入规则。用临时脚本逐项撤掉入口校验、异步后校验、全局 execution、交互结束转发、Local 直达取消，5/5 均被对应断言检出。脚本恢复定位曾不唯一，改为核对文件未被并发修改后恢复原文；最终源码已核对恢复，未宣称运行了缺失工具或取得其评分。
+
+### Follow Practice
+
+- 定向验证：`node --conditions=source --test packages/server/test/global-stream.test.ts packages/server/test/execution-state.test.ts packages/runtime/test/runtime.test.ts` 首轮 39/39；补充断言后的 steer 定向 2/2，最终 global-stream 文件 4/4。共新增 5 项回归，全部纳入根测试脚本。
+- 完整验收：`npm run test:runtime` 62/62，`npm run test:server` 257/257；`npm run check` 通过（Biome 450 文件无额外修改，根与 Web 类型检查、模型数据校验通过）；`git diff --check` 通过。
+- 同步本 SPEC、`docs/agent-development.md`、`docs/runtime-embedding.md`、Server README 及 Runtime / Server changelog。保留全部未提交改动供审阅，未 commit；未修改 `/workspace/refs`，未调用付费模型，未 build 或部署，未开始阶段 4。Pie 侧无遗留待办；缺失分析工具的替代验证与模型数据环境恢复是本轮执行方式的偏差。

@@ -92,17 +92,22 @@ function globalAgentEvent(event: SessionEvent["event"]) {
 }
 
 function projectGlobalPacket(packet: GlobalSessionEvent) {
-	const { type, sessionId, turnId, snapshot, interaction, event } = packet;
-	const base = { type, sessionId, turnId, instanceId: snapshot.instanceId, revision: snapshot.revision };
-	if (type === "agent.event") {
-		const projected = globalAgentEvent(event);
-		return projected ? { ...base, event: projected } : undefined;
-	}
+	const { type, sessionId, turnId, snapshot, interaction, event, activity } = packet;
+	const base = {
+		type,
+		sessionId,
+		turnId,
+		instanceId: snapshot.instanceId,
+		revision: snapshot.revision,
+		execution: snapshot.execution,
+	};
+	if (type === "agent.event") return { ...base, event: globalAgentEvent(event) };
 	if (type === "snapshot" || type === "turn.settled")
 		return { ...base, snapshot: { turn: snapshot.turn, execution: snapshot.execution } };
-	if (type === "interaction.requested") return { ...base, interaction };
+	if (type === "interaction.requested" || type === "interaction.resolved") return { ...base, interaction, event };
+	if (type === "activity.updated") return { ...base, activity };
 	if (type.startsWith("compaction.")) return { ...base, event };
-	return undefined;
+	return base;
 }
 
 async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?: string) {
@@ -114,7 +119,6 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 			return;
 		}
 		const value = sessionId ? packet : projectGlobalPacket(packet as GlobalSessionEvent);
-		if (value === undefined) return;
 		if (res.writableLength > 1024 * 1024) res.destroy();
 		else res.write(`data: ${JSON.stringify(value)}\n\n`);
 	};
@@ -140,7 +144,7 @@ async function streamEvents(runtime: PieRuntime, res: ServerResponse, sessionId?
 		});
 		if (snapshot)
 			res.write(
-				`data: ${JSON.stringify({ type: "snapshot", sessionId, turnId: snapshot.turn?.id, instanceId: snapshot.instanceId, revision: snapshot.revision, turn: snapshot.turn, snapshot })}\n\n`,
+				`data: ${JSON.stringify({ type: "snapshot", sessionId, turnId: snapshot.turn?.id, instanceId: snapshot.instanceId, revision: snapshot.revision, turn: snapshot.turn, execution: snapshot.execution, snapshot })}\n\n`,
 			);
 		initialized = true;
 		for (const packet of pending)

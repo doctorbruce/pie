@@ -669,6 +669,86 @@ test("turn receipts distinguish accepted, started, queued and settled, and retry
 	assert.equal(settledRetry.started, false);
 });
 
+for (const cancelAt of ["before steer", "during steer persistence"]) {
+	test(`steer admission matches cancellation availability ${cancelAt} and never leaks into the next Turn`, async (context) => {
+		const memory = memoryStore();
+		const factory = agents("unused");
+		let releasePreparation = () => {};
+		const preparation = new Promise<void>((resolve) => {
+			releasePreparation = resolve;
+		});
+		const acquire = factory.mcp.acquire;
+		factory.mcp.acquire = async (...args) => {
+			await preparation;
+			return acquire(...args);
+		};
+		const runtime = await createRuntime({ store: memory.store, agents: factory, hostRuntimes: [definition] });
+		let releaseWrite = () => {};
+		context.after(async () => {
+			releaseWrite();
+			releasePreparation();
+			await runtime.close();
+		});
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		const accepted = await runtime.submitTurn(session.id, { text: "original", requestId: "original-request" });
+		assert.equal((await runtime.getSession(session.id)).execution.actions.steer.available, true);
+		assert.equal(
+			(await runtime.steer(session.id, { turnId: accepted.turnId, text: "queued before cancel" })).queued,
+			true,
+		);
+		let late: Promise<unknown>;
+		let cancellation: Promise<unknown>;
+		let rejectedWrites = 0;
+		if (cancelAt === "during steer persistence") {
+			let entered = () => {};
+			const writing = new Promise<void>((resolve) => {
+				entered = resolve;
+			});
+			const blocked = new Promise<void>((resolve) => {
+				releaseWrite = resolve;
+			});
+			const save = memory.store.saveSession;
+			let blockedOnce = false;
+			memory.store.saveSession = async (...args) => {
+				if (!blockedOnce) {
+					blockedOnce = true;
+					entered();
+					await blocked;
+				}
+				return save(...args);
+			};
+			late = runtime.steer(session.id, { turnId: accepted.turnId, text: "late steer", requestId: "late-request" });
+			await writing;
+			cancellation = runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+			releaseWrite();
+		} else {
+			cancellation = runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+			await cancellation;
+			const stopping = await runtime.getSession(session.id);
+			assert.equal(stopping.turn?.status, "running");
+			assert.deepEqual(stopping.execution.actions.steer, { available: false, reason: "cancellation_in_progress" });
+			const save = memory.store.saveSession;
+			memory.store.saveSession = async (...args) => {
+				rejectedWrites++;
+				return save(...args);
+			};
+			late = runtime.steer(session.id, { turnId: accepted.turnId, text: "late steer", requestId: "late-request" });
+		}
+		await assert.rejects(late, { status: 409 });
+		assert.equal(rejectedWrites, 0, "Rejected steer must not write a queued-input checkpoint");
+		await cancellation;
+		releasePreparation();
+		assert.equal((await runtime.waitForTurn(session.id)).turn?.status, "cancelled");
+		await runtime.submitTurn(session.id, { text: "next turn", requestId: "next-request" });
+		const next = await runtime.waitForTurn(session.id);
+		assert.equal(next.turn?.status, "completed");
+		assert.deepEqual(
+			next.messages.filter((message) => message.role === "user").map((message) => message.content),
+			["original", "next turn"],
+		);
+	});
+}
+
 for (const historyTarget of ["same session", "another session"]) {
 	test(`running cancellation bypasses blocked history from ${historyTarget}`, { timeout: 10000 }, async (context) => {
 		const memory = memoryStore();

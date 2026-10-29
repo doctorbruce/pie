@@ -213,7 +213,10 @@ async function createLocalRuntime(options: {
 			execute(() => runtime.setModelOverride(...args), true),
 		renameSession: (...args: Parameters<PieRuntime["renameSession"]>) =>
 			execute(() => runtime.renameSession(...args), true),
-		cancelTurn: (...args: Parameters<PieRuntime["cancelTurn"]>) => execute(() => runtime.cancelTurn(...args), true),
+		cancelTurn: (...args: Parameters<PieRuntime["cancelTurn"]>) => {
+			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭"));
+			return runtime.cancelTurn(...args);
+		},
 		steer: (...args: Parameters<PieRuntime["steer"]>) => execute(() => runtime.steer(...args), true),
 		replyInteraction: (...args: Parameters<PieRuntime["replyInteraction"]>) =>
 			execute(() => runtime.replyInteraction(...args), true),

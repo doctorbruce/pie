@@ -1863,6 +1863,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (!session.turn || session.turn.status !== "running")
 					throw new RuntimeError(409, "当前会话没有正在执行的回合");
 				if (body.turnId !== session.turn.id) throw new RuntimeError(409, "turnId 不匹配");
+				const assertSteerAvailable = () => {
+					const availability = actionAvailability(session).steer;
+					if (!availability.available)
+						throw new RuntimeError(409, `当前 Turn 不接受 Steer：${availability.reason}`);
+				};
+				assertSteerAvailable();
 				const requestId = optionalRequestId(body);
 				const messageIdentity = optionalMessageIdentity(body);
 				if (session.turnCheckpoint) {
@@ -1870,6 +1876,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					await persist(session);
 				}
 				const agent = await attachAgent(session);
+				assertSteerAvailable();
 				const userMessage: Extract<AgentMessage, { role: "user" }> & {
 					displayContent?: string;
 				} & UserMessageIdentity = {

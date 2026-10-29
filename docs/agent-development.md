@@ -125,19 +125,19 @@ POST /sessions/:id/turns { text, assistantId?, systemPrompt? }
   → 等 Agent 空闲 → 保存最终状态 → SSE turn.settled
 
 POST /sessions/:id/steer { turnId, text, displayText? }
-  → 仅接受当前 running Turn 的精确 turnId
+  → 仅接受当前 running Turn 的精确 turnId，取消期间拒绝；异步等待后再次校验
   → Agent.steer() 在当前工具结束后注入用户消息并继续同一 Turn
 ```
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
 
-Web 客户端订阅 `GET /sessions/:id/events`，新连接立即收到全量快照，后续事件也带快照供页面直接替换。Astron adapter 订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射为 `CoreEvent`；这个流不传完整 Session 快照。`agent.event` 只带 Astron 使用的 Pi 原生增量及会话标识，`snapshot` 和 `turn.settled` 只带最小 `turn` 状态，避免历史大小放大 token 流和终态事件。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，防止重启后较小的计数使恢复快照被忽略。
+Web 客户端订阅 `GET /sessions/:id/events`，新连接收到最近 50 条消息的快照，后续按 revision 合并增量。宿主订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射；这个流不传完整 Session 快照或 assistant partial。全局每个包都携带与会话流同源的 `execution`，包含模型、工具、交互和取消变化；即使某条 Agent 事件没有公开内容增量，也保留状态包。`interaction.requested / interaction.resolved` 都会传递；`snapshot / turn.settled` 另带最小 `turn / execution` 快照。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，实例变化或版本缺口时重新读取快照。
 
 Pie 保留 Pi 原生的内容分段：`thinking_start/delta/end` 是思考，`text_start/delta/end` 是正文。Astron adapter 将两组事件分别投影为 `part_appended → part_delta → part_completed`，其中 `partKind` 必须使用 `reasoning` 或 `text`；不能把思考合并进正文。Pie 的 `turn.settled` 是宿主终态来源，adapter 必须发出带 `stopReason` 的 `turn_end`，随后结束本次 prompt。仅收到最后一个文本 delta 不代表 Turn 已结束。
 
 切换会话会关闭旧 SSE 并订阅新会话，不会停止旧任务。浏览器里尚未发送的草稿按会话暂存在内存；刷新会丢失草稿。会话列表每 3 秒查询一次摘要，当前会话完成时立即刷新。原始事件只展示当前页面接收到的最近 120 条，不持久化、不补发。
 
-Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 Turn，并在当前工具执行完成后进入下一轮模型响应；取消会先清空待处理的 steer/follow-up 队列再中断。两个接口都返回 `202`，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
+Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 Turn，并在当前工具执行完成后进入下一轮模型响应；取消会先清空待处理的 steer/follow-up 队列再中断，取消期间的追加输入返回 `409`。Local 取消直接到达 Runtime，不等待外层串行读取；清理和结算仍阻止下一 Turn 越过。受理成功返回 `202` 和控制回执，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
 
 ### 多 Core 会话同步
 
@@ -370,4 +370,4 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 
 自动压缩位于服务层，不修改 `agent-loop.ts`。真实模型每次调用前，`transformContext` 根据最后一次有效模型 usage 加尾部消息估算 token；超过模型窗口减去保留预算时，用同一模型生成结构化摘要，并把“摘要 + 最近消息”作为本次模型上下文。切分点不会落在 `toolResult`，后续压缩会把新历史合并进旧摘要。摘要记录随会话持久化，完整消息数组保持不变，因此页面和恢复仍能看到原始历史。摘要请求失败时回退到原上下文。
 
-当前本地助手最多 32 个，插件最多 32 个，每个助手的 `subagentIds` 最多 32 项；根会话和子会话均未设置固定数量上限。每 Session SSE 仍推全量快照，全局 `/events` 只推增量事件，适合开发验证。长历史的 HTTP/前端分页和持久 Turn 列表仍是后续能力。
+当前本地助手最多 32 个，插件最多 32 个，每个助手的 `subagentIds` 最多 32 项；根会话和子会话均未设置固定数量上限。会话 SSE 使用有界启动快照和后续增量，HTTP/前端支持历史分页；全局 `/events` 持续携带轻量运行摘要。持久 Turn 列表仍是后续能力。

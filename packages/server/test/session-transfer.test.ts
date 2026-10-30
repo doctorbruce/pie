@@ -32,10 +32,18 @@ test("session transfer overwrites a Pie replica, survives restart, and remains u
 		await rm(directory, { recursive: true, force: true });
 	});
 
+	const registered = await jsonRequest(running.base, "/host-runtimes", "PUT", {
+		runtimes: [
+			{
+				assistantId: "astron-assistant",
+				assistantRevision: "7",
+				runtime: { systemPrompt: "Answer directly.", toolIds: [], skills: [], subagents: [] },
+			},
+		],
+	});
+	assert.equal(registered.status, 200, await registered.text());
 	const createdResponse = await jsonRequest(running.base, "/sessions", "POST", {
 		assistantId: "astron-assistant",
-		assistantRevision: "7",
-		runtime: { systemPrompt: "Answer directly.", toolIds: [], skills: [], subagents: [] },
 	});
 	assert.equal(createdResponse.status, 201);
 	const created = (await createdResponse.json()) as SessionSnapshot;

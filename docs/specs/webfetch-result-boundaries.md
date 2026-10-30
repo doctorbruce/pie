@@ -24,5 +24,5 @@
 
 - 实际改动：packages/server/src/tools/webfetch.ts 补充结果元数据、前置来源/状态/空内容说明和 HTTP 错误 URL；packages/server/test/webfetch.test.ts 补充语义边界回归并适配结果头；server/CHANGELOG.md 记录修复。
 - 验证：实现前 4 项针对性测试失败；实现后上述 webfetch 与原生工具测试 29/29 通过。覆盖重定向、空正文、转换后空内容、HTTP 200 业务错误/验证码不误判、HTTP/网络失败和原有格式/兜底/限额/超时/取消。
-- npm run check 通过：Biome、服务端/Web 类型检查和模型数据校验；git diff --check 通过。
+- npm run check 通过：Biome、当时的类型检查和模型数据校验；git diff --check 通过。
 - 无实现偏差或范围内未完成项；未运行全量测试、真实站点/桌面验证，未打包、重启或提交。

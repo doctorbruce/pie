@@ -289,7 +289,7 @@
 						<tr><td>连接 / 投递</td><td>增量事件与补读契约</td><td>跨实例通知、WS/SSE、背压与断线重连</td></tr>
 					</tbody>
 				</table></div>
-				<div class="callout"><div class="label">本地使用不增加云端依赖</div><p>默认仍是 SQLite + <code>retain</code>。恢复通过 <code>PI_TURN_RECOVERY=manual</code> 显式开启；HTTP/Web 增加继续/停止入口，中断 Turn 处理前禁止新一轮输入。原工具、Skill/MCP、Subagent 和后台行为保持回归。</p></div>
+				<div class="callout"><div class="label">本地使用不增加云端依赖</div><p>默认仍是 SQLite + <code>retain</code>。恢复通过 <code>PI_TURN_RECOVERY=manual</code> 显式开启；HTTP 增加恢复/取消入口；自带测试 UI 已移除，当前通过 SDK / HTTP / 嵌入契约验收，中断 Turn 处理前禁止新一轮输入。原工具、Skill/MCP、Subagent 和后台行为保持回归。</p></div>
 				<p class="note">Runtime 列表默认分页 50 条，但本地封装按页汇总，HTTP <code>GET /sessions</code> 保持原完整列表形状。异步订阅已适配；旧数据库事务性迁移并建立索引，不要求删库重建。</p>
 				<p class="note">本次 SQLite 新增独立账本表及索引，工具执行边界增加可靠写入，但不要求本地每轮销毁 Agent。完整工具调用可能更早启动；下一次模型请求仍等待结果，本地默认保留和恢复策略不变。</p>
 			</section>
@@ -307,7 +307,7 @@
 				</table></div>
 				<h3 style="margin-top:28px">建议服务端按这个顺序接入</h3>
 				<ol class="migration">
-					<li><h4>五包三方增量合并</h4><p>固定基线，仅合并 runtime/agent/ai/mcp/telemetry，保留同事改动。不覆盖目录，不搬入 Local/Server/Web。</p></li>
+					<li><h4>五包三方增量合并</h4><p>固定基线，仅合并 runtime/agent/ai/mcp/telemetry，保留同事改动。不覆盖目录，不搬入 Local/Server 等本地宿主。</p></li>
 					<li><h4>迁移 Store、账本与工厂</h4><p>实现 readSession、分页 listSessions、readTurnPath 与 readToolExecutions。saveSession 必须同事务保存历史、元信息和增量账本，不能忽略第三个参数或提交后补写；工厂按目标会话恢复与解析配置。</p></li>
 					<li><h4>迁移增量事件链路</h4><p>await 会话订阅；处理分页初始视图、历史补读与序号缺口。Redis 路由、WS/SSE 和客户端都不能假定每个事件有完整 snapshot。</p></li>
 					<li><h4>把租约与原 Turn 恢复衔接</h4><p>授权、认领与旧 owner 隔离在先；恢复使用原配置/prompt/Turn ID，不能把 resume 当作重新 submit。</p></li>
@@ -333,7 +333,7 @@
 					<div><h4>共享执行层</h4><p><code>packages/runtime/src/runtime.ts</code>、<code>runtime-store.ts</code>：按需装载、回收、checkpoint、执行账本、恢复与任务协调。</p></div>
 					<div><h4>安全判定与执行身份</h4><p><code>turn-recovery.ts</code>、<code>durable-jobs.ts</code>、<code>tool-execution.ts</code>：恢复判定、稳定身份、执行边界和分页契约。</p></div>
 					<div><h4>公共能力与状态</h4><p><code>agent.ts</code>、<code>tools.ts</code>、<code>protocol.ts</code>、<code>index.ts</code>：工具上下文、错误语义、interrupted 与导出。</p></div>
-					<div><h4>本地适配与宿主</h4><p><code>packages/local/src/store.ts</code>、<code>runtime.ts</code>；Server 路由和 <code>apps/web/client/main.tsx</code>：SQLite、独立账本表、原子提交/分页、恢复 UI、异步订阅。</p></div>
+					<div><h4>本地适配与宿主</h4><p><code>packages/local/src/store.ts</code>、<code>runtime.ts</code>；<code>packages/server/src/server.ts</code>：SQLite、独立账本表、原子提交/分页、HTTP 恢复/取消、异步订阅。</p></div>
 					<div><h4>测试与入口</h4><p>Runtime/Server 测试和 fixtures、根 <code>package.json</code>：延迟存储、GC、SQLite 与跨进程故障。没有新增依赖。</p></div>
 					<div><h4>设计与迁移文档</h4><p>开发/嵌入文档、Server README、现有 CHANGELOG 与相关 SPEC：公共契约、验证和完成记录。</p></div>
 					<div><h4>底层工具时序</h4><p><code>packages/agent/src/agent-loop.ts</code>、<code>types.ts</code>：完整调用提前执行、结果复用和等待屏障，启动事件携带调用快照。</p></div>

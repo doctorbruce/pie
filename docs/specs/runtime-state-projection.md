@@ -15,7 +15,7 @@
 - 快照、会话增量和全局事件使用同一个投影。沿用 instanceId / revision 的旧包丢弃、缺口及实例变化重建，不增加事件重放、独立状态持久化或历史扫描。
 - 复用 requestId / clientMessageId / Turn 身份与现有持久化路径，不新增 CommandInbox、任务队列或另一套执行账本。运行摘要不携带历史、完整 assistant partial 或 ToolExecution 账本。
 - 操作可用性只描述 Runtime 约束，宿主仍须叠加租户与产品授权；resume 必须重新核对历史、checkpoint、账本和外部结果，不能从 interrupted 推断可安全恢复。
-- 不修改 Cloud、Astron 适配器、Amio 或公共 AgentCore 协议，不部署 Sidecar。完成 Pie 后再同步共享包，云端业务接入与生产验收单独进行。
+- 验收以 SDK、HTTP/SSE 和嵌入契约为准，不以自带 UI 为宿主（见 [删除 SPEC](remove-bundled-web.md)）。不修改 Cloud、Astron 适配器、Amio 或公共 AgentCore 协议，不部署 Sidecar。完成 Pie 后再同步共享包，云端业务接入与生产验收单独进行。
 
 ## 实施顺序与验收
 
@@ -43,7 +43,7 @@
   - `waitingForInteraction` 表示本会话拥有待回答请求（包括转交父会话的子任务确认），不表示所有并发工作都已暂停。`cancellationRequested` 仅在 running Turn 期间表示停止请求，最终结果仍读取 Turn；结算后归零，不替代持久取消事实。
   - `recoveryBlockedReason` 只在 interrupted 时暴露 checkpoint 已知的阻断原因；没有此字段不等于允许 resume。中断原因继续由 `Turn.error` 表达，外部未知结果继续查询独立执行账本。
   - `session-events.ts` 合并摘要增量；快照、会话事件及全局事件使用同一投影。原始 Turn 状态不被重新分类；实例变化、版本缺口与旧事件仍沿用现有重建规则。
-  - 新增 `packages/server/test/execution-state.test.ts` 并纳入 `test:server`，补充事件合并测试，更新 Web 测试快照及 Runtime changelog。没有修改存储 schema、模型 / 工具执行协议或 Cloud。
+  - 新增 `packages/server/test/execution-state.test.ts` 并纳入 `test:server`，补充事件合并测试并更新 Runtime changelog。没有修改存储 schema、模型 / 工具执行协议或 Cloud。
   - 验证：定向 Node 测试 13/13；`npm run test:runtime` 59/59；`npm run test:server` 241/241；`npm run check` 全部通过，Biome 未额外修改文件。测试覆盖模型 / 工具重叠及工具先结束、多工具并行、确认等待、取消已返回但工具未结算、原始终态、重新激活与事件投影一致性；常规投影没有新增历史或账本读取。
   - 验证边界：共享协议与事件边界使用假模型、受控工具及真实 SQLite 回归；未调用付费模型、未运行 build、未部署 Sidecar、未验证宿主 UI。阶段 1 没有偏离范围，不把后续回执或操作可用性标为完成。
 - 阶段 2：已完成 Pie 侧实现与本地验收。
@@ -77,7 +77,7 @@
 ### Follow Practice
 
 - 定向验证：`node --conditions=source --test packages/server/test/global-stream.test.ts packages/server/test/execution-state.test.ts packages/runtime/test/runtime.test.ts` 首轮 39/39；补充断言后的 steer 定向 2/2，最终 global-stream 文件 4/4。共新增 5 项回归，全部纳入根测试脚本。
-- 完整验收：`npm run test:runtime` 62/62，`npm run test:server` 257/257；`npm run check` 通过（Biome 450 文件无额外修改，根与 Web 类型检查、模型数据校验通过）；`git diff --check` 通过。
+- 完整验收：`npm run test:runtime` 62/62，`npm run test:server` 257/257；`npm run check` 通过（Biome 450 文件无额外修改，当时的类型检查、模型数据校验通过）；`git diff --check` 通过。
 - 同步本 SPEC、`docs/agent-development.md`、`docs/runtime-embedding.md`、Server README 及 Runtime / Server changelog。保留全部未提交改动供审阅，未 commit；未修改 `/workspace/refs`，未调用付费模型，未 build 或部署，未开始阶段 4。Pie 侧无遗留待办；缺失分析工具的替代验证与模型数据环境恢复是本轮执行方式的偏差。
 
 ## 本轮版本与控制契约行动日志（ub-mode）
@@ -98,6 +98,6 @@
 
 ### Follow Practice
 
-- 最终验收：`node --conditions=source --test packages/server/test/execution-state.test.ts packages/server/test/global-stream.test.ts` 25/25；SQLite 故障 / 恢复定向 2/2；`npm run test:runtime` 62/62；`npm run test:server` 274/274；`npm run check` 通过（Biome 450 文件，根与 Web 类型检查、模型数据校验通过）；`git diff --check` 通过。共新增 17 项回归，全部纳入现有根脚本；48 组状态组合包含在同一回归内，不重复计为独立测试。
+- 最终验收：`node --conditions=source --test packages/server/test/execution-state.test.ts packages/server/test/global-stream.test.ts` 25/25；SQLite 故障 / 恢复定向 2/2；`npm run test:runtime` 62/62；`npm run test:server` 274/274；`npm run check` 通过（Biome 450 文件，当时的类型检查、模型数据校验通过）；`git diff --check` 通过。共新增 17 项回归，全部纳入现有根脚本；48 组状态组合包含在同一回归内，不重复计为独立测试。
 - 旧回归中“写入失败不发事件 / 内存 revision 不变 / 首次失败返回 500”的断言按本次契约更新；继续严格校验持久数据不变、原 Turn 保留和不额外启动模型。临时脚本已删除；保留全部未提交改动，未 commit / push，未改 refs 或阶段 4。
 - Pie 本次范围无待办；没有调用付费模型、执行 build 或部署。缺失分析工具以人工审查和定向变异代替是执行方式偏差；没有工作摘要扩展的需求证据，维持原模型。宿主范围确认与阶段 4 验收仍由后续任务负责。

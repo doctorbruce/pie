@@ -190,8 +190,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (closing) throw new RuntimeError(503, "服务正在关闭", "runtime_closing");
 			const origin = req.headers.origin;
 			if (!/^127\.0\.0\.1:\d+$/.test(req.headers.host ?? "")) throw new RuntimeError(403, "只接受本地地址");
-			if (origin && origin !== (env.PI_WEB_ORIGIN ?? "http://127.0.0.1:5174"))
-				throw new RuntimeError(403, "来源不允许");
+			if (origin && origin !== env.PI_SERVER_ORIGIN) throw new RuntimeError(403, "来源不允许");
 			if (env.PI_SERVER_TOKEN && req.headers.authorization !== `Bearer ${env.PI_SERVER_TOKEN}`)
 				throw new RuntimeError(401, "认证失败");
 			const runtime = await ready;

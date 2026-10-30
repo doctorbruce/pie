@@ -17,7 +17,7 @@
 - 在现有 Session 元数据中持久化当前 Turn 的版本化执行 checkpoint：原 Turn 身份、输入节点、实际使用的完整 system prompt。运行配置、助手版本、模型和压缩 checkpoint 继续使用已有持久字段，不保存凭据。
 - 共享 Runtime 提供纯恢复判定与显式 `resumeTurn`。宿主先确认旧执行者已停止，再把安全的中断 Turn 标为 `interrupted`；恢复仍使用原 Turn，不调用 `submitTurn`。
 - 支持用户输入已提交、整批工具结果已提交后的继续执行；最终 Assistant 已提交而 Turn 尚未结算时，仅补齐终态，不重新调用模型。
-- SQLite 在显式设置 `PI_TURN_RECOVERY=manual` 后使用共享启动判定，本地通过 HTTP / Web 恢复或取消，不在启动时静默执行。默认仍按原失败修复流程处理，避免尚未接入恢复接口的 Astron 宿主遇到 `interrupted` 后无法继续提交；正常启动、SQLite、内存保留策略不变。
+- SQLite 在显式设置 `PI_TURN_RECOVERY=manual` 后使用共享启动判定，本地通过 SDK / HTTP 恢复或取消，不在启动时静默执行。默认仍按原失败修复流程处理，避免尚未接入恢复接口的 Astron 宿主遇到 `interrupted` 后无法继续提交；正常启动、SQLite、内存保留策略不变。
 - 缺少 checkpoint 的旧记录、缺失工具结果、未持久化队列、Subagent 和后台执行不自动续跑，保留现有失败修复和未知结果提示。明确失败或取消的 Turn 不复活。
 - 错误 Turn ID、并发恢复、恢复准入写入失败必须拒绝。恢复前校验历史边界，使用原已应用配置与动态提示词，不应用下一轮助手配置。
 - 本次收尾修复：SQLite 从叶子反向读取到 Turn 输入即停止，不再先遍历全部祖先；输入缺失或属于其他分支时返回不可恢复路径，无效检查点不阻塞服务启动。共享判定将收到的空路径、断链和循环判为失败。补充实际递归步数、SQLite 重启与 Runtime 恢复拒绝回归；不扩展复杂续跑或资源配额。
@@ -68,7 +68,7 @@
 ## 实施记录
 
 - 2026-10-24 第一阶段完成：`packages/runtime/src/runtime-store.ts` 增加版本化 Turn checkpoint；`turn-recovery.ts` 提供共享分类；`runtime.ts` 原子保存输入与有效 prompt，提供 `resumeTurn`，持久化取消意图，并阻断队列、子任务和后台执行的恢复。终态清除执行 checkpoint，不把它当作上下文压缩摘要。
-- `packages/local/src/store.ts` 增加显式恢复模式；`packages/server/src/server.ts` 增加 `POST /sessions/:id/resume`；`apps/web/client/main.tsx` 增加中断状态、继续 / 停止操作并限制发送新输入。嵌入文档、开发文档和已有 changelog 已同步。
+- `packages/local/src/store.ts` 增加显式恢复模式；`packages/server/src/server.ts` 增加 `POST /sessions/:id/resume`；中断状态与恢复 / 取消操作由宿主消费共享契约，自带测试 UI 已移除（见 [删除 SPEC](remove-bundled-web.md)）。嵌入文档、开发文档和已有 changelog 已同步。
 - 验证：`node --conditions=source --test packages/runtime/test/turn-recovery.test.ts packages/server/test/turn-recovery.test.ts` 初始 15 项通过；最终 `npm run test:runtime` 40 项、`npm run test:server` 182 项通过，包含新增 17 项恢复回归。真实 SQLite 子进程在已提交输入、工具调用、工具结果、最终回答及取消意图边界直接退出，再通过 Runtime / HTTP 重建；已提交文件工具不重复执行，节点 ID 和原 Turn/request ID 保留。
 - 模型 / 提示词 / 多模态额外回归：`node --conditions=source --test packages/server/test/agent.test.ts packages/server/test/model-override.test.ts packages/server/test/multimodal-input.test.ts packages/server/test/provider-composer.test.ts` 12 项通过。`npm run check` 和 `git diff --check` 通过；仅使用替身及本地模拟端点，无收费模型调用。
 - 相对初稿的调整：核对 Astron Pie adapter 后将本地安全分类改为 `PI_TURN_RECOVERY=manual` 显式启用。默认仍中断即失败，避免旧宿主尚无恢复入口却被禁止下一轮；Cloud 不读取此本地开关。另补充取消意图持久化和后台工具结果标记校验，避免把它们当作普通安全继续点。

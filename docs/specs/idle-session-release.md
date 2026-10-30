@@ -34,6 +34,6 @@
 
 - 2026-10-16：核对既有 SPEC；本次是历史内存路线的后续卸载阶段，不改变前两阶段已经完成的存储与压缩语义。实现与验证待完成。
 - `packages/runtime/src/runtime.ts` 已加入保留策略、统一执行收尾与安全卸载；后台通知有序接纳，Subagent 在卸载前返回文本结果，冷操作复用原工作历史读取。`packages/runtime/test/runtime.test.ts` 定向 15 项通过，显式 GC 验证 Agent / 正文可回收，并覆盖默认保留、失败写入、取消、重建、分支、Subagent 续写和后台通知。完整检查与本地兼容回归待完成。
-- 完成验收：`node --expose-gc --conditions=source --test packages/runtime/test/runtime.test.ts` 15 项通过；`npm run test:server` 157 项全部通过，覆盖真实 SQLite、压缩、分支、MCP、工具与本地 HTTP / SSE 回归；`npm run check` 通过，包含 Biome、Runtime / Web 类型与模型数据校验；`git diff --check` 通过。未调用收费模型，未构建、部署、提交或推送。
+- 完成验收：`node --expose-gc --conditions=source --test packages/runtime/test/runtime.test.ts` 15 项通过；`npm run test:server` 157 项全部通过，覆盖真实 SQLite、压缩、分支、MCP、工具与本地 HTTP / SSE 回归；`npm run check` 通过，包含 Biome、当时的 Runtime 与宿主类型与模型数据校验；`git diff --check` 通过。未调用收费模型，未构建、部署、提交或推送。
 - 文档入口：`docs/runtime-embedding.md` 给出云端启用选项和资源归属，`packages/runtime/README.md` / `CHANGELOG.md` 记录默认保留与显式卸载。旧阶段 SPEC 仅补后续链接，不重写历史验收结论。
 - 偏差与剩余：采用显式策略和既有存储接口，没有引入 TTL / LRU、外部依赖或新存储方法。运行中 / 后台作业及失败写入仍保留必要内存，活动记录与宿主自行保存的快照不在释放范围；未测量 RSS。Cloud 副本同步、真实 Redis / SQL 接入与生产装配仍由后续接入完成。

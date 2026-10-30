@@ -43,6 +43,6 @@
 - `packages/agent` 下运行 `node ../../node_modules/vitest/dist/cli.js --run test/agent.test.ts test/agent-loop.test.ts test/message-replacement.test.ts test/streamed-tool-execution.test.ts`：58 项通过。
 - `npm run test:runtime`：54 项通过，包含工具重复提醒、分页、前后台子任务和恢复回归。
 - `node --conditions=source --test packages/server/test/turn-recovery.test.ts packages/server/test/streamed-tool-execution.test.ts`：16 项通过，包含实际进程退出与 SQLite 重开。
-- 附加定向运行 durable-jobs、tool-execution、external-tools、tool-progress 与 Web messages：35 项通过；同轮暴露的恢复旧断言/fixture 边界问题已修复并以上述 16 项复验。
-- `npm run check`：通过，格式、根目录/Web 类型检查和生成模型数据均通过。
+- 附加定向运行 durable-jobs、tool-execution、external-tools、tool-progress 与当时的消息展示测试：35 项通过；同轮暴露的恢复旧断言/fixture 边界问题已修复并以上述 16 项复验。
+- `npm run check`：通过，格式、当时的类型检查和生成模型数据均通过。
 - 无范围偏差；未新增依赖、调用真实模型、构建、部署或提交。真实提供商是否有可重叠的逐调用结束事件，仍由其适配器能力决定，不保证每种协议都有同等延迟收益。

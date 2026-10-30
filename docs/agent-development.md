@@ -4,10 +4,10 @@
 
 ## 目标与分层
 
-Pie 是可以独立启动的 Agent Core 服务。Web 客户端用来开发和验证 Core；Astron Cowork 已通过官方 `pie` adapter 接入会话、Turn、事件和跨 Core 历史同步。
+Pie 是可嵌入、也可独立启动的 Agent Core。仓库不再附带 Web UI，开发验收通过 SDK、HTTP/SSE 和嵌入契约完成；Astron Cowork 已通过官方 `pie` adapter 接入会话、Turn、事件和跨 Core 历史同步。
 
 ```text
-Web 客户端（React + assistant-ui）
+HTTP/SSE 宿主
   │ HTTP 请求向下，SSE 快照和事件向上
   ▼
 packages/server
@@ -26,7 +26,7 @@ packages/agent：Agent 实例 → agent loop → 工具执行
 packages/ai：模型目录、协议适配、流式响应和凭据解析
 ```
 
-当前服务层同时承担独立 Web 客户端的本地配置管理和 Core 运行职责。原版 `Agent` 拥有一次会话的运行状态与输入队列；loop 负责模型与工具之间的循环。`packages/agent` 不依赖 HTTP、数据库、React 或 Astron 产品对象。接入 Astron 时，产品配置和插件资产仍由 Astron 管理，具体边界见下文。
+`packages/runtime` 维护共享会话与执行语义，`packages/local` 装配本地配置和能力，`packages/server` 提供 HTTP/SSE。嵌入宿主直接调用 Runtime，并注入存储与能力。原版 `Agent` 拥有一次会话的运行状态与输入队列；loop 负责模型与工具之间的循环。`packages/agent` 不依赖 HTTP、数据库或 Astron 产品对象。接入 Astron 时，产品配置和插件资产仍由 Astron 管理，具体边界见下文。
 
 ## Assistant、Session、Agent 和 Turn
 
@@ -98,9 +98,9 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 挂载控制模型的 Skill 目录和加载入口，不是系统访问权限隔离。Session 的 `workspacePath` 是审批边界；访问边界外的路径会请求确认，但批准后仍由 Core 系统账户直接访问。当前没有进程沙箱或凭据代理。Skill 中依赖 Astron Engine HTTP 服务、凭据请求、桌面环境的流程仍需相应宿主能力，不因导入成功而自动可运行。
 
-手工验证：在 Web 客户端「插件」中导入仓库的 `examples/plugins/hello-skill` 绝对路径；编辑助手挂载它，并启用 `read` 和 `bash`；新建真实模型会话，发送“测试本地插件 hello 示例”。预期依次看到 `skill`、`read`、命令工具结果。Web 客户端不提供 faux 会话。
+本地插件通过 `POST /plugins/import` 导入，再通过助手接口配置 `pluginIds` 和 `toolIds`；执行结果及来源记录通过 HTTP 快照或 SSE 核对。
 
-无需真实模型的来源验证：启动服务后运行 `node examples/skill-provenance.ts`，会创建“Skill 加载来源演示”faux 会话。两条 Plugin 来源绑定共用 `examples/plugins/hello-skill/skills/hello`，各加载一次。该模式只供 Core 测试和独立脚本使用，不会出现在 Web 客户端的会话列表中；支持精确指令 `加载技能 <绑定ID>` 和 `调用工具 <ID> <JSON对象>`，不会自主规划或选择工具。
+无需真实模型的来源验证：启动服务后运行 `node examples/skill-provenance.ts`，会创建“Skill 加载来源演示”faux 会话。两条 Plugin 来源绑定共用 `examples/plugins/hello-skill/skills/hello`，各加载一次。该模式只供 Core 测试和独立脚本使用；支持精确指令 `加载技能 <绑定ID>` 和 `调用工具 <ID> <JSON对象>`，不会自主规划或选择工具。
 
 2026-09-15 本地兼容检查：Astron `official-diagnostics` 新版包可直接导入并识别 `astron-doctor`。同目录的文档处理与执行编排包仍是没有 schemaVersion 的旧 manifest，不在本版支持范围；没有执行这些官方插件，也没有验证其 Engine 服务依赖。
 
@@ -131,13 +131,13 @@ POST /sessions/:id/steer { turnId, text, displayText? }
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
 
-Web 客户端订阅 `GET /sessions/:id/events`，新连接收到最近 50 条消息的快照，后续按 revision 合并增量。宿主订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射；这个流不传完整 Session 快照或 assistant partial。全局每个包都携带与会话流同源的 `execution`，包含模型、工具、交互和取消变化；即使某条 Agent 事件没有公开内容增量，也保留状态包。`interaction.requested / interaction.resolved` 都会传递；`snapshot / turn.settled` 另带最小 `turn / execution` 快照。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，实例变化或版本缺口时重新读取快照。
+宿主可订阅 `GET /sessions/:id/events`，新连接收到最近 50 条消息的快照，后续按 revision 合并增量。宿主订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射；这个流不传完整 Session 快照或 assistant partial。全局每个包都携带与会话流同源的 `execution`，包含模型、工具、交互和取消变化；即使某条 Agent 事件没有公开内容增量，也保留状态包。`interaction.requested / interaction.resolved` 都会传递；`snapshot / turn.settled` 另带最小 `turn / execution` 快照。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，实例变化或版本缺口时重新读取快照。
 
 需要重连后立即得知断线期间结算结果时，使用 `GET /events?sessionId=A&sessionId=B`：首包 `execution.baseline` 提供指定会话的版本、Turn 与执行摘要，后续丢弃基线已覆盖的事件。此接口只装载指定会话元信息，不读历史或持久重放。发布时同步固定 execution、Turn 和历史叶子；完整快照异步读取也使用该叶子，同版本不会混入后续执行状态。会话卸载后仅保留整数水位，重新装载不复用已观察版本。
 
 Pie 保留 Pi 原生的内容分段：`thinking_start/delta/end` 是思考，`text_start/delta/end` 是正文。Astron adapter 将两组事件分别投影为 `part_appended → part_delta → part_completed`，其中 `partKind` 必须使用 `reasoning` 或 `text`；不能把思考合并进正文。Pie 的 `turn.settled` 是宿主终态来源，adapter 必须发出带 `stopReason` 的 `turn_end`，随后结束本次 prompt。仅收到最后一个文本 delta 不代表 Turn 已结束。
 
-切换会话会关闭旧 SSE 并订阅新会话，不会停止旧任务。浏览器里尚未发送的草稿按会话暂存在内存；刷新会丢失草稿。会话列表每 3 秒查询一次摘要，当前会话完成时立即刷新。原始事件只展示当前页面接收到的最近 120 条，不持久化、不补发。
+关闭或切换 SSE 订阅不会停止执行。宿主自行维护草稿和展示缓存，断线后通过快照或执行基线重新对齐；原始事件不持久化、不补发。
 
 Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 Turn，并在当前工具执行完成后进入下一轮模型响应；取消会先清空待处理的 steer/follow-up 队列再中断，取消期间的追加输入返回 `409`。Local 取消直接到达 Runtime，不等待外层串行读取；清理和结算仍阻止下一 Turn 越过。受理成功返回 `202` 和控制回执，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
 
@@ -160,7 +160,7 @@ Astron 的产品会话 ID 在切核前后保持不变。每个 Core 继续拥有
 
 ## Session Fork
 
-Fork 采用 Pi 上游 `/fork` 的交互语义：用户从历史用户消息中选择一个节点，Core 创建新的独立根 Session，复制该消息之前的历史，并把选中消息文本作为 `selectedText` 返回前端编辑器。原 Session 不移动、不截断。新 Session 复制当时的 Assistant、runtime、模型和工作区快照，保存 `forkedFromSessionId` 作为来源；它不复用 Subagent 的 `parentSessionId`，删除源 Session 不会级联删除 Fork。
+Fork 采用 Pi 上游 `/fork` 的交互语义：宿主从历史用户消息中选择一个节点，Core 创建新的独立根 Session，复制该消息之前的历史，并把选中消息文本作为 `selectedText` 返回宿主。原 Session 不移动、不截断。新 Session 复制当时的 Assistant、runtime、模型和工作区快照，保存 `forkedFromSessionId` 作为来源；它不复用 Subagent 的 `parentSessionId`，删除源 Session 不会级联删除 Fork。
 
 当前存储仍是线性 `messages[]`，因此这里只恢复“新会话分叉”，没有引入上游 JSONL 的 entry ID、同文件 `/tree` 导航、标签或分支摘要。`messageIndex` 必须指向空闲根 Session 中的用户消息；压缩摘要不直接复制，新分支保留完整原始前缀，并在达到预算时自行生成摘要。
 
@@ -181,7 +181,7 @@ Astron 当前 Assistant 配置
   → 最终文本作为 task 结果回到父 loop
 ```
 
-内部 `SubagentBinding` 包含稳定的调用 ID、名称、说明、目标 `assistantId/assistantRevision`、目标提示词/工具/Skill 配置和可选模型。宿主协议中的 Subagent 只注册 `assistantId` 引用，Pie 从同一注册表补齐目标版本和 runtime，避免每个父 Assistant 重复嵌套目标配置。Astron 决定哪些 Assistant 可调用；Pie 不发现产品 Assistant，也不从本地助手表猜产品权限。独立 Web 模式则通过本地 Assistant 的 `subagentIds` 显式选择目标，由 Core 生成 `assistant-worker-{assistantId}` 绑定。若绑定未指定模型，真实模式继承父会话模型选择。
+内部 `SubagentBinding` 包含稳定的调用 ID、名称、说明、目标 `assistantId/assistantRevision`、目标提示词/工具/Skill 配置和可选模型。宿主协议中的 Subagent 只注册 `assistantId` 引用，Pie 从同一注册表补齐目标版本和 runtime，避免每个父 Assistant 重复嵌套目标配置。Astron 决定哪些 Assistant 可调用；Pie 不发现产品 Assistant，也不从本地助手表猜产品权限。独立本地模式则通过 Assistant 接口的 `subagentIds` 显式选择目标，由 Core 生成 `assistant-worker-{assistantId}` 绑定。若绑定未指定模型，真实模式继承父会话模型选择。
 
 未传 `task_id` 时创建新子 Session，不复制父消息；传入当前父 Session 拥有、且 Subagent 类型匹配的 `task_id` 时，在原子 Session 消息后追加新用户消息并继续同一个 Agent。子 Session 保存 `parentSessionId/parentToolCallId/subagentType`，完整子事件仍属于子 Session；父 Session 的 task 结果 details 带 `childSessionId/targetAssistantId/subagentType`，后台模式再带 `background/jobId`。默认会话列表隐藏子会话，`includeSubagents=true` 可查询，快照可直接读取。
 
@@ -286,9 +286,9 @@ Pie 根据模型选择的允许绑定查找来源，技能记录包含独立 id�
 
 当前运行输入已支持提示词、内置/外部工具选择和技能绑定；模型仍通过 Pie 模型配置和会话选择接口解析，环境来自服务进程。Pie 已定义已有会话刷新语义：宿主更新注册表，Core 在下一 Turn 执行前按稳定 Assistant ID 应用当前版本。Astron adapter 从产品态组装完整 Skill 与 Subagent 引用，并在 Assistant、群聊、插件或 Skill 配置变化时重新同步；普通 Turn 只传文本和动态系统上下文。TurnMetadata.skill_ids/plugin_contexts 不等于实际使用证据。
 
-当前 Web 客户端的助手、模型和插件管理继续用于独立测试。plugins.ts 已负责将本地挂载转换为 runtime；agent.ts / skills.ts 消费 runtime，不依赖 plugin.json 或插件导入 API。无需为此建立市场服务或共享技能资产库。
+本地助手、模型和插件管理接口继续供宿主和独立测试使用。plugins.ts 已负责将本地挂载转换为 runtime；agent.ts / skills.ts 消费 runtime，不依赖 plugin.json 或插件导入 API。无需为此建立市场服务或共享技能资产库。
 
-配置在下一次 Turn 准入前生效，不中断正在运行的 Turn。宿主仍需协调旧文件的保留/替换；快照不冻结运行文件，插件资产更新闭环尚未实现。本地 Web 的助手、模型和插件管理继续保留，Astron 通过 host runtime 使用同一执行入口。
+配置在下一次 Turn 准入前生效，不中断正在运行的 Turn。宿主仍需协调旧文件的保留/替换；快照不冻结运行文件，插件资产更新闭环尚未实现。本地助手、模型和插件管理接口继续保留，Astron 通过 host runtime 使用同一执行入口。
 
 ### Astron 工具文件接入
 
@@ -313,7 +313,7 @@ Pie 的 `packages/agent/src/types.ts` 已定义 `AgentTool`：名称、说明、
 ```text
 Astron 提供适配后的工具文件
   → Pie 启动时读取 PI_TOOLS_DIR（默认 PI_DATA_DIR/tools）
-  → GET /tools → Web 客户端 / 宿主选择 toolIds
+  → GET /tools → 宿主选择 toolIds
   → 为 Session 调用工具创建函数，注入 sessionId、directory、env、Type
   → 得到 AgentTool → 模型选择工具 → 原版 loop 调用 execute
   → 工具继续调用 Astron HTTP 服务
@@ -366,12 +366,10 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `packages/local/src/external-tools.ts`、`packages/runtime/src/tools.ts` | 本地工具文件加载、共享 ToolContext、工具 ID 和定义校验 |
 | `examples/tools/memory-manage.ts` | Astron 记忆工具适配示例，可复制到外部目录 |
 | `packages/local/src/models/` | 上游模型配置抽取和提供商管理 |
-| `apps/web/client/main.tsx` | 助手选择、会话列表/切换、SSE、聊天和会话详情 |
-| `apps/web/client/assistant-settings.tsx` | 助手配置表单 |
 | `packages/agent/src/agent.ts`、`agent-loop.ts` | 原版执行内核，当前保持 `b2602be` 基线 |
 
 运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖十个内置工具的注册、文件读写改查、网页抓取、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Bash 失败、限额、取消、后台执行和超时。`webfetch.test.ts` 覆盖格式转换、权限、重定向、响应限额、结果预览、超时和取消。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
 
 自动压缩位于服务层，不修改 `agent-loop.ts`。真实模型每次调用前，`transformContext` 根据最后一次有效模型 usage 加尾部消息估算 token；超过模型窗口减去保留预算时，用同一模型生成结构化摘要，并把“摘要 + 最近消息”作为本次模型上下文。切分点不会落在 `toolResult`，后续压缩会把新历史合并进旧摘要。摘要记录随会话持久化，完整消息数组保持不变，因此页面和恢复仍能看到原始历史。摘要请求失败时回退到原上下文。
 
-当前本地助手最多 32 个，插件最多 32 个，每个助手的 `subagentIds` 最多 32 项；根会话和子会话均未设置固定数量上限。会话 SSE 使用有界启动快照和后续增量，HTTP/前端支持历史分页；全局 `/events` 持续携带轻量运行摘要。持久 Turn 列表仍是后续能力。
+当前本地助手最多 32 个，插件最多 32 个，每个助手的 `subagentIds` 最多 32 项；根会话和子会话均未设置固定数量上限。会话 SSE 使用有界启动快照和后续增量，HTTP 和 SDK 支持历史分页；全局 `/events` 持续携带轻量运行摘要。持久 Turn 列表仍是后续能力。

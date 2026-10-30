@@ -30,7 +30,7 @@
 }
 ```
 
-local.command 的首项是程序，后续项是参数，可指定 environment/cwd；remote 使用 Streamable HTTP，可指定 headers。enabled=false 保留配置但不连接、不挂工具。timeout 单位为毫秒；Astron 可选字段的 null 按未设置处理。独立 Pie 也可直接使用该宿主注册协议配置 MCP；本次未增加独立 Web 客户端的 MCP 编辑页。
+local.command 的首项是程序，后续项是参数，可指定 environment/cwd；remote 使用 Streamable HTTP，可指定 headers。enabled=false 保留配置但不连接、不挂工具。timeout 单位为毫秒；Astron 可选字段的 null 按未设置处理。独立 Pie 也可直接使用该宿主注册协议配置 MCP；配置管理由宿主通过 SDK / HTTP 完成。
 
 Astron 将共享 settings.mcp 与助手挂载且启用的 Plugin MCP 合并；群聊采用成员挂载范围。未挂载的 Plugin MCP 不进入该 owner 的工具集。已有 MCP 保存、删除、启停入口继续触发 runtime 配置刷新。
 

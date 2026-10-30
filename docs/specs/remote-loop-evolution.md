@@ -165,7 +165,7 @@ P2 区分页条数、单条消息字节数、总缓存和显式完整读取。�
 
 - 本轮完成包级拆分：`@pie/runtime` 只包含运行语义与能力契约；`@pie/local` 提供 SQLite、本机工具、文件配置、Skill / MCP 与产品助手管理；`@pie/server` 只装配本地依赖并映射 HTTP / SSE，保留现有 CLI / Sidecar 命令。
 - 运行包不得反向导入 local / server，也不得默认打开数据库、扫描工具目录或读取本地配置；宿主显式传入模型、工具、技能、MCP 与请求记录，可选提供压缩配置解析，省略时只做纯计算。本地适配保留原默认值和数据格式。
-- 更新源码入口、workspace 依赖、Web / 示例及定向测试；不保留旧的 server/runtime、server/protocol、server/tools 转发入口。本轮不搬入 cloud，不增加热更新插件框架，不改底层 Loop，也不覆盖已有流式控制与工具结果改动。
+- 更新源码入口、workspace 依赖、当时的消费方 / 示例及定向测试；不保留旧的 server/runtime、server/protocol、server/tools 转发入口。本轮不搬入 cloud，不增加热更新插件框架，不改底层 Loop，也不覆盖已有流式控制与工具结果改动。
 - 验收覆盖独立运行包的依赖边界与嵌入测试、本地 HTTP / SQLite / 工具 / MCP / Skill / 分支 / 压缩回归、`npm run check`、锁文件一致性和 `git diff --check`；实际结果见实施记录。发行构建不在本轮范围。
 - 不搬仓库，不实现云端数据库、tools-sdk、认证与租户平台，不提前宣称云端已可交付；云端 Skill 资源引用与执行端协议仍待后续细化。
 - 不重写 Agent Loop，不为云端复制一套 Pie，不把整套桌面 UI 搬到云端，不为接口化拆出大量微服务或通用插件框架。
@@ -179,27 +179,27 @@ P2 区分页条数、单条消息字节数、总缓存和显式完整读取。�
 - 2026-10-15：完成第一阶段源码骨架。`runtime.ts` 提取同一份会话运行逻辑，暴露创建 / 读取会话、提交 / 取消 / steer、确认、订阅、分支与导入导出；`runtime-store.ts` 定义异步会话契约，`store.ts` 提供 SQLite 适配。产品助手与 runtime 注册来源由宿主装配，不要求云端会话库重复实现产品管理。
 - `agent.ts` 增加宿主能力注入；技能活动和压缩 checkpoint 等待异步提交后再推进。控制操作、同会话写入与事件发布有序，避免异步等待期间重复接纳或重复写入。`server.ts` 复用同一运行时，不修改底层 Agent Loop。
 - `runtime.test.ts` 用延迟存储替身与注入工具验证无 HTTP / SQLite 的执行、并发写入、事件顺序、确认、取消、失败与重启读取；新增入口和测试已接入包导出与测试命令。服务端开发分工、装配示例、存储语义和默认本机能力风险见 [嵌入接入说明](../runtime-embedding.md)。
-- 骨架验收：在 `packages/server` 执行 `node --expose-gc --conditions=source --test test/runtime.test.ts test/server.test.ts test/fork.test.ts test/compaction-server.test.ts test/auto-compaction-server.test.ts test/store.test.ts test/working-history.test.ts test/agent.test.ts test/external-tools.test.ts test/plugins.test.ts test/mcp.test.ts test/tool-progress.test.ts test/tool-search.test.ts test/model-requests.test.ts test/model-override.test.ts test/multimodal-input.test.ts test/compaction.test.ts test/auto-compaction.test.ts test/tools.test.ts`，108 项全部通过；仅使用 faux 模型及本地模拟端点。`npm run check` 通过，含 Biome、服务与 Web 类型检查、模型数据校验；`git diff --check` 通过。未运行发行构建或付费模型。
+- 骨架验收：在 `packages/server` 执行 `node --expose-gc --conditions=source --test test/runtime.test.ts test/server.test.ts test/fork.test.ts test/compaction-server.test.ts test/auto-compaction-server.test.ts test/store.test.ts test/working-history.test.ts test/agent.test.ts test/external-tools.test.ts test/plugins.test.ts test/mcp.test.ts test/tool-progress.test.ts test/tool-search.test.ts test/model-requests.test.ts test/model-override.test.ts test/multimodal-input.test.ts test/compaction.test.ts test/auto-compaction.test.ts test/tools.test.ts`，108 项全部通过；仅使用 faux 模型及本地模拟端点。`npm run check` 通过，含 Biome、当时的类型检查、模型数据校验；`git diff --check` 通过。未运行发行构建或付费模型。
 - 相对原方案：先增加“可嵌入与本地等价”前置阶段；本轮交付其源码骨架，不搬入 Cloud workspace、不实现云端数据库 / SDK / 认证 / 多租户或对象存储资源协议。源码骨架已验证不等于云端可交付；第一阶段发行与 Cloud 装配验收、第二至第四阶段仍待完成。
 
 ### 2026-10-15 包级拆分：已完成
 
 - 实际结构：`packages/runtime/src/runtime.ts`、`agent.ts`、`capabilities.ts`、`runtime-store.ts`、`config.ts`、`tools.ts`、`mcp.ts` 负责共享运行语义和契约；压缩、消息树、工具发现与通用作业状态也归 Runtime。`packages/local/src/runtime.ts`、`agent.ts` 装配 SQLite、模型文件、工具 / Skill / MCP、请求记录与本地助手 / Plugin 管理。`packages/server/src/server.ts`、`cli.ts`、`sidecar.ts` 保留本地传输和启动入口，底层 `packages/agent` 未改动。
 - `createAgentFactory(options)` 的共享入口必须注入五类能力，本地工厂保留原默认装配；模型 header 解析和压缩文件读取不再泄漏到 Runtime。保留原生工具、外部工具的默认 / 延迟曝光、确认、取消与错误语义；本地资源引用检查使用不含正文的 `listSessionMetadata`。
-- 更新 workspace、锁文件、Web 类型和示例导入；不保留旧 Server 子路径转发。第三方许可随工具移至 `packages/local/LICENSES`，内容哈希不变；Bun / SEA 构建脚本继续携带 `.LICENSES.txt`。接入说明见 [嵌入接入文档](../runtime-embedding.md) 与两个新包 README。
-- 验证：`npm run test:server` 134 项通过；额外执行 `node --expose-gc --conditions=source --test packages/server/test/agent.test.ts packages/server/test/model-override.test.ts packages/server/test/multimodal-input.test.ts packages/server/test/provider-composer.test.ts`，12 项通过。包含 Runtime 独立嵌入 / 依赖边界、HTTP / SQLite 重启、消息树、压缩、Subagent、工具、MCP、Skill、模型请求及 Web 展示回归，不使用收费模型。
+- 更新 workspace、锁文件、消费方类型和示例导入；不保留旧 Server 子路径转发。第三方许可随工具移至 `packages/local/LICENSES`，内容哈希不变；Bun / SEA 构建脚本继续携带 `.LICENSES.txt`。接入说明见 [嵌入接入文档](../runtime-embedding.md) 与两个新包 README。
+- 验证：`npm run test:server` 134 项通过；额外执行 `node --expose-gc --conditions=source --test packages/server/test/agent.test.ts packages/server/test/model-override.test.ts packages/server/test/multimodal-input.test.ts packages/server/test/provider-composer.test.ts`，12 项通过。包含 Runtime 独立嵌入 / 依赖边界、HTTP / SQLite 重启、消息树、压缩、Subagent、工具、MCP、Skill、模型请求及当时的消息展示回归，不使用收费模型。
 - 全目录定向回归额外发现 `session-transfer.test.ts` 的旧会话迁移用例仍提交已不支持的内联 runtime，期望 201 而得到 400；在拆分前源文件快照上独立复现同一失败，其余三个迁移用例通过。本轮不改协议或修复这项已有测试偏差；拆分新增的外部工具曝光回归已修正并通过原请求断言。
 - `npm run check` 通过；锁文件已使用 `npm install --package-lock-only --ignore-scripts --no-audit --no-fund` 刷新；`git diff --check` 通过。29 份纯迁移实现 / 测试排除导入路径和格式差异后与拆分前一致，包含原有全局流、Shell 和 webfetch 未提交改动。
 - 偏差与未完成：采用静态函数装配，不建设通用插件框架；本地 CLI / Sidecar 命令与 SQLite 格式不变。本轮未搬入 `cowork3/cloud`、未构建或部署 Sidecar，发行与 Cloud workspace 消费方式、真实数据库 / tools-sdk、资源引用和多租户验收仍待后续阶段；未提交或推送。
 
 ### 2026-10-15 Cloud 共享包接入：已完成
 
-- 目标与范围：只将当前工作树的 Runtime / Agent / AI / Telemetry / MCP 五个包放在 `cowork3/cloud/packages/pie/{runtime,agent,ai,telemetry,mcp}`，保留包内源码、测试、许可与模型目录数据，以及必要的共享配置和接入说明；不保留整仓外壳、Local / Server / Web、仓库文档和示例。不移动或裁剪原 Pie 仓库，不复制 `.git`、密钥、会话、依赖、缓存或构建产物。
+- 目标与范围：只将当前工作树的 Runtime / Agent / AI / Telemetry / MCP 五个包放在 `cowork3/cloud/packages/pie/{runtime,agent,ai,telemetry,mcp}`，保留包内源码、测试、许可与模型目录数据，以及必要的共享配置和接入说明；不保留整仓外壳、Local / Server 等本地宿主、仓库文档和示例。不移动或裁剪原 Pie 仓库，不复制 `.git`、密钥、会话、依赖、缓存或构建产物。
 - 实现：五个能力包由 Cloud workspace 统一管理，内部依赖强制使用本地 workspace；同步调整包内配置相对路径。`agent-service` 依赖 Runtime 和 MCP，承担宿主装配，不另建 Server 包或动态插件系统。通过包解析、干净目录断言、嵌入与 MCP 协议回归验证，不向 `Svc` 注入假的数据库或工具。MCP 纳入可消费能力，不默认启用 Local 的进程启动、OAuth 文件凭据或输出落盘。
 - 关键文件：Cloud 的 `pnpm-workspace.yaml`、`pnpm-lock.yaml`、`tsconfig.pie.json`、`apps/agent-service/package.json` 与 `tests/pie.test.mjs`；五包来源、装配边界和验证入口记录在 `packages/pie/README.md`。四个包的构建配置改为引用同级容器的基础配置，AI 模型目录导出路径随布局调整。
 - 验收：Cloud `pnpm install --ignore-scripts --frozen-lockfile`、`pnpm typecheck:pie`、`pnpm --filter @astron-cloud/agent-service typecheck` 与 `node packages/pie/ai/scripts/check-model-data.ts` 通过；`pnpm test:pie` 6 项通过，含目录与依赖来源断言；`pnpm test:mcp` 42 项通过、1 项原有 Windows 条件跳过；`pnpm --filter @astron-cloud/agent-service test` 2 项通过。未调用收费模型。
 - 一致性：五包源码及公开模型数据与原工作树一致，差异限于布局配置和接入文档；逐文件核对 468 份源文件 / 资源 / 共享配置，另有两个容器说明文件，四个包配置均能解析。Git 可见 40 份公开模型 JSON；没有额外整仓目录或外部仓库链接。原 Pie 的 `npm run check` 与双方 `git diff --check` 通过，已有无关改动保留。
-- 相对原方案：撤回最初的整仓复制，改为五包选择性接入；不保留多余的根清单、锁文件、文档、Local / Server / Web。严格依赖隔离发现 AI 缺少直接声明的 `@smithy/types`，在原仓库与 Cloud 同步补充固定版本 `4.19.0` 并刷新锁文件。源码安装可能提示未构建的 `pi-ai` CLI 入口，未通过删除 CLI 或擅自构建来掩盖；不影响已验证的源码消费。
+- 相对原方案：撤回最初的整仓复制，改为五包选择性接入；不保留多余的根清单、锁文件、文档、Local / Server 等本地宿主。严格依赖隔离发现 AI 缺少直接声明的 `@smithy/types`，在原仓库与 Cloud 同步补充固定版本 `4.19.0` 并刷新锁文件。源码安装可能提示未构建的 `pi-ai` CLI 入口，未通过删除 CLI 或擅自构建来掩盖；不影响已验证的源码消费。
 - 提交验收：按用户要求分别提交原 Pie 拆分与 Cloud 五包接入，包含必要的 workspace 锁文件。原 Pie 提交排除拆分前已有的 Shell、webfetch 和全局流实验，只保留包迁移与本次装配改动；原工作树内容不回退。在隔离的待提交快照上执行 `npm run check`、`npm run test:server`（125 项通过），以及 Agent / 模型覆盖 / 多模态 / Provider 的四文件定向回归（12 项通过）。
 - 不做：本轮只交付可消费的五包源码，不实现会话 HTTP API、云端数据库、tools-sdk 适配、租户平台或动态插件框架，不构建 / 部署 Sidecar，不推送。
 
@@ -213,7 +213,7 @@ P2 区分页条数、单条消息字节数、总缓存和显式完整读取。�
 - 本次仅更新本 SPEC：明确 Pie 自身的按会话装载、工作上下文与本轮执行分离、资源回收及恢复等级；保留两端一套语义，不把共享会话管理下放到宿主重写。P1–P3 尚未作为本次代码实现交付。
 - 核对入口：Pie 的 `packages/runtime/src/runtime.ts`、`runtime-store.ts`、`packages/local/src/runtime.ts` 与现有卸载 / 事件 SPEC；Cloud 的 `runtime-manager.ts`、`runtime-factory.ts`、`runtime-router.ts`、MySQL Store 和生命周期 SPEC。Cloud 代码现状不替代真实部署验收。
 - 本地基线：`npm run test:server` 165 项通过，包含显式 GC、两种保留策略、真实 SQLite、工具、MCP、分支、压缩、取消、Subagent、HTTP / SSE 和分页；上述模型 / 提示词 / 图片四文件定向命令额外 12 项通过。使用替身或本地模拟端点，未调用付费模型。
-- `npm run check` 通过（Biome 未修改文件、Runtime / Web 类型和模型数据校验）；`git diff --check` 通过。未修改运行代码、数据库格式、Cloud 工作树或本地默认值；未构建、部署或验证 Electron 实机链路。
+- `npm run check` 通过（Biome 未修改文件、当时的 Runtime 与宿主类型和模型数据校验）；`git diff --check` 通过。未修改运行代码、数据库格式、Cloud 工作树或本地默认值；未构建、部署或验证 Electron 实机链路。
 - 相对原方案：从包级可嵌入继续推进到按会话装载及可回收执行态，并将本地回归作为每个阶段的交付门槛。Cloud 共享包同步、宿主消费端适配、核心改造和联合故障验收仍待实施，不把规划完成记为功能已完成。
 
 ### 2026-10-24 共享单会话装载：PIE 侧已完成

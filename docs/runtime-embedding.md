@@ -133,7 +133,7 @@ await runtime.close();
 
 对 `interrupted` 调用 `runtime.resumeTurn(sessionId, { turnId })`：保持原用户消息、Turn/request ID、已应用 runtime/模型和实际 system prompt，准入保存成功后才调用模型；已完成工具不重放。对该 Turn 调用 `cancelTurn` 可以可靠取消而不构造 Agent。恢复或取消前不能直接提交下一 Turn 或替换历史。
 
-本地 SQLite 默认保持中断即失败的行为，以免尚未支持恢复入口的 Astron 宿主被阻塞。显式设置 `PI_TURN_RECOVERY=manual` 后启用安全分类和 HTTP / Web 恢复入口；启动不会静默调用模型。Cloud 直接使用共享契约，不读取这个本地环境变量；现有 Cloud 恢复器仍需增量适配，不因新增接口就自动获得续跑能力。完整范围见 [Turn 恢复 SPEC](specs/turn-recovery.md)。
+本地 SQLite 默认保持中断即失败的行为，以免尚未支持恢复入口的 Astron 宿主被阻塞。显式设置 `PI_TURN_RECOVERY=manual` 后启用安全分类和 HTTP 恢复入口；启动不会静默调用模型。Cloud 直接使用共享契约，不读取这个本地环境变量；现有 Cloud 恢复器仍需增量适配，不因新增接口就自动获得续跑能力。完整范围见 [Turn 恢复 SPEC](specs/turn-recovery.md)。
 
 ## 外部异步任务
 

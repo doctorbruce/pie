@@ -13,7 +13,7 @@
 - 继续使用现有 SQLite，拆分会话元信息与消息节点，增量写入节点和会话状态。
 - 保留已有节点身份、父指针、当前叶子、旧分支、导入原文，以及图片和工具结果。
 - 保持 tree 切换、独立会话 `/fork`、导入导出、后台任务与异常中断恢复的行为。
-- 本次不改压缩算法、闲置 Agent 卸载、Web/Astron 展示协议或 SSE；不引入 JSONL 双写或新依赖。
+- 本次不改压缩算法、闲置 Agent 卸载、宿主展示协议或 SSE；不引入 JSONL 双写或新依赖。
 - 活跃 Agent 暂时仍可持有完整当前路径；本阶段不宣称解决单个长期会话的全部内存增长。
 - 普通历史分页和压缩工作窗口必须在存储查询中停止，不把整条父链加载到服务层后再切片；显式完整树、导出和管理快照仍保留完整读取语义。
 
@@ -47,7 +47,7 @@
 
 ## 验证结果与剩余项
 
-- `npm run check`：通过，包含 Biome、服务与 Web 类型检查、模型数据校验；未运行构建或付费模型请求。
+- `npm run check`：通过，包含 Biome、当时的类型检查、模型数据校验；未运行构建或付费模型请求。
 - 2026-10-25 整体刷新回归：`npm run test:runtime` 48 项、`npm run test:server` 202 项通过；新增长历史前缀的 SQLite 递归访问计数验证，`git diff --check` 通过。
 - 在 `packages/server` 执行 `node --conditions=source --test test/store.test.ts test/fork.test.ts test/server.test.ts test/compaction-server.test.ts test/auto-compaction-server.test.ts test/model-override.test.ts test/tools.test.ts`：48 项全部通过，包含真实子进程崩溃恢复、后台子任务、取消与 steer。
 - 另执行 `node --conditions=source --test test/store.test.ts test/fork.test.ts test/session-transfer.test.ts`：21 项通过，1 项既有失败。`session-transfer.test.ts:40` 的旧用例仍通过创建接口传入内联 runtime，被已有的宿主注册规则拒绝（400 而非 201）；未改动该测试或放宽接口。新版导入、重启、分支与导出的行为由新增存储测试和现有 fork/model-override 测试覆盖。

@@ -2,7 +2,7 @@
 
 ## Repository Scope
 
-- 本仓库是独立 Pie Core 与 Web 客户端，不是上游 Pi CLI monorepo；工作区与可用命令以根 `package.json` 的 `workspaces` 和 `scripts` 为准。
+- 本仓库是独立 Pie Core 与本地 HTTP/SSE 宿主，不附带 Web UI，也不是上游 Pi CLI monorepo；工作区与可用命令以根 `package.json` 的 `workspaces` 和 `scripts` 为准。
 - 共享会话与执行语义放在 `packages/runtime`，本机存储和能力适配放在 `packages/local`，`packages/server` 只负责本地宿主装配和 HTTP/SSE。修改分层或嵌入接口前先读 `docs/agent-development.md` 和 `docs/runtime-embedding.md`。
 
 ## MCP Integration
@@ -48,7 +48,7 @@
 - Never run `npm run build` unless requested by the user.
 - Run the smallest relevant test set. Current root scripts are `npm run test:runtime`, `npm run test:server`, `npm run test:core`, and `npm run test:mcp`.
 - For a specific test (`<test-file>` is the path to an existing test):
-  - Runtime/server/Web (`node:test`), from the repo root: `node --conditions=source --test <test-file>`.
+  - Runtime/server (`node:test`), from the repo root: `node --conditions=source --test <test-file>`.
   - Agent/AI/MCP (Vitest), from the package root: `node ../../node_modules/vitest/dist/cli.js --run <test-file>`.
 - Do not run repository-wide Vitest discovery. `packages/ai/test` contains tests that read credentials and call real providers; select specific files. Agent/runtime/server regression tests use faux providers or local fixtures; do not use real provider APIs, keys, or paid tokens without an explicit user request.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.

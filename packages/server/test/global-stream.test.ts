@@ -16,6 +16,61 @@ import { applySessionEvent } from "@pie/runtime/session-events";
 import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
 import { createCoreServer } from "../src/server.ts";
 
+for (const origin of [undefined, "http://127.0.0.1:4389"]) {
+	test(`HTTP/SSE host access ${origin ? "uses an explicit server Origin" : "has no default UI Origin"}`, async (context) => {
+		const directory = await mkdtemp(join(tmpdir(), "pie-host-origin-"));
+		const core = createCoreServer({
+			PI_DATA_DIR: directory,
+			PI_SERVER_TOKEN: "host-token",
+			PI_SERVER_ORIGIN: origin,
+		});
+		const abort = new AbortController();
+		context.after(async () => {
+			abort.abort();
+			await core.close();
+			await rm(directory, { recursive: true, force: true });
+		});
+		await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+		const address = core.server.address();
+		assert(address && typeof address !== "string");
+		const base = `http://127.0.0.1:${address.port}`;
+		const headers = { Authorization: "Bearer host-token", ...(origin ? { Origin: origin } : {}) };
+		assert.equal((await fetch(`${base}/health`, { headers: { Authorization: "Bearer host-token" } })).status, 200);
+		assert.equal((await fetch(`${base}/health`, { headers })).status, 200);
+		assert.equal((await fetch(`${base}/health`, { headers: origin ? { Origin: origin } : {} })).status, 401);
+		for (const rejected of [
+			"http://127.0.0.1:5174",
+			"https://untrusted.example",
+			"null",
+			"http://127.0.0.1:4389/other",
+		]) {
+			assert.equal((await fetch(`${base}/health`, { headers: { ...headers, Origin: rejected } })).status, 403);
+		}
+		const created = await fetch(`${base}/sessions`, {
+			method: "POST",
+			headers: { ...headers, "Content-Type": "application/json" },
+			body: "{}",
+		});
+		assert.equal(created.status, 201);
+		const session = (await created.json()) as SessionSnapshot;
+		const snapshotStream = readEvents(
+			fetch(`${base}/sessions/${session.id}/events`, { headers, signal: abort.signal }),
+		);
+		const snapshot = (await snapshotStream.next()).value;
+		assert.equal(snapshot?.type, "snapshot");
+		assert.deepEqual(snapshot?.snapshot?.execution, session.execution);
+		await snapshotStream.return(undefined);
+		const globalStream = readEvents<ExecutionBaseline>(
+			fetch(`${base}/events?sessionId=${session.id}`, { headers, signal: abort.signal }),
+		);
+		const baseline = (await globalStream.next()).value;
+		assert.equal(baseline?.type, "execution.baseline");
+		assert.equal(baseline?.sessions[0].sessionId, session.id);
+		assert.deepEqual(baseline?.sessions[0].execution, session.execution);
+		await globalStream.return(undefined);
+	});
+}
+
 async function* readEvents<Packet = SessionEvent>(response: Promise<Response>): AsyncGenerator<Packet> {
 	const stream = await response;
 	assert.equal(stream.status, 200);

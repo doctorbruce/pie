@@ -164,11 +164,11 @@ started 落库 → 关联 + submission_intent 落库 → 外部提交确认 → 
 
 **对 agent-service：** 工具耗时有机会与剩余模型输出重叠；是否有收益取决于 Provider 的事件能力。它同时解释了为什么“模型整条消息还没落盘”不等于“工具肯定没执行”。
 
-### 3.7 本地宿主与 Web 一起迁移，不让云端优化破坏本地使用
+### 3.7 本地宿主一起迁移，不让云端优化破坏本地使用
 
 - 本地继续默认 SQLite、`retain` 和现有模型/工具/Skill/MCP 装配，不增加 Redis、MySQL、云账号或 Worker 启动依赖。
 - 本地 `PI_TURN_RECOVERY=manual` 显式启用恢复；默认仍按中断失败修复，避免尚未支持恢复入口的 Astron 宿主被卡在 `interrupted`。
-- 本地 HTTP 增加 `POST /sessions/:id/resume`；Web 显示继续/停止，在处理完中断 Turn 前禁发下一轮或替换历史。
+- 本地 HTTP 增加 `POST /sessions/:id/resume`，宿主通过恢复/取消接口处理中断 Turn，处理完之前不能开始下一轮或替换历史。自带测试 UI 已移除，当前验收以 SDK / HTTP / 嵌入契约为准。
 - 共享 `subscribe` 改为异步装载；HTTP/SSE 同步适配异步订阅和连接提前关闭。
 - Runtime 列表默认分页 50 条；本地封装按页汇总，HTTP `GET /sessions` 保持原 `{ sessions }` 完整列表形状，未因此激活所有会话。
 - SQLite 首次升级事务性建立迁移/恢复/列表索引；后续不在启动保留全部元信息数组。节点 ID、分支、导入原文、图片及工具结果保留，不要求删库重建。
@@ -210,7 +210,7 @@ Session 增量事件、revision、分页初始视图和 `readHistory` 补读在�
 
 建议由服务端按以下顺序增量接入：
 
-1. **固定同步基线。** 仅合并 `agent/ai/mcp/telemetry/runtime` 五个共享包；三方增量合并，保留同事改动，不覆盖整个目录，不把 Local/Server/Web 搬进云端。
+1. **固定同步基线。** 仅合并 `agent/ai/mcp/telemetry/runtime` 五个共享包；三方增量合并，保留同事改动，不覆盖整个目录，不把 Local/Server 等本地宿主搬进云端。
 2. **迁移 Store 和工厂。** 实现 `readSession`、游标 `listSessions`、`readTurnPath` 和 `readToolExecutions`；`saveSession` 必须原子保存历史、元信息与增量账本，不能忽略第三个参数或提交后再补写。工厂改为目标会话恢复和配置解析，专门管理必须的全范围管理查询。
 3. **迁移事件消费者。** 适配异步订阅、增量包、bounded bootstrap/历史补读；覆盖 Redis 路由、WS/SSE 与断线重同步，不再每 token 生成完整视图。
 4. **接入 Turn 恢复。** 持有有效归属后分类，开放 resume/cancel，并检查旧 owner 失效后不能继续写；保留原 Turn/config/prompt。
@@ -240,7 +240,7 @@ Session 增量事件、revision、分页初始视图和 `readHistory` 补读在�
 | `packages/agent/src/agent-loop.ts`、`types.ts` | 流式完整调用提前执行、结果复用、排序及等待屏障；提前启动事件携带调用快照 |
 | `packages/runtime/src/agent.ts`、`tools.ts`、`protocol.ts`、`index.ts` | 工具上下文能力、错误结果语义、interrupted 状态及公共导出 |
 | `packages/local/src/store.ts`、`runtime.ts` | SQLite 独立账本表/原子提交/分页、索引/恢复/有界查询、本地分页汇总与接口迁移 |
-| `packages/server/src/server.ts`、`apps/web/client/main.tsx` | HTTP 恢复入口、异步 SSE 订阅、本地继续/停止操作 |
+| `packages/server/src/server.ts` | HTTP 恢复/取消入口、异步 SSE 订阅 |
 | `packages/runtime/test/*`、`packages/server/test/*` 及 `fixtures/*` | 延迟 Store、显式 GC、真实 SQLite、跨进程退出、重复恢复及失败边界回归 |
 | 根 `package.json` | 将新增回归纳入现有 Runtime/Server 测试入口，没有新增依赖 |
 | Runtime/Server 现有 CHANGELOG、Server README、开发/嵌入文档及相关 SPEC | 记录公共接口迁移、当前边界、验证与完成状态 |
@@ -253,7 +253,7 @@ Session 增量事件、revision、分页初始视图和 `readHistory` 补读在�
 | `npm run test:server` | 230 项通过，含执行账本、流式工具提前执行、共享 Runtime 和本地宿主回归 |
 | `node --conditions=source --test packages/runtime/test/durable-jobs.test.ts packages/server/test/tool-execution.test.ts packages/server/test/durable-jobs.test.ts` | 23 项通过，覆盖契约、SQLite 账本和外部任务接管 |
 | `packages/agent` 下定向运行 `test/agent.test.ts test/agent-loop.test.ts test/message-replacement.test.ts test/streamed-tool-execution.test.ts` | 58 项通过；命令见流式工具 SPEC |
-| `npm run check` | Biome、Runtime/Web 类型及模型数据校验通过 |
+| `npm run check` | Biome、当时的 Runtime 与宿主类型及模型数据校验通过 |
 | `git diff --check` | 通过 |
 
 这些测试集合有重叠，不能相加当作独立用例总数，也不是本次新增测试数量。覆盖两种保留策略、冷会话、真实 SQLite、显式 GC、工具/MCP、分支/导入导出、压缩、取消、Subagent、HTTP/SSE，以及外部任务丢通知/丢响应/恢复并发与失败写入。新增账本回归包括追加去重、身份冲突、分页隔离、终态/重启保留、删除清理、事务回滚、开始保存失败不执行工具及终态写入失败不绕过账本；流式回归包括执行前快照、等待屏障和真正进程退出。使用假模型与本地端点，没有调用收费模型。

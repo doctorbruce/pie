@@ -26,5 +26,5 @@
 - 实际改动：`packages/server/src/tools/webfetch.ts` 增加限定域名、端口、BV/av 路径的单次移动页兜底；移动页单独确认权限，复用原请求的总超时和取消信号。返回 `sourceUrl`，文本/Markdown 标明来源与非转录限制，HTML 保持原始格式；原有转换、响应限额和长输出落盘继续共用。
 - `packages/server/test/webfetch.test.ts` 新增 5 项测试：格式/域名/查询参数、触发边界、不重复重试、权限拒绝/取消、响应限额和共用超时。实现前定向运行 1 通过、4 失败，失败包含原始 412；实现后在 `packages/server` 执行 `node --conditions=source --test test/webfetch.test.ts test/tools.test.ts`，21 项全部通过。
 - 真实链接复验：未修改 transport 的原生 `webfetch` 读取同一桌面 URL，经移动页兜底返回 200，Markdown 包含该视频标题、作者和 09:01 时长；本次约 0.86 秒。不是仅以 HTTP 状态判断成功。
-- 根目录 `npm run check` 通过，包含 Biome、服务/Web 类型检查和模型数据校验；`git diff --check` 通过。`packages/server/CHANGELOG.md` 已记录。
+- 根目录 `npm run check` 通过，包含 Biome、当时的类型检查和模型数据校验；`git diff --check` 通过。`packages/server/CHANGELOG.md` 已记录。
 - 相对方案无偏差；没有新增依赖、浏览器或登录态。未覆盖短链接、专栏、其他错误码、需登录内容和字幕/视频转录；未打包或替换运行中的 Sidecar，未提交。

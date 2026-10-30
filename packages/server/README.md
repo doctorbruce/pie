@@ -1,6 +1,6 @@
 # Pie Core 服务 v1
 
-用 Node 独立运行的薄本地服务，不依赖 React、assistant-ui 或 Vite。`@pie/runtime/protocol` 提供共享数据类型；`@pie/runtime` 负责会话运行，`@pie/local` 提供 SQLite、本机工具与文件配置，原版 `packages/agent` 仍只负责底层执行内核。
+用 Node 独立运行的薄本地服务，供 HTTP/SSE 宿主接入，不附带 UI。`@pie/runtime/protocol` 提供共享数据类型；`@pie/runtime` 负责会话运行，`@pie/local` 提供 SQLite、本机工具与文件配置，原版 `packages/agent` 仍只负责底层执行内核。
 
 主要架构和开发边界统一维护在 [Agent 开发文档](../../docs/agent-development.md)。
 
@@ -10,7 +10,7 @@
 
 ## HTTP
 
-请求体为 JSON 对象，必须带 `Content-Type: application/json`。普通请求最多 64 KiB；宿主 runtime 注册表最多 4 MiB；会话导入和 turn/steer 请求最多 32 MiB。设置 `PI_SERVER_TOKEN` 时，所有请求（含 health 和 SSE）需要 `Authorization: Bearer <token>`。Web 客户端通过同源 Vite 代理访问；Core 默认只允许 `http://127.0.0.1:5174` Origin，可用 `PI_WEB_ORIGIN` 覆盖。
+请求体为 JSON 对象，必须带 `Content-Type: application/json`。普通请求最多 64 KiB；宿主 runtime 注册表最多 4 MiB；会话导入和 turn/steer 请求最多 32 MiB。设置 `PI_SERVER_TOKEN` 时，所有请求（含 health 和 SSE）需要 `Authorization: Bearer <token>`。无 Origin 的 SDK/HTTP 请求按原契约接入；带 Origin 的请求必须与显式配置的 `PI_SERVER_ORIGIN` 完全一致，默认全部拒绝。不提供 CORS 响应头或代理，浏览器宿主需自行桥接。
 
 | 方法和路径 | 请求 | 响应 |
 | --- | --- | --- |
@@ -65,7 +65,7 @@
 
 宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知；`job_output` 可增量读取，`job_kill` 可停止任务。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。父会话取消会取消前台子会话；子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
 
-独立 Web 模式在 Assistant 设置中选择“可调用助手”，Core 将 subagentIds 转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
+独立本地模式通过 Assistant 接口设置 `subagentIds`，Core 将其转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
 
 模型系统提示词按“本轮 `systemPrompt` → 助手 `runtime.systemPrompt` → 可用技能索引”拼接，不用本轮规则覆盖助手角色。省略或传空白的本轮规则时保留助手提示词；与助手提示词完全相同的内容不重复添加，技能索引只追加一次。
 
@@ -106,7 +106,7 @@ export default function createTool({ Type, sessionId }: ToolContext) {
 
 上下文包含 Pie `sessionId`、会话工作区 `directory`、只读 `env` 快照、`Type` 和 `ask`。每个会话创建一份工具实例；execute 沿用原生的 toolCallId、参数、AbortSignal、onUpdate，返回 content/details，出错时抛出异常。`ask({ type: "confirmation", title, message, metadata? }, signal?)` 会暂停当前工具，向 SSE 推送 `interaction.requested`，等待 `POST /sessions/:id/interactions/:interactionId` 的批准或拒绝；拒绝、取消和服务关闭都会让 Promise 以错误结束。宿主 runtime 可用 `permissions` 配置权限 ID 的 `allow/ask` 决策，精确项优先于 `*`；没有 `metadata.permission` 的显式确认始终交给用户。Pie 保存最终工具消息及 details，并通过 tool_execution_update/end 事件回传更新。全局 `/events` 会同时把 details 提升到工具结果顶层，方便 Astron 直接读取 `outputs`、diff 和 diagnostics。
 
-Web 客户端的助手设置从 `GET /tools` 读取目录，勾选后新建真实模型会话即可使用；HTTP 也可通过 runtime.toolIds 选择。Web 客户端不创建或展示 faux 会话。faux 模式只保留给 Core 自动化测试和独立脚本，支持精确指令 `调用工具 <ID> <JSON对象>`；未启用的工具返回工具错误。加载不等于启用。
+宿主从 `GET /tools` 读取目录，通过助手的 `toolIds` 或宿主注册的 `runtime.toolIds` 选择启用工具。faux 模式只保留给 Core 自动化测试和独立脚本，支持精确指令 `调用工具 <ID> <JSON对象>`；未启用的工具返回工具错误。加载不等于启用。
 
 `examples/tools/memory-manage.ts` 适配 Astron 的 list/add/delete 记忆工具；它读取宿主注入的 ASTRON_RPA_ROUTE_BASE_URL 或 ASTRON_RPA_ROUTE_PORT，不硬编码端口。测试使用模拟服务；正式发行工具由 Astron adapter 管理。调用示例：`调用工具 memory-manage {"action":"list"}`。
 
@@ -167,15 +167,15 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 受理和完成时记录均落盘；SSE 的 activity.updated 携带完整 activity，工具结果 details.activity 携带同一技能记录（sessionId/turnId 位于外层 SSE 和 activities）。刷新/重启通过 activities 恢复历史。崩溃遗留 running 改为 unknown，保留来源且不重跑。未改动原版 loop，使用工具 details 和 afterToolCall 保留成功/错误结果的来源。
 
-本地演示：服务运行后执行 `node examples/skill-provenance.ts`，创建假模型会话并验证共享文件的两条来源绑定各加载一次。可用 PI_SERVER_URL / PI_SERVER_TOKEN 指定服务和认证。Web 客户端的会话详情可查看最近 Skill 活动及可用技能。假模型支持 `加载技能 <绑定ID>`；不调用真实模型。
+本地演示：服务运行后执行 `node examples/skill-provenance.ts`，创建假模型会话并验证共享文件的两条来源绑定各加载一次。可用 PI_SERVER_URL / PI_SERVER_TOKEN 指定服务和认证。HTTP 快照与 SSE 可读取 Skill 活动及可用技能。假模型支持 `加载技能 <绑定ID>`；不调用真实模型。
 
-同会话只接受一个活动 turn；不同会话相互独立。取消必须匹配最近的 turnId，避免延迟请求误取消下一次执行。HTTP 连接关闭、前端刷新和 SSE 断线不会取消模型调用；需要显式发送 cancel。
+同会话只接受一个活动 turn；不同会话相互独立。取消必须匹配最近的 turnId，避免延迟请求误取消下一次执行。HTTP 连接关闭和 SSE 断线不会取消模型调用；需要显式发送 cancel。
 
 ## 中断恢复
 
 默认维持重启后把未完成 Turn 修复为失败的行为。需要恢复原 Turn 时，在启动前显式设置 `PI_TURN_RECOVERY=manual`；尚未接入恢复 API 的 Astron 宿主不要启用。该开关不更换 SQLite，也不在启动时自动执行模型或工具。
 
-- 用户输入或完整工具结果已提交：标为 `interrupted`，通过 Web 的“继续本次执行”或 `POST /sessions/:id/resume` 继续，沿用原 Turn ID、用户输入、模型和提示词。
+- 用户输入或完整工具结果已提交：标为 `interrupted`，通过 `POST /sessions/:id/resume` 继续，沿用原 Turn ID、用户输入、模型和提示词。
 - 最终 Assistant 已提交但终态未提交：只补齐结算，不重新请求模型。取消意图已提交的 Turn 不再续跑。
 - 工具结果缺失、旧记录缺少执行 checkpoint、Subagent、后台任务和未持久化队列：继续失败修复；未匹配调用补入明确的未知结果，绝不自动重放。
 - `interrupted` 不是已完成；恢复或取消前，提交下一 Turn、导入及切换分支返回 409。取消该 Turn 直接持久化为 cancelled。
@@ -184,7 +184,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 ## SSE
 
-会话树沿用上游 `a4d040d30f2cb30fffbd841b3f0a7052158e2e21` 的无分支摘要导航语义。新消息追加到当前叶节点，旧分支保留在 SQLite，重启可继续切换。运行中、子会话和未闭合工具调用处不能切换；切换后仅当前路径进入模型上下文，旧压缩摘要不会跨分支复用。Web 会话详情中的「会话树」及 `/tree` 打开同一选择器。尚未接入上游的分支摘要生成、树标签和搜索过滤。
+会话树沿用上游 `a4d040d30f2cb30fffbd841b3f0a7052158e2e21` 的无分支摘要导航语义。新消息追加到当前叶节点，旧分支保留在 SQLite，重启可继续切换。运行中、子会话和未闭合工具调用处不能切换；切换后仅当前路径进入模型上下文，旧压缩摘要不会跨分支复用。通过 `GET /sessions/:id/tree` 读取分支，`POST /sessions/:id/tree` 选择节点。尚未接入上游的分支摘要生成、树标签和搜索过滤。
 
 每条 `data:` 是一个 JSON 包：
 
@@ -236,7 +236,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_SHELL`（或平台默认的 `PI_BASH`/`PI_POWERSHELL`）、`PI_BASH_TIMEOUT_MS`、`PI_BASH_YIELD_MS` 和 `PI_RG` 配置可执行文件与超时。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
 - 事件的 `event` 字段保留 Pi 原始格式。Astron adapter 将其转换为 `CoreEvent`；其他宿主也应在 adapter 边界转换，不要将 Pi 原始结构传入产品服务。
 - 自动压缩在 checkpoint 与原文事务提交后替换 Agent、执行 loop 和 Session 的工作历史，保留摘要、必要的当前输入和近期消息，解除冷正文引用；完整原文仍在 SQLite，摘要不成为原始消息节点。请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片保留。摘要失败、取消、提交失败或压缩后仍超预算时不裁剪工作历史，明确结束本轮。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)，正文回收见 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
-- 会话元信息保存在 `sessions`，消息以 `session_entries` 树节点唯一持久化；新增节点和叶子状态在同一事务中写入，不再整段保存 `messages`。旧 payload 在首次启动时逐会话事务迁移，保留节点 ID、分支和导入原文。启动及列表只读元信息，执行时按 checkpoint 节点边界读取工作窗口；内存树只留叶子，消息身份通过弱引用索引关联存储。完整快照、导出、fork 和树导航临时从数据库读取原文，不回填已裁剪的工作窗口。存储层提供按父指针读取的 seq 游标分页，HTTP 可请求有界快照，SSE 使用有界启动快照和后续增量；闲置 Agent 可按 Runtime 保留策略卸载，Web 支持历史分页。页面保存 session ID 于 sessionStorage；独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。实现与验证见 [历史存储 SPEC](../../docs/specs/history-storage.md) 和 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
+- 会话元信息保存在 `sessions`，消息以 `session_entries` 树节点唯一持久化；新增节点和叶子状态在同一事务中写入，不再整段保存 `messages`。旧 payload 在首次启动时逐会话事务迁移，保留节点 ID、分支和导入原文。启动及列表只读元信息，执行时按 checkpoint 节点边界读取工作窗口；内存树只留叶子，消息身份通过弱引用索引关联存储。完整快照、导出、fork 和树导航临时从数据库读取原文，不回填已裁剪的工作窗口。存储层提供按父指针读取的 seq 游标分页，HTTP 可请求有界快照，SSE 使用有界启动快照和后续增量；闲置 Agent 可按 Runtime 保留策略卸载；独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。实现与验证见 [历史存储 SPEC](../../docs/specs/history-storage.md) 和 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
 - 模型配置为进程共享，Agent 保留创建时解析的模型调用配置。Assistant/runtime 版本变化或服务重启会重建 Agent，并用会话保存的 provider/model 选择重新解析当前端点和凭据；模型不可用时历史仍可读，提交报错。目录和 health 表示本地配置状态，不代表远端凭据有效；创建会话和保存配置均不调用模型。
 - 输入和执行 checkpoint 在返回 `202` 前原子落盘；完整消息在 message_end 落盘，流式片段不逐 token 保存。默认崩溃遗留的 running 标记为 failed，显式恢复模式按上述安全边界分类；未匹配工具调用补入结果未知的错误，不自动重放，不保证工具副作用恰好一次。
 
@@ -262,7 +262,7 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 `providers` 使用 Pi 上游结构，支持 `//` 注释、尾逗号、`models`、`modelOverrides`、`compat` 和 headers。`defaultModel` 是此服务增加的选择字段，上游解析器会忽略它。不存在该字段时使用 `PI_PROVIDER` / `PI_MODEL`，否则需通过设置选择默认模型或创建会话时显式指定。
 
-Web 客户端使用提供商配置接口 `PUT /providers/config`：
+宿主使用提供商配置接口 `PUT /providers/config`：
 
 ```json
 {
@@ -276,13 +276,13 @@ Web 客户端使用提供商配置接口 `PUT /providers/config`：
 }
 ```
 
-一个提供商共用协议、Base URL 和凭据。`models` 是本次保存的完整列表（1–2000 个，不允许重复 ID，仍受 HTTP 64 KiB 限制）；移除的自定义模型不再供新会话使用。保留模型原有的 compat、headers、cost 等高级配置，并应用显式修改。内置提供商原始目录仍由 Pi 保留，移除本地定义不等于禁用内置模型。提供商 ID 为稳定标识，界面编辑时只读。
+一个提供商共用协议、Base URL 和凭据。`models` 是本次保存的完整列表（1–2000 个，不允许重复 ID，仍受 HTTP 64 KiB 限制）；移除的自定义模型不再供新会话使用。保留模型原有的 compat、headers、cost 等高级配置，并应用显式修改。内置提供商原始目录仍由 Pi 保留，移除本地定义不等于禁用内置模型。提供商 ID 为稳定标识。
 
 `apiKey` 省略或空字符串保留旧值。`defaultModel` 指定此提供商下的新会话默认模型；省略时保留当前默认，若原默认被移除则选择列表第一项。`POST /sessions` 的 `model` 可独立选择模型，无需修改全局默认。
 
-「获取」支持 OpenAI Compatible / Responses、Anthropic Messages 和 Google Gemini：分别读取 Base URL 下 `/models`、`/v1/models`、`/v1beta/models`（已有版本后缀时不重复）。OpenAI Base URL 通常应包含 `/v1`，Anthropic 使用 `https://api.anthropic.com`，Google 使用 `https://generativelanguage.googleapis.com/v1beta`。Anthropic / Google 处理分页，Google 过滤明确不支持 `generateContent` 的模型。参照 [Anthropic Models API](https://platform.claude.com/docs/en/api/models/list) 和 [Google Models API](https://ai.google.dev/api/models)。
+`POST /providers/discover` 支持 OpenAI Compatible / Responses、Anthropic Messages 和 Google Gemini：分别读取 Base URL 下 `/models`、`/v1/models`、`/v1beta/models`（已有版本后缀时不重复）。OpenAI Base URL 通常应包含 `/v1`，Anthropic 使用 `https://api.anthropic.com`，Google 使用 `https://generativelanguage.googleapis.com/v1beta`。Anthropic / Google 处理分页，Google 过滤明确不支持 `generateContent` 的模型。参照 [Anthropic Models API](https://platform.claude.com/docs/en/api/models/list) 和 [Google Models API](https://ai.google.dev/api/models)。
 
-获取结果先合并到前端待保存列表，去重且保留已有条目；失败不改变文件。获取总超时 15 秒、每页最多 2 MiB、最多 10 页 / 2000 个模型；不跟随重定向，不回显上游错误正文。仅在端点未变时复用服务端已存密钥和 headers，改地址后需重新输入密钥才能获取。获取目录成功不保证该模型能聊天或调用工具。
+获取只返回模型列表，由宿主检查并通过配置接口保存；失败不改变文件。获取总超时 15 秒、每页最多 2 MiB、最多 10 页 / 2000 个模型；不跟随重定向，不回显上游错误正文。仅在端点未变时复用服务端已存密钥和 headers，改地址后需重新输入密钥才能获取。获取目录成功不保证该模型能聊天或调用工具。
 
 单模型增量配置接口仍可直接使用：
 
@@ -304,4 +304,4 @@ Web 客户端使用提供商配置接口 `PUT /providers/config`：
 
 API key 和 headers 支持 `$VAR` / `${VAR}`，`$$` 表示字面量 `$`，`$!` 表示字面量 `!`。尚未恢复 OAuth / auth.json / 扩展注册 / 上游后台目录刷新机制；`!command` 和 `oauth` 配置明确拒绝。环境变量在服务启动时取快照。无鉴权本地兼容端点可配置占位 key `local`。自定义 Base URL 限 HTTP(S)，不要把凭据放进 URL。
 
-`packages/local/src/models/model-config.ts` 的 schema、`provider-composer.ts` 的模型/compat 合成、`resolve-config-value.ts` 的模板解析、`json.ts` 来自 Pi `b2602be` 的 coding-agent，并按上述范围抽取；服务文件存储、HTTP API 和 UI 为本项目实现。pi-ai 源码未改动；Agent loop 仅增加请求间隙的工作历史替换支持，不引入上游 Harness。
+`packages/local/src/models/model-config.ts` 的 schema、`provider-composer.ts` 的模型/compat 合成、`resolve-config-value.ts` 的模板解析、`json.ts` 来自 Pi `b2602be` 的 coding-agent，并按上述范围抽取；服务文件存储和 HTTP API 为本项目实现。pi-ai 源码未改动；Agent loop 仅增加请求间隙的工作历史替换支持，不引入上游 Harness。

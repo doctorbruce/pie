@@ -171,7 +171,7 @@ Pie 应借鉴这些接口行为与回归测试，继续使用自己的 SQLite �
 - 实时事件复用现有 Agent event/progress 路径，不再每次携带全部 transcript；断线恢复按 revision 重新同步必要状态。
 - 模型上下文不混入 UI 心跳；完整导出与分叉从存储读取，不能从某个 UI 页或工作窗口凑历史。
 
-必要性：避免冷历史已经从 Agent 释放，却因为 snapshot 序列化、浏览器展示或宿主缓存再次全量加载。这个阶段应覆盖 Pie Web 和 Astron 适配方，不只改一侧接口。
+必要性：避免冷历史已经从 Agent 释放，却因为 snapshot 序列化、浏览器展示或宿主缓存再次全量加载。这个阶段应覆盖 SDK / HTTP / 嵌入宿主的事件与分页契约；自带测试 UI 已移除，见 [删除 SPEC](specs/remove-bundled-web.md)。
 
 ## 不建议现在增加
 

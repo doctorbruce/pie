@@ -4,18 +4,20 @@
 
 ### Breaking Changes
 
-- Session SSE bootstraps with the latest 50 messages and then emits revisioned deltas rather than full snapshots; the Pie Web client consumes increments and pages older history. Global `/events` and explicit full-session reads remain unchanged.
+- Remove the bundled Web UI, its workspace, frontend dependencies, development script and UI tests. Acceptance uses SDK, HTTP/SSE and embedding contracts. Replace `PI_WEB_ORIGIN` and its implicit development-origin allowance with explicit host configuration through `PI_SERVER_ORIGIN`; requests without Origin keep their existing behavior.
+
+- Session SSE bootstraps with the latest 50 messages and then emits revisioned deltas rather than full snapshots; hosts can consume increments and page older history through the shared Runtime helpers. Global `/events` and explicit full-session reads remain unchanged.
 
 ### Added
 
 - Bootstrap scoped `/events?sessionId=...` subscriptions with a lightweight execution baseline and align subsequent events for reconnects after silent settlement.
 
-- Recover safe interrupted Turns through SQLite startup classification, `POST /sessions/:id/resume` and Web resume/cancel controls; keep the original Turn identity and configuration, and settle already committed final answers without another model call.
+- Recover safe interrupted Turns through SQLite startup classification and the HTTP resume/cancel endpoints; keep the original Turn identity and configuration, and settle already committed final answers without another model call.
 
 - Add an embeddable runtime with asynchronous session storage and host-provided model, tool, skill, MCP and request-recording capabilities; reuse it in the local HTTP service.
 - Record complete provider request payloads for each session, including context compaction calls, without changing the prompt or recording authentication headers.
 
-- Add durable same-session conversation trees with upstream `/tree` navigation semantics and Web branch selection.
+- Add durable same-session conversation trees with upstream `/tree` navigation semantics and HTTP branch selection.
 - Accept native message boundaries when forking sessions through Astron.
 
 - Persist per-session `modelOverride`, including explicit null, through the session API, restart, fork, and transfer.

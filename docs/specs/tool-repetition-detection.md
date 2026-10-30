@@ -31,5 +31,5 @@
 - 2026-10-16：确定仅实现精确重复检测，阈值为连续三次；先追加模型可见提醒，不增加硬停止或确认流程。已检查共享 Runtime、Agent hook 与并行执行顺序；现有未提交改动不属于本次范围。
 - 已增加 `packages/runtime/src/tool-repetition.ts`，在 `packages/runtime/src/agent.ts` 的工具结果 hook 接入；补充 Runtime README、CHANGELOG 和现有测试入口，仅向原有 `package.json` 测试列表追加本次文件。
 - 定向 faux 测试首次 11 项通过；补充 Unicode 键回归后复现本地化排序导致的漏报，改为按原始字符串顺序排序；新增 12 项检测测试最终全部通过。
-- 验证：`npm run check` 通过（Biome、根/Web 类型及模型数据）；`npm run test:runtime` 17 项通过；`node --conditions=source --test packages/server/test/tool-search.test.ts packages/server/test/tool-progress.test.ts packages/server/test/tools.test.ts packages/server/test/mcp.test.ts` 25 项通过；`git diff --check` 通过。测试仅使用 faux、本地端点和临时目录，无付费请求。
+- 验证：`npm run check` 通过（Biome、当时的类型及模型数据）；`npm run test:runtime` 17 项通过；`node --conditions=source --test packages/server/test/tool-search.test.ts packages/server/test/tool-progress.test.ts packages/server/test/tools.test.ts packages/server/test/mcp.test.ts` 25 项通过；`git diff --check` 通过。测试仅使用 faux、本地端点和临时目录，无付费请求。
 - 无范围偏差或未完成实现项；未增加步数限制，未打包或部署。根检查前后核对了其他未提交文件的内容哈希，没有改动它们；`package.json` 保留原有未提交测试入口，仅追加本次用例。

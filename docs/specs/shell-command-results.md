@@ -24,5 +24,5 @@
 
 - 实际改动：packages/server/src/tools/jobs.ts 负责 shell 退出状态与共用结果头；shell.ts 接入前台和后台通知；job.ts 补充退出码并统一读取/停止结果；tools.test.ts 补充回归；server/CHANGELOG.md 记录修复。
 - 验证：实现前回归测试复现 3 项失败；实现后上述定向测试 17/17 通过，覆盖普通非零退出、无新输出轮询、未知退出码、启动失败、超时、取消及 task/grep 语义隔离。
-- npm run check 通过：Biome、服务端与 Web 类型检查、模型数据校验；git diff --check 通过。
+- npm run check 通过：Biome、当时的类型检查、模型数据校验；git diff --check 通过。
 - 偏差与未完成项：无实现偏差；未构建、打包、重启 Astron 或做桌面 UI 验证，现有运行时需加载新版本后才生效。

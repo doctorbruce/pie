@@ -29,7 +29,7 @@
 - `compaction.ts`/`agent.ts` 区分已物化的工作窗口，提交成功后同步替换 Session、Agent、loop 和请求数组；重复压缩只合并上一摘要与新增历史，不重复摘要 checkpoint。`tool-search.ts` 从 checkpoint 的工具名清单恢复曝光状态，并过滤当前不允许的工具。
 - `packages/agent` 增加 `replaceMessages()` 和请求间隙上下文绑定。只改 Agent 状态仍会被 loop 的累计结果留住，因此本次包含执行内核的小接口扩展；新 API 的累计结果语义见其 README/CHANGELOG。
 - 新增 `working-history.test.ts`、`message-replacement.test.ts`，扩展压缩测试及测试入口。WeakRef + 显式 GC 验证运行中的工具链及真实服务压缩后冷消息对象可回收；测试先清除 mock 自身保存的旧参数，避免把测试引用误判为服务泄漏。
-- 验证：根 `npm run check` 最终通过（Biome、TypeScript、Web 类型及模型数据校验）。检查曾发现新增测试缺少必填 `runtimeSource`，已补齐；没有修改依赖或模型元数据。`git diff --check` 通过。
+- 验证：根 `npm run check` 最终通过（Biome、当时的 TypeScript 类型及模型数据校验）。检查曾发现新增测试缺少必填 `runtimeSource`，已补齐；没有修改依赖或模型元数据。`git diff --check` 通过。
 - 在 `packages/agent` 执行 `node ../../node_modules/vitest/dist/cli.js --run test/message-replacement.test.ts test/agent.test.ts test/agent-loop.test.ts`：46 项全部通过，原有 Agent/loop 契约回归保留。
 - 在 `packages/server` 执行 `node --expose-gc --conditions=source --test test/working-history.test.ts test/store.test.ts test/fork.test.ts test/compaction.test.ts test/compaction-server.test.ts test/auto-compaction.test.ts test/auto-compaction-server.test.ts test/server.test.ts test/model-override.test.ts test/tools.test.ts test/tool-search.test.ts test/mcp.test.ts`：75 项全部通过。包含真实服务连续压缩、重启和裁剪前 fork/tree、事务失败与取消、图片、导入原文、工具曝光、后台子任务及 GC；仅用本地端点或 faux，无付费请求。最初工作树的 80 项结果包含另一个功能的 5 项测试，未纳入本次提交。
 - 2026-10-14 交付验收：将暂存内容导出到隔离快照，`npm run check`、上述 46 项 Agent 测试和 75 项服务测试通过；`npm run build`、`npm run build:sidecar -- --out E:/Projects/pie/dist/pie-agent.exe` 通过。快照的 workspace 依赖链接指向快照自身，未修改主工作树依赖或 lockfile。

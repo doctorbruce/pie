@@ -220,6 +220,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			localModels.setProvider(faux.provider);
 			const modelHeaders = mode === "real" && realModel ? headers?.(realModel) : undefined;
 			const selectedNativeTools = new Set(runtime.toolIds);
+			const toolAvailable = (tool: Pick<AgentTool, "name">) => runtime.toolAvailability?.[tool.name] !== false;
 			if (taskTool || selectedNativeTools.has("bash")) {
 				selectedNativeTools.add("job_output");
 				selectedNativeTools.add("job_kill");
@@ -228,7 +229,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				...tools.filter((tool) => selectedNativeTools.has(tool.name)),
 				...skillTools.tools,
 				...(taskTool ? [taskTool] : []),
-			];
+			].filter(toolAvailable);
 			const deferredToolNames = [
 				...tools.filter((tool) => "exposure" in tool && tool.exposure === "deferred").map((tool) => tool.name),
 			];
@@ -338,11 +339,11 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				initialState: {
 					model: mode === "real" && realModel ? realModel : faux.getModel(),
 					systemPrompt: composeSystemPrompt(runtime),
-					tools: toolSearch.tools.map(withToolProgress),
+					tools: toolSearch.tools.filter(toolAvailable).map(withToolProgress),
 					messages,
 				},
 				streamFn: (model, context, options) => {
-					context = toolSearch.expose(context, runtime.language);
+					context = toolSearch.expose(context);
 					if (mode === "real") return compactStream(model, context, options);
 					const last = context.messages.at(-1);
 					const availableTools = context.tools ?? [];
@@ -399,13 +400,13 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 						"tool_search",
 					]);
 					toolSearch = createToolSearch(
-						[...availableTools, ...lease.tools],
+						[...availableTools, ...lease.tools.filter(toolAvailable)],
 						[...deferredToolNames, ...lease.tools.map((tool) => tool.name)],
 						lease.instructions,
 					);
 					toolSearch.restoreLoaded(checkpoint?.loadedToolNames);
 					toolSearch.restore(sessionAgent.state.messages);
-					sessionAgent.state.tools = toolSearch.tools.map(withToolProgress);
+					sessionAgent.state.tools = toolSearch.tools.filter(toolAvailable).map(withToolProgress);
 					return lease.release;
 				},
 			});

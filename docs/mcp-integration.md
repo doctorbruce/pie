@@ -37,7 +37,8 @@ Astron 将共享 settings.mcp 与助手挂载且启用的 Plugin MCP 合并；�
 ## 工具与生命周期
 
 - 工具名为 mcp__server__tool，最大 64 字符，超长/清洗碰撞加哈希；与原生工具和外部分发工具共同进入已有 tool_search，默认延迟暴露 schema。
-- system prompt 的“工具发现”概览列当前助手已挂载且支持延迟加载的工具 ID 和不超过 160 字符的一行用途，包含已连接的 MCP 工具，不包含参数 schema。按 runtime.language 选择中英文提示；同一配置下，搜索加载不删除概览中的条目，避免改写已有 system 前缀。加载状态以实际工具列表和 tool_search 结果为准；配置/语言变更可以更新概览，不修改持久化的宿主 prompt。
+- 工具按需加载不向 system prompt 注入额外提示或工具目录，宿主 prompt 保持原样。tool_search.description 包含通用说明，以及当前可发现且尚未加载的工具 ID 和一句简介；目录按 ID 排序，简介压成单行、最多 160 字符，不含 schema。每次模型请求前重新生成，未选或移除工具、停用 MCP 不进入目录，加载后的工具从下一次目录移除。加载状态以实际工具列表和搜索结果为准。
+- Turn 请求的 toolAvailability 布尔映射按精确工具 ID 匹配、不支持通配符，只缩减本轮实际库存，包括原生 MCP 工具；false 同时排除工具、搜索和目录，true 不扩大助手的工具选择、挂载或权限。每次 submit 从最新宿主/本地配置合成本轮映射，随 Session runtime/checkpoint 保存且隔离其他 Session，下一轮可恢复；Steer 维持本轮映射，子助手继承父轮 false 边界。
 - MCP 的 initialize.instructions 不注入 system prompt。tool_search 发现某个 MCP 工具时，在该次工具结果中附带对应服务完整说明及权限边界，随后作为消息历史追加给模型；不修改已发送的消息或宿主 prompt，缺失或空白说明跳过。只提供本次选中工具所属服务的说明；精确工具 ID 重查可取得已加载工具的最新说明，旧说明保留在历史中，以最新搜索结果为准。删除/停用服务后不再返回其新说明，历史消息不回写。
 - 这保证说明采用追加式消息上下文，而不是保证厂商缓存必然命中。动态加载仍改变请求 tools 字段；配置变更、历史分支、上下文压缩及 provider 的缓存策略也可能改变缓存前缀或命中结果。
 - 执行仍经过当前助手 permissions/context.ask；远端 readOnly 等 hints 不绕过权限。取消与进度走原 AgentTool 信号和事件。
@@ -64,7 +65,7 @@ Sidecar 构建同时生成可执行文件旁的 .LICENSES.txt，发行时须一�
 
 选择 T2：本地真实 stdio/HTTP MCP fixture + faux provider，覆盖协议/服务边界，不使用收费模型。packages/server/test/mcp.test.ts 验证工具调用、业务失败、owner 隔离、权限、取消、配置刷新/在途引用、OAuth 回调及凭据恢复。上游 packages/mcp/test 原测试保留。
 
-packages/server/test/tool-search.test.ts 捕获真实模型 SDK 发往本地 provider 的请求，验证首请求不带 MCP 说明、加载对应工具后的 tool 结果说明、空白/停用/未挂载隔离，以及重启/配置刷新后的精确 ID 重查。直接比较前后请求的 system 和完整 messages 前缀，确认说明仅追加、旧说明不回写；工具 schema 仍延迟暴露。
+packages/server/test/tool-search.test.ts 捕获真实模型 SDK 发往本地 provider 的请求，验证 tool_search.description 的动态目录、加载后移除和停用/未挂载隔离，宿主 system prompt 完全保持，以及重启/配置刷新后的精确 ID 重查。直接比较前后请求的完整 messages 前缀，确认 MCP 服务说明仅追加、旧说明不回写；工具 schema 仍延迟暴露。
 
 Astron test/test_pie_mcp.py 验证共享/Plugin 投影、配置 revision、状态 port，并启动真实 Pie Node Core 跑 Python→配置注册→stdio 工具循环→状态→停用刷新。没有 sibling Pie/Node 依赖的环境跳过跨仓库 smoke，其余契约测试仍执行。
 

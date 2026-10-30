@@ -108,7 +108,10 @@ export type SubagentBinding = {
 	runtime: AgentRuntimeConfig;
 	model?: ModelSelection;
 };
-export type RuntimeConfig = AgentRuntimeConfig & { subagents: SubagentBinding[] };
+export type RuntimeConfig = AgentRuntimeConfig & {
+	subagents: SubagentBinding[];
+	toolAvailability?: Record<string, boolean>;
+};
 export type RuntimeSource = "local" | "host";
 export type ToolActivity = {
 	id: string;
@@ -180,6 +183,8 @@ export type Turn = {
 	id: string;
 	requestId?: string;
 	rootRequestId?: string;
+	canonicalTurnId?: string;
+	rootCanonicalTurnId?: string;
 	status: "running" | "interrupted" | "completed" | "cancelled" | "failed";
 	error?: string;
 };
@@ -187,6 +192,7 @@ export type TurnReceipt = {
 	sessionId: string;
 	turnId: string;
 	requestId?: string;
+	canonicalTurnId?: string;
 	accepted: boolean;
 	started: boolean;
 	settled: boolean;

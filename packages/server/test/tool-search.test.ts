@@ -23,8 +23,8 @@ async function request(base: string, path: string, body?: unknown, method = "POS
 	return response.json();
 }
 
-async function submit(base: string, sessionId: string, text: string) {
-	await request(base, `/sessions/${sessionId}/turns`, { text });
+async function submit(base: string, sessionId: string, text: string, toolAvailability?: Record<string, boolean>) {
+	await request(base, `/sessions/${sessionId}/turns`, { text, toolAvailability });
 	for (let attempt = 0; attempt < 300; attempt++) {
 		const snapshot = (await request(base, `/sessions/${sessionId}`)) as SessionSnapshot;
 		if (snapshot.turn?.status !== "running") {
@@ -56,7 +56,10 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 			});`,
 		);
 	}
-	const requests: { tools?: { function: { name: string } }[]; messages: { role: string; content: unknown }[] }[] = [];
+	const requests: {
+		tools?: { function: { name: string; description: string } }[];
+		messages: { role: string; content: unknown }[];
+	}[] = [];
 	const responses: { name?: string; args?: Record<string, unknown>; text?: string }[] = [];
 	let serviceInstructions = "MCP_GUIDE_1: Inspect schema before querying.\nUse workspace-relative paths.";
 	const endpoint = createServer((req, res) => {
@@ -182,6 +185,8 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	);
 	const session = (await request(base, "/sessions", { assistantId: "host", mode: "real" })) as SessionSnapshot;
 	const toolNames = (index = requests.length - 1) => requests[index].tools?.map((tool) => tool.function.name).sort();
+	const searchDescription = (index = requests.length - 1) =>
+		requests[index].tools?.find((tool) => tool.function.name === "tool_search")?.function.description ?? "";
 	const systemPrompt = (index = requests.length - 1) =>
 		requests[index].messages
 			.filter((message) => message.role === "system")
@@ -198,12 +203,21 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	};
 	await submit(base, session.id, "你好");
 	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
-	assert.match(systemPrompt(), /## 工具发现/);
-	assert.match(systemPrompt(), /- mail-operation: 发送邮件 send email/);
-	assert.match(systemPrompt(), /- weather-query: 查询天气 weather forecast/);
-	assert.match(systemPrompt(), /- mcp__fixture__echo: echo/);
-	assert.doesNotMatch(systemPrompt(), /disabled-private|- security-bash:|- read:/);
-	assert.equal(systemPrompt().split("## 工具发现").length, 2);
+	assert.deepEqual(
+		searchDescription()
+			.split("\n")
+			.filter((line) => line.startsWith("- ")),
+		[
+			"- mail-operation: 发送邮件 send email",
+			"- mcp__blank__query: query",
+			"- mcp__fixture__echo: echo",
+			"- mcp__guide__query: query",
+			"- mcp__peer__query: query",
+			"- weather-query: 查询天气 weather forecast",
+		],
+	);
+	assert.doesNotMatch(searchDescription(), /disabled-private|mcp__disabled__|- read:|- security-bash:/);
+	assert.equal(systemPrompt(), runtime.systemPrompt);
 	assert.equal(JSON.stringify(requests.at(-1)).includes("mail-operation_payload_only"), false);
 	assert.equal(JSON.stringify(requests.at(-1)).includes("weather-query_payload_only"), false);
 	assert.doesNotMatch(systemPrompt(), /## MCP 服务指令|MCP_GUIDE|MCP_PEER_ONLY/);
@@ -220,6 +234,7 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	);
 	const unmounted = (await request(base, "/sessions", { assistantId: "unmounted", mode: "real" })) as SessionSnapshot;
 	await submit(base, unmounted.id, "没有挂载 MCP 的助手");
+	assert.doesNotMatch(searchDescription(), /mcp__/);
 	assert.doesNotMatch(systemPrompt(), /MCP_GUIDE_1|## MCP 服务指令|mcp__/);
 	responses.push({ name: "tool_search", args: { query: "邮件", limit: 21 } }, { text: "invalid search rejected" });
 	const rejected = await submit(base, session.id, "无效搜索参数");
@@ -239,10 +254,9 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	let snapshot = await submit(base, session.id, "请发送邮件");
 	assert.deepEqual(toolNames(searchStart), ["read", "security-bash", "tool_search"]);
 	assert.deepEqual(toolNames(searchStart + 1), ["mail-operation", "read", "security-bash", "tool_search"]);
-	assert.match(systemPrompt(searchStart), /- mail-operation:/);
-	assert.match(systemPrompt(searchStart + 1), /- mail-operation:/);
+	assert.match(searchDescription(searchStart), /- mail-operation:/);
+	assert.doesNotMatch(searchDescription(searchStart + 1), /- mail-operation:/);
 	assertAppendOnly(searchStart, searchStart + 1);
-	assert.match(systemPrompt(searchStart + 1), /- mcp__fixture__echo:/);
 	assert.doesNotMatch(systemPrompt(searchStart + 1), /## MCP 服务指令|MCP_GUIDE|MCP_PEER_ONLY/);
 	assert(
 		snapshot.messages.some(
@@ -277,13 +291,25 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	await submit(base, imported.id, "导入后继续");
 	assert(toolNames()?.includes("mail-operation"));
 	assert.equal(toolNames()?.includes("weather-query"), false);
-	assert.match(systemPrompt(), /- mail-operation:/);
 	assert.match(toolResults(), /MCP_GUIDE_1/);
 
 	const isolated = (await request(base, "/sessions", { assistantId: "host", mode: "real" })) as SessionSnapshot;
 	await submit(base, isolated.id, "你好");
 	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
-	assert.match(systemPrompt(), /- mail-operation:/);
+	assert.match(searchDescription(), /- mail-operation:/);
+	responses.push(
+		{ name: "tool_search", args: { query: "mail-operation", limit: 1 } },
+		{ text: "unavailable this turn" },
+	);
+	await submit(base, isolated.id, "本轮禁用邮件和 MCP 查询", {
+		"mail-operation": false,
+		mcp__guide__query: false,
+	});
+	assert.doesNotMatch(searchDescription(), /- mail-operation:|- mcp__guide__query:/);
+	assert.match(toolResults(), /No additional tools matched/);
+	await submit(base, isolated.id, "下一轮恢复工具");
+	assert.match(searchDescription(), /- mail-operation:/);
+	assert.match(searchDescription(), /- mcp__guide__query:/);
 	serviceInstructions = "MCP_GUIDE_2: Updated instructions after restart.";
 	await core?.close();
 	base = await start();
@@ -340,7 +366,6 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	);
 	const refreshSearchStart = requests.length;
 	await submit(base, session.id, "更新 MCP 配置后重新查询说明");
-	assert.match(systemPrompt(), /## Tool Discovery/);
 	assert.doesNotMatch(systemPrompt(), /MCP_GUIDE|mcpInstructions/);
 	assert.match(toolResults(), /MCP_GUIDE_3/);
 	assert.match(toolResults(), /MCP_GUIDE_1/);
@@ -362,13 +387,18 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	);
 	await submit(base, session.id, "移除邮件工具后继续");
 	assert.equal(toolNames()?.includes("mail-operation"), false);
-	assert.match(systemPrompt(), /## Tool Discovery/);
-	assert.match(systemPrompt(), /- weather-query:/);
-	assert.doesNotMatch(systemPrompt(), /- mail-operation:|mcp__fixture__echo|## 工具发现/);
+	assert.equal(
+		searchDescription().split("\n\nDeferred tools available to load:\n")[1],
+		"- weather-query: 查询天气 weather forecast",
+	);
 	assert.doesNotMatch(systemPrompt(), /MCP_GUIDE|## MCP Server Instructions|## MCP 服务指令/);
 	assert.match(toolResults(), /MCP_GUIDE_1/);
 	assert.match(toolResults(), /MCP_GUIDE_2/);
 	assert.match(toolResults(), /MCP_GUIDE_3/);
+	for (let index = 0; index < requests.length; index++) {
+		assert.equal(systemPrompt(index), runtime.systemPrompt);
+		assert.equal(searchDescription(index).split("Deferred tools available to load:").length, 2);
+	}
 });
 
 test("tool search ranks Chinese, English, exact IDs and schema keywords without exposing unmatched tools", async () => {
@@ -448,40 +478,50 @@ test("tool search ranks Chinese, English, exact IDs and schema keywords without 
 	);
 });
 
-test("discovery summaries stay brief and stable before and after schema loading", () => {
+test("tool discovery keeps summaries brief, respects the current tool context and preserves host prompts", () => {
 	const tool: ExternalTool = {
 		name: "mcp__calendar__list",
 		label: "Calendar",
-		description: `List calendar events\n${"details ".repeat(40)}`,
+		description: `\nList calendar\t events ${"details ".repeat(40)}\nsecondary_description_only`,
 		exposure: "deferred",
-		parameters: Type.Object({ private_schema_marker: Type.String() }),
+		parameters: Type.Object({}),
 		async execute() {
 			return { content: [], details: {} };
 		},
 	};
-	const discovery = createToolSearch([tool]);
-	const context = { systemPrompt: "Host instructions", messages: [], tools: discovery.tools };
-	const prompt = discovery.expose(context).systemPrompt ?? "";
-	assert.match(prompt, /^Host instructions\n\n## Tool Discovery/);
-	const summary = prompt.split(`- ${tool.name}: `)[1];
+	const empty = { ...tool, name: "empty-description", label: "Display label", description: " \n\t " };
+	const discovery = createToolSearch([tool, empty]);
+	const search = discovery.tools.find((candidate) => candidate.name === "tool_search");
+	assert(search);
+	const context = { systemPrompt: "\nHost instructions\n", messages: [], tools: discovery.tools };
+	const exposed = discovery.expose(context);
+	const description = exposed.tools?.find((candidate) => candidate.name === "tool_search")?.description ?? "";
+	assert.match(description, /- empty-description: empty-description\n/);
+	assert.doesNotMatch(description, /Display label/);
+	const summary = description.split(`- ${tool.name}: `)[1];
+	assert(summary);
 	assert.equal(summary.length, 160);
-	assert(summary.endsWith("..."));
-	assert.doesNotMatch(summary, /\n|private_schema_marker/);
-	assert.equal(context.systemPrompt, "Host instructions");
-	assert.equal(discovery.expose(context).systemPrompt, prompt);
+	assert.match(summary, /^List calendar events .*\.\.\.$/);
+	assert.doesNotMatch(summary, /\n|\t|secondary_description_only/);
+	assert.equal(discovery.expose({ ...context, tools: [search] }).tools?.[0].description, search.description);
+	assert.equal(discovery.expose(context).systemPrompt, context.systemPrompt);
+	assert.equal(discovery.expose({ messages: [], tools: discovery.tools }).systemPrompt, undefined);
 	discovery.restore([
 		{
 			role: "toolResult",
 			toolName: "tool_search",
 			toolCallId: "loaded",
 			content: [],
-			addedToolNames: [tool.name],
+			addedToolNames: [tool.name, empty.name],
 			isError: false,
 			timestamp: 1,
 		},
 	]);
-	assert.equal(discovery.expose(context).systemPrompt, prompt);
-	assert.equal(createToolSearch([]).expose({ messages: [] }).systemPrompt, undefined);
+	assert.equal(discovery.expose(context).systemPrompt, context.systemPrompt);
+	assert.equal(
+		discovery.expose(context).tools?.find((candidate) => candidate.name === "tool_search")?.description,
+		search.description,
+	);
 });
 
 test("restoration cannot activate absent tools, user-provided load records or failed searches", () => {

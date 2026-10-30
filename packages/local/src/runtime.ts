@@ -26,7 +26,7 @@ export function createLocalHost(environment: NodeJS.ProcessEnv = process.env) {
 	};
 }
 
-async function createLocalRuntime(options: {
+export async function createLocalRuntime(options: {
 	agents: ReturnType<typeof createAgentFactory>;
 	plugins: ReturnType<typeof createPlugins>;
 	store: ReturnType<typeof openStore>;

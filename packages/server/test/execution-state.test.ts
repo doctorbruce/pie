@@ -703,9 +703,16 @@ test("scoped execution subscriptions bootstrap settled sessions without reading 
 	const frames: ExecutionStreamEvent[] = [];
 	const unsubscribe = await host.runtime.subscribeExecutions([host.session.id], (packet) => frames.push(packet));
 	host.finishModel();
-	await until(() => host.events.some((packet) => packet.type === "turn.settled"));
+	await until(() =>
+		host.events.some((packet) => packet.turn?.status === "completed" && packet.execution?.actions.submit.available),
+	);
 	unsubscribe();
-	const completed = host.events.find((packet) => packet.type === "turn.settled")!;
+	const completed = host.events.at(-1)!;
+	assert.equal(completed.type, "snapshot");
+	assert.equal(
+		host.events.find((packet) => packet.type === "turn.settled")?.execution?.actions.submit.available,
+		false,
+	);
 	const reconnected: ExecutionStreamEvent[] = [];
 	const close = await host.runtime.subscribeExecutions([host.session.id], (packet) => reconnected.push(packet));
 	assert.equal(host.pathReads, reads);

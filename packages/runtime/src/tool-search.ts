@@ -71,7 +71,7 @@ export function createToolSearch(
 		name: "tool_search",
 		label: "搜索工具",
 		description:
-			"Discover business tools that are enabled but not yet exposed. Search by capability keywords (Chinese or English), parameter names, or an exact tool ID. Matching tools become callable with their full schemas on the next model request. Results include service-level usage guidance for selected MCP tools; searching an already-loaded tool refreshes that guidance. This only discovers tools and does not execute them. Use it when the currently exposed tools cannot fulfill the user's request.",
+			"Search tools that are enabled but not currently shown in the tool list. Use it to find additional tools or check whether a tool is available. Search by intent or exact tool ID; matching tools become callable on the next model request. Searches also support Chinese or English keywords and parameter names. Results include service-level usage guidance for selected MCP tools; searching an already-loaded tool refreshes that guidance. This only discovers tools and does not execute them.",
 		parameters,
 		executionMode: "sequential",
 		async execute(_callId, args) {
@@ -150,26 +150,32 @@ export function createToolSearch(
 				}
 			}
 		},
-		expose(context: Context, language?: string): Context {
-			const catalog = [...documents]
+		expose(context: Context): Context {
+			const available = new Set(context.tools?.map((tool) => tool.name));
+			const catalog = documents
+				.filter(({ tool }) => available.has(tool.name) && !loaded.has(tool.name))
 				.sort((first, second) => first.tool.name.localeCompare(second.tool.name))
 				.map(({ tool }) => {
-					const description = (tool.description.trim() || tool.label || tool.name).replace(/\s+/g, " ");
-					return `- ${tool.name}: ${description.length > 160 ? `${description.slice(0, 157)}...` : description}`;
+					const brief =
+						(tool.description.split(/\r?\n/).find((line) => line.trim()) || tool.name)
+							.replace(/\s+/g, " ")
+							.trim() || tool.name;
+					return `- ${tool.name}: ${brief.length > 160 ? `${brief.slice(0, 157)}...` : brief}`;
 				});
-			const guidance = language?.trim().toLowerCase().startsWith("zh")
-				? "## 工具发现\n以下工具支持按需加载完整参数。尚未加载时，先调用 tool_search 按需求描述或工具 ID 搜索，再调用具体工具。加载状态以工具列表和 tool_search 结果为准；MCP 服务说明随搜索结果提供，不会改写此概览。"
-				: "## Tool Discovery\nThese enabled tools support on-demand schema loading. For an unloaded tool, search by intent or tool ID with tool_search before calling it. The tool list and search results indicate what is loaded; MCP service guidance is supplied in search results without rewriting this overview.";
 			return {
 				...context,
-				...(catalog.length
-					? {
-							systemPrompt: [context.systemPrompt, `${guidance}\n${catalog.join("\n")}`]
-								.filter(Boolean)
-								.join("\n\n"),
-						}
-					: {}),
-				tools: context.tools?.filter((tool) => tool.name === "tool_search" || loaded.has(tool.name)),
+				tools: context.tools
+					?.filter((tool) => tool.name === "tool_search" || loaded.has(tool.name))
+					.map((tool) =>
+						tool.name === "tool_search"
+							? {
+									...tool,
+									description:
+										search.description +
+										(catalog.length ? `\n\nDeferred tools available to load:\n${catalog.join("\n")}` : ""),
+								}
+							: tool,
+					),
 			};
 		},
 	};

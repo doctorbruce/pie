@@ -73,6 +73,29 @@ function optionalRequestId(body: Record<string, unknown>): string | undefined {
 	return body.requestId.trim();
 }
 
+function optionalCanonicalTurnId(body: Record<string, unknown>): string | undefined {
+	const value = body.canonicalTurnId;
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !value.trim() || value.length > 256)
+		throw new RuntimeError(400, "canonicalTurnId 需要 1–256 个字符");
+	return value;
+}
+
+function optionalToolAvailability(value: unknown): Record<string, boolean> | undefined {
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new RuntimeError(400, "toolAvailability 需要工具 ID 到布尔值的映射");
+	const entries = Object.entries(value);
+	if (
+		entries.length > 256 ||
+		entries.some(
+			([id, enabled]) => !id.trim() || id.length > 256 || id.includes("\0") || typeof enabled !== "boolean",
+		)
+	)
+		throw new RuntimeError(400, "toolAvailability 需要最多 256 项有效工具 ID 到布尔值的映射");
+	return Object.fromEntries(entries) as Record<string, boolean>;
+}
+
 function turnContent(body: Record<string, unknown>): Extract<AgentMessage, { role: "user" }>["content"] {
 	const text = body.text === undefined ? "" : body.text;
 	if (typeof text !== "string" || text.length > 16000)
@@ -148,8 +171,10 @@ export type TurnInput = {
 	images?: ImagePart[];
 	displayText?: string;
 	requestId?: string;
+	canonicalTurnId?: string;
 	assistantId?: string;
 	systemPrompt?: string;
+	toolAvailability?: Record<string, boolean>;
 	model?: { provider: string; id: string };
 	clientMessageId?: string;
 	userMessageId?: string;
@@ -288,18 +313,37 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	function turnReceipt(
 		session: Session,
-		overrides: Partial<Pick<TurnReceipt, "accepted" | "started" | "settled" | "requestId">> = {},
+		overrides: Partial<Pick<TurnReceipt, "accepted" | "started" | "settled" | "requestId" | "canonicalTurnId">> = {},
 	): TurnReceipt {
 		if (!session.turn) throw new RuntimeError(409, "当前会话没有 Turn");
-		const requestId = overrides.requestId ?? session.turn.requestId;
+		const requestId = "requestId" in overrides ? overrides.requestId : session.turn.requestId;
+		const canonicalTurnId = "canonicalTurnId" in overrides ? overrides.canonicalTurnId : session.turn.canonicalTurnId;
 		return {
 			sessionId: session.id,
 			turnId: session.turn.id,
 			...(requestId ? { requestId } : {}),
+			...(canonicalTurnId !== undefined ? { canonicalTurnId } : {}),
 			accepted: overrides.accepted ?? true,
 			started: overrides.started ?? Boolean(session.runPromise),
 			settled: overrides.settled ?? turnHasSettled(session.turn.status),
 		};
+	}
+	function retryTurnReceipt(session: Session, requestId: string | undefined, canonicalTurnId: string | undefined) {
+		const turn = session.turn;
+		if (!turn) return undefined;
+		if (canonicalTurnId !== undefined) {
+			if (canonicalTurnId !== turn.canonicalTurnId && canonicalTurnId !== turn.rootCanonicalTurnId) return undefined;
+			const root = canonicalTurnId !== turn.canonicalTurnId;
+			if (requestId !== (root ? turn.rootRequestId : turn.requestId))
+				throw new RuntimeError(409, "canonicalTurnId 已绑定其他 requestId");
+			return turnReceipt(session, { requestId, canonicalTurnId });
+		}
+		if (requestId && (requestId === turn.requestId || requestId === turn.rootRequestId))
+			return turnReceipt(session, {
+				requestId,
+				canonicalTurnId: requestId === turn.requestId ? turn.canonicalTurnId : turn.rootCanonicalTurnId,
+			});
+		return undefined;
 	}
 	function cancellationReceipt(session: Session, accepted = true, settled?: boolean): CancellationReceipt {
 		return {
@@ -338,8 +382,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 						? "turn_interrupted"
 						: "turn_terminal";
 		return {
-			submit:
-				status === undefined || status === "completed" || status === "cancelled" || status === "failed"
+			submit: session.runPromise
+				? unavailable(session.cancelPromise ? "cancellation_in_progress" : "turn_running")
+				: status === undefined || status === "completed" || status === "cancelled" || status === "failed"
 					? available
 					: unavailable(turnReason),
 			steer:
@@ -933,10 +978,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (result.status === "rejected") throw result.reason;
 				return result.value;
 			})
-			.finally(() => {
+			.finally(async () => {
 				if (session.runPromise !== pending) return;
 				session.runPromise = undefined;
 				session.cancelPromise = undefined;
+				await publish(session, "snapshot");
 				releaseSession(session);
 			});
 		session.runPromise = pending;
@@ -1246,6 +1292,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 			await persist(parent);
 		}
 		const child = await execute(async () => {
+			const runtime = {
+				...structuredClone(binding.runtime),
+				subagents: [],
+				...(parent.runtime?.toolAvailability
+					? { toolAvailability: structuredClone(parent.runtime.toolAvailability) }
+					: {}),
+			};
 			let child: Session;
 			if (options.taskId) {
 				const existing = await requireSession(options.taskId);
@@ -1257,6 +1310,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 					throw new Error(`Subagent 仍在运行：${existing.id}`);
 				await existing.runPromise;
 				child = existing;
+				await loadHistory(child);
+				if (JSON.stringify(child.runtime) !== JSON.stringify(runtime)) {
+					const agent = createSessionAgent(child, runtime);
+					child.runtime = runtime;
+					bindAgent(child, agent);
+				}
 				const agent = await attachAgent(child);
 				agent.state.messages = [...agent.state.messages, { role: "user", content: prompt, timestamp: Date.now() }];
 				child.turn = { id: randomUUID(), status: "running" };
@@ -1271,7 +1330,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 			} else {
 				const id = randomUUID();
 				const now = Date.now();
-				const runtime = { ...structuredClone(binding.runtime), subagents: [] };
 				const selected =
 					binding.model ??
 					(parent.mode === "real" && parent.provider
@@ -1442,9 +1500,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		}
 	}
 	function startRun(session: Session) {
-		const pending = run(session).finally(() => {
+		const pending = run(session).finally(async () => {
 			if (session.runPromise !== pending) return;
 			session.runPromise = undefined;
+			await publish(session, "snapshot");
 			releaseSession(session);
 		});
 		session.runPromise = pending;
@@ -1952,6 +2011,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const content = turnContent(body);
 				assertAction(session, "steer", body.turnId);
 				const requestId = optionalRequestId(body);
+				const canonicalTurnId = optionalCanonicalTurnId(body);
+				const retry =
+					canonicalTurnId === undefined ? undefined : retryTurnReceipt(session, requestId, canonicalTurnId);
+				if (retry) return { ...retry, queued: true, durable: false } satisfies SteerReceipt;
 				const messageIdentity = optionalMessageIdentity(body);
 				if (session.turnCheckpoint) {
 					session.turnCheckpoint.blockedReason = "包含尚未持久化的 Steer 队列";
@@ -1968,8 +2031,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 					...messageIdentity,
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
-				if (requestId) session.turn!.requestId = requestId;
+				if (canonicalTurnId !== undefined || requestId) session.turn!.requestId = requestId;
+				session.turn!.canonicalTurnId = canonicalTurnId;
 				agent.steer(userMessage);
+				await persist(session);
+				await publish(session, "snapshot");
 				return {
 					...turnReceipt(session, { started: true, settled: false }),
 					queued: true,
@@ -2127,12 +2193,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const session = await requireSession(sessionId);
 				const content = turnContent(body);
 				const requestId = optionalRequestId(body);
-				if (
-					session.kind === "root" &&
-					requestId &&
-					(requestId === session.turn?.requestId || requestId === session.turn?.rootRequestId)
-				)
-					return turnReceipt(session, { requestId });
+				const canonicalTurnId = optionalCanonicalTurnId(body);
+				const retry = session.kind === "root" ? retryTurnReceipt(session, requestId, canonicalTurnId) : undefined;
+				if (retry) return retry;
 				assertAction(session, "submit");
 				if (
 					body.systemPrompt !== undefined &&
@@ -2142,6 +2205,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await session.runPromise;
 				const messageIdentity = optionalMessageIdentity(body);
 				const configuration = resolveTurnConfiguration(session, body);
+				const toolAvailability = optionalToolAvailability(body.toolAvailability);
+				if (toolAvailability !== undefined) configuration.runtime = { ...configuration.runtime, toolAvailability };
 				await loadHistory(session);
 				const oldAgent = session.agent;
 				const oldSavedMessages = session.messages;
@@ -2203,6 +2268,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				session.turn = {
 					id: randomUUID(),
 					...(requestId ? { requestId, rootRequestId: requestId } : {}),
+					...(canonicalTurnId !== undefined ? { canonicalTurnId, rootCanonicalTurnId: canonicalTurnId } : {}),
 					status: "running",
 				};
 				const update = historyUpdate(session, agent.state.messages);

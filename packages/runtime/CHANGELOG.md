@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Stop injecting tool discovery guidance and catalogs into model system prompts; keep generic discovery and availability guidance in `tool_search`, with on-demand tool schemas and MCP service guidance in search results.
+
 ### Breaking Changes
 
 - Require `SessionSnapshot.execution` and include the same lightweight execution view in global events; session deltas can update it without copying history. Preserve native Turn outcomes instead of interpreting settlement as success.
@@ -15,6 +19,10 @@
 - Session subscriptions emit revisioned deltas instead of a complete snapshot on every event; consumers must bootstrap a bounded view and apply increments or reload on gaps. Global subscriptions retain their existing contract.
 
 ### Added
+
+- Accept per-turn `toolAvailability` to restrict actual tools, deferred discovery and MCP tools without expanding the assistant's configured scope; preserve the current Turn boundary across steering, recovery and child assistants.
+
+- Accept optional host `canonicalTurnId`, persist and echo it in Turn snapshots and receipts, and prioritize its request binding for submit retries. Steering preserves the native Turn ID and original canonical binding while updating the current binding; conflicting request identities return 409.
 
 - Add scoped `subscribeExecutions` with a lightweight execution baseline and per-session event alignment, without history reads or persistent replay.
 - Return structured `RuntimeError.reason` codes and cancellation durability; allow an explicit best-effort local stop after storage failure while keeping ordinary commands rejected.
@@ -35,6 +43,10 @@
 
 - Added an advisory reminder after three consecutive calls to the same tool with identical JSON arguments, without blocking execution or imposing a step limit.
 - Added optional `sessionRetention: "release-after-turn"` to release idle Agents and working history after durable settlement and reload them through the injected store, while keeping local in-memory reuse by default.
+
+### Changed
+
+- List currently available, unloaded deferred tools by ID and a brief summary in `tool_search.description`, refreshing the list before each model request without changing the system prompt.
 
 ### Fixed
 

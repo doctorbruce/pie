@@ -152,7 +152,11 @@ function memoryStore() {
 	};
 }
 
-function agents(directory: string, onCall: (value: string, signal?: AbortSignal) => void | Promise<void> = () => {}) {
+function agents(
+	directory: string,
+	onCall: (value: string, signal?: AbortSignal) => void | Promise<void> = () => {},
+	exposure?: ExternalTool["exposure"],
+) {
 	const parameters = Type.Object({
 		text: Type.String(),
 		confirm: Type.Optional(Type.Boolean()),
@@ -182,6 +186,7 @@ function agents(directory: string, onCall: (value: string, signal?: AbortSignal)
 			create: (context) => {
 				const tool: ExternalTool = {
 					name: "sdk_echo",
+					exposure,
 					label: "SDK echo",
 					description: "Echo through a host-provided executor",
 					parameters,
@@ -416,6 +421,127 @@ const delegatingDefinitions: HostRuntimeDefinition[] = [
 	{ ...definition, assistantId: "worker-assistant" },
 ];
 
+test("per-turn availability blocks historical deferred tools, isolates sessions and restores the next turn", async (context) => {
+	const memory = memoryStore();
+	const calls: string[] = [];
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents(
+			"unused",
+			(value) => {
+				calls.push(value);
+			},
+			"deferred",
+		),
+		hostRuntimes: [
+			definition,
+			{ ...definition, assistantId: "restricted", runtime: { ...definition.runtime, toolIds: [] } },
+		],
+	});
+	context.after(() => runtime.close());
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	await runtime.submitTurn(session.id, { text: '调用工具 tool_search {"query":"sdk_echo"}' });
+	const loaded = await runtime.waitForTurn(session.id);
+	assert(
+		loaded.messages.some(
+			(message) => message.role === "toolResult" && JSON.stringify(message).includes('"sdk_echo"'),
+		),
+	);
+	await runtime.submitTurn(session.id, {
+		text: '调用工具 sdk_echo {"text":"blocked"}',
+		toolAvailability: { sdk_echo: false },
+	});
+	const blocked = await runtime.waitForTurn(session.id);
+	assert.equal(blocked.messages.filter((message) => message.role === "toolResult").at(-1)?.isError, true);
+	assert.deepEqual(calls, []);
+	assert.deepEqual(memory.sessions.get(session.id)?.runtime?.toolAvailability, { sdk_echo: false });
+	const other = await runtime.createSession({ assistantId: definition.assistantId });
+	await runtime.submitTurn(other.id, { text: '调用工具 sdk_echo {"text":"isolated"}' });
+	await runtime.waitForTurn(other.id);
+	for (const toolAvailability of [{ sdk_echo: true }, undefined]) {
+		await runtime.submitTurn(session.id, { text: '调用工具 sdk_echo {"text":"restored"}', toolAvailability });
+		await runtime.waitForTurn(session.id);
+	}
+	assert.deepEqual(calls, ["isolated", "restored", "restored"]);
+	const restricted = await runtime.createSession({ assistantId: "restricted" });
+	await runtime.submitTurn(restricted.id, {
+		text: '调用工具 sdk_echo {"text":"must-not-expand"}',
+		toolAvailability: { sdk_echo: true },
+	});
+	await runtime.waitForTurn(restricted.id);
+	assert.deepEqual(calls, ["isolated", "restored", "restored"]);
+});
+
+test("availability is inherited by new and continued subagents without retaining an earlier turn's denial", async (context) => {
+	const memory = memoryStore();
+	const calls: string[] = [];
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", (value) => {
+			calls.push(value);
+		}),
+		hostRuntimes: delegatingDefinitions,
+	});
+	context.after(() => runtime.close());
+	const parent = await runtime.createSession({ assistantId: definition.assistantId });
+	let childId: string | undefined;
+	for (const enabled of [false, true, false]) {
+		await runtime.submitTurn(parent.id, {
+			text: `调用工具 task ${JSON.stringify({ description: "Availability", prompt: '调用工具 sdk_echo {"text":"child"}', subagent_type: "worker", task_id: childId })}`,
+			toolAvailability: { sdk_echo: enabled },
+		});
+		await runtime.waitForTurn(parent.id);
+		const children = (await runtime.listSessions({ includeSubagents: true })).sessions.filter(
+			(session) => session.kind === "subagent",
+		);
+		assert.equal(children.length, 1);
+		childId = children[0].id;
+		assert.deepEqual(memory.sessions.get(childId)?.runtime?.toolAvailability, { sdk_echo: enabled });
+	}
+	assert.deepEqual(calls, ["child"]);
+});
+
+test("availability survives checkpoint resume and rejects malformed maps before admission", async (context) => {
+	const memory = memoryStore();
+	const calls: string[] = [];
+	const saved = seedSession(memory, "resume-availability", {
+		runtime: { ...definition.runtime, subagents: [], toolAvailability: { sdk_echo: false } },
+		turn: { id: "interrupted-turn", status: "interrupted" },
+		turnCheckpoint: { version: 1, turnId: "interrupted-turn", inputEntryId: "input", systemPrompt: "original" },
+		leafId: "input",
+	});
+	memory.trees.set(saved.id, {
+		leafId: "input",
+		nodes: [
+			{
+				id: "input",
+				parentId: null,
+				seq: 1,
+				message: { role: "user", content: '调用工具 sdk_echo {"text":"must-stay-blocked"}', timestamp: 1 },
+			},
+		],
+	});
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", (value) => {
+			calls.push(value);
+		}),
+		hostRuntimes: [definition],
+	});
+	context.after(() => runtime.close());
+	await runtime.resumeTurn(saved.id, { turnId: "interrupted-turn" });
+	await runtime.waitForTurn(saved.id);
+	assert.deepEqual(calls, []);
+	for (const toolAvailability of [null, [], "false", { sdk_echo: "false" }, { "": false }]) {
+		const input = { text: "invalid" };
+		Reflect.set(input, "toolAvailability", toolAvailability);
+		await assert.rejects(runtime.submitTurn(saved.id, input), { status: 400 });
+	}
+	await runtime.submitTurn(saved.id, { text: '调用工具 sdk_echo {"text":"next-turn"}' });
+	await runtime.waitForTurn(saved.id);
+	assert.deepEqual(calls, ["next-turn"]);
+});
+
 test("embedded runtime uses injected async storage and tools without creating a local database or HTTP server", async (context) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-embedded-"));
 	context.after(() => rm(directory, { recursive: true, force: true }));
@@ -494,7 +620,11 @@ test("embedded runtime uses injected async storage and tools without creating a 
 			status: 400,
 		});
 	assert(packets.some((packet) => packet.event?.type === "tool_execution_update"));
-	assert.equal(packets.at(-1)?.type, "turn.settled");
+	assert(
+		packets.some((packet) => packet.type === "turn.settled" && packet.execution?.actions.submit.available === false),
+	);
+	assert.equal(packets.at(-1)?.type, "snapshot");
+	assert.equal(packets.at(-1)?.execution?.actions.submit.available, true);
 	const detached = await runtime.getSession(session.id);
 	detached.turn!.status = "running";
 	assert.equal((await runtime.getSession(session.id)).turn?.status, "completed");
@@ -667,6 +797,207 @@ test("turn receipts distinguish accepted, started, queued and settled, and retry
 	assert.equal(settledRetry.turnId, accepted.turnId);
 	assert.equal(settledRetry.settled, true);
 	assert.equal(settledRetry.started, false);
+});
+
+test("canonical identity starts a new native turn when another connection reuses requestId", async (context) => {
+	const memory = memoryStore();
+	const runtime = await createRuntime({ store: memory.store, agents: agents("unused"), hostRuntimes: [definition] });
+	context.after(() => runtime.close());
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const first = await runtime.submitTurn(session.id, {
+		text: "first",
+		canonicalTurnId: "canonical-A",
+		requestId: "1",
+	});
+	assert.equal((await runtime.waitForTurn(session.id)).turn?.status, "completed");
+	const next = await runtime.submitTurn(session.id, { text: "next", canonicalTurnId: "canonical-B", requestId: "1" });
+	assert.notEqual(next.turnId, first.turnId);
+	const settled = await runtime.waitForTurn(session.id);
+	assert.equal(settled.turn?.id, next.turnId);
+	assert.equal(settled.messages.filter((message) => message.role === "user").length, 2);
+	await assert.rejects(runtime.cancelTurn(session.id, { turnId: first.turnId }), { status: 409 });
+	assert.equal((await runtime.getSession(session.id)).turn?.status, "completed");
+});
+
+test("canonical identity retries reuse a receipt while running, settled and reloaded", async (context) => {
+	const memory = memoryStore();
+	let entered = () => {};
+	const running = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	let runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", entered),
+		hostRuntimes: [definition],
+	});
+	context.after(() => runtime.close());
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const input = {
+		text: '调用工具 sdk_echo {"text":"wait","wait":true}',
+		canonicalTurnId: "canonical-B",
+		requestId: "1",
+	};
+	const accepted = await runtime.submitTurn(session.id, input);
+	await running;
+	assert.deepEqual(await runtime.submitTurn(session.id, input), accepted);
+	assert.equal(accepted.canonicalTurnId, input.canonicalTurnId);
+	await assert.rejects(runtime.submitTurn(session.id, { ...input, canonicalTurnId: "canonical-C" }), { status: 409 });
+	await runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+	await runtime.waitForTurn(session.id);
+	const receipt = await runtime.submitTurn(session.id, input);
+	assert.deepEqual(receipt, { ...accepted, started: false, settled: true });
+	await runtime.close();
+	runtime = await createRuntime({ store: memory.store, agents: agents("unused"), hostRuntimes: [definition] });
+	assert.deepEqual(await runtime.submitTurn(session.id, input), receipt);
+	assert.equal((await runtime.getSession(session.id)).messages.filter((message) => message.role === "user").length, 1);
+});
+
+test("canonical identity survives receipts, snapshots, settled events and persistence verbatim", async (context) => {
+	const memory = memoryStore();
+	const runtime = await createRuntime({ store: memory.store, agents: agents("unused"), hostRuntimes: [definition] });
+	context.after(() => runtime.close());
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const packets: SessionEvent[] = [];
+	const globalTurns: unknown[] = [];
+	await runtime.subscribe(session.id, (packet) => {
+		if (packet.type === "turn.settled") packets.push(packet);
+	});
+	runtime.subscribeAll((packet) => {
+		if (packet.type === "turn.settled") globalTurns.push(packet.snapshot.turn);
+	});
+	const canonicalTurnId = " canonical-原值 ";
+	const accepted = await runtime.submitTurn(session.id, { text: "hello", canonicalTurnId, requestId: "1" });
+	const settled = await runtime.waitForTurn(session.id);
+	assert.equal(accepted.canonicalTurnId, canonicalTurnId);
+	assert.equal(settled.turn?.canonicalTurnId, canonicalTurnId);
+	assert.equal(memory.sessions.get(session.id)?.turn?.canonicalTurnId, canonicalTurnId);
+	assert.equal(packets.length, 1);
+	assert.equal(packets[0].turn?.canonicalTurnId, canonicalTurnId);
+	assert.deepEqual(globalTurns, [settled.turn]);
+});
+
+test("canonical identity cannot be rebound to a different original requestId", async (context) => {
+	const memory = memoryStore();
+	const runtime = await createRuntime({ store: memory.store, agents: agents("unused"), hostRuntimes: [definition] });
+	context.after(() => runtime.close());
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const accepted = await runtime.submitTurn(session.id, {
+		text: "hello",
+		canonicalTurnId: "canonical-B",
+		requestId: "1",
+	});
+	await runtime.waitForTurn(session.id);
+	for (const requestId of ["2", undefined])
+		await assert.rejects(
+			runtime.submitTurn(session.id, { text: "retry", canonicalTurnId: "canonical-B", requestId }),
+			{ status: 409 },
+		);
+	assert.equal((await runtime.getSession(session.id)).turn?.id, accepted.turnId);
+	assert.equal((await runtime.getSession(session.id)).messages.filter((message) => message.role === "user").length, 1);
+});
+
+test("canonical identity steer preserves native and root identity without duplicating a retry", async (context) => {
+	const memory = memoryStore();
+	let entered = () => {};
+	let release = () => {};
+	const running = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", async () => {
+			entered();
+			await blocked;
+		}),
+		hostRuntimes: [definition],
+	});
+	context.after(async () => {
+		release();
+		await runtime.close();
+	});
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const input = { text: '调用工具 sdk_echo {"text":"first"}', canonicalTurnId: "canonical-A", requestId: "1" };
+	const accepted = await runtime.submitTurn(session.id, input);
+	await running;
+	const steerInput = { turnId: accepted.turnId, text: "steered", canonicalTurnId: "canonical-B", requestId: "1" };
+	const steered = await runtime.steer(session.id, steerInput);
+	assert.equal(steered.turnId, accepted.turnId);
+	assert.equal(steered.canonicalTurnId, "canonical-B");
+	assert.deepEqual(await runtime.steer(session.id, steerInput), steered);
+	assert.deepEqual(await runtime.submitTurn(session.id, input), accepted);
+	for (const canonicalTurnId of ["canonical-A", "canonical-B"])
+		await assert.rejects(runtime.submitTurn(session.id, { text: "conflict", canonicalTurnId, requestId: "2" }), {
+			status: 409,
+		});
+	const snapshot = await runtime.getSession(session.id);
+	assert.equal(snapshot.turn?.canonicalTurnId, "canonical-B");
+	assert.equal(snapshot.turn?.rootCanonicalTurnId, "canonical-A");
+	assert.deepEqual(memory.sessions.get(session.id)!.turn, snapshot.turn);
+	release();
+	const settled = await runtime.waitForTurn(session.id);
+	assert.equal(settled.turn?.canonicalTurnId, "canonical-B");
+	assert.equal(settled.messages.filter((message) => message.role === "user").length, 2);
+});
+
+test("canonical identity steer cannot replace the cancelled source while queue preparation is saving", async (context) => {
+	const memory = memoryStore();
+	let entered = () => {};
+	let saving = () => {};
+	let release = () => {};
+	const running = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const preparing = new Promise<void>((resolve) => {
+		saving = resolve;
+	});
+	const blocked = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	const runtime = await createRuntime({
+		store: memory.store,
+		agents: agents("unused", entered),
+		hostRuntimes: [definition],
+	});
+	context.after(async () => {
+		release();
+		await runtime.close();
+	});
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const accepted = await runtime.submitTurn(session.id, {
+		text: '调用工具 sdk_echo {"text":"wait","wait":true}',
+		canonicalTurnId: "canonical-A",
+		requestId: "1",
+	});
+	await running;
+	const save = memory.store.saveSession;
+	let hold = true;
+	memory.store.saveSession = async (...args) => {
+		if (hold && args[0].turnCheckpoint?.blockedReason === "包含尚未持久化的 Steer 队列") {
+			hold = false;
+			saving();
+			await blocked;
+		}
+		return save(...args);
+	};
+	const steering = runtime.steer(session.id, {
+		turnId: accepted.turnId,
+		text: "must not be queued",
+		canonicalTurnId: "canonical-B",
+		requestId: "2",
+	});
+	const rejected = assert.rejects(steering, { status: 409 });
+	await preparing;
+	const cancellation = runtime.cancelTurn(session.id, { turnId: accepted.turnId });
+	release();
+	await rejected;
+	assert.equal((await cancellation).canonicalTurnId, "canonical-A");
+	const settled = await runtime.waitForTurn(session.id);
+	assert.equal(settled.turn?.status, "cancelled");
+	assert.equal(settled.turn?.canonicalTurnId, "canonical-A");
+	assert.equal(settled.messages.filter((message) => message.role === "user").length, 1);
 });
 
 for (const cancelAt of ["before steer", "during steer persistence"]) {
@@ -1105,7 +1436,7 @@ test("execution failure with a committed terminal state releases and can rebuild
 	assert.equal(observed.created.length, 3);
 });
 
-test("settled-event submissions and concurrent background notifications cannot race teardown", async (context) => {
+test("settlement rejects submissions until readiness and background notifications cannot race teardown", async (context) => {
 	const memory = memoryStore();
 	const observed = trackedAgents();
 	const runtime = await createRuntime({
@@ -1116,13 +1447,21 @@ test("settled-event submissions and concurrent background notifications cannot r
 	context.after(() => runtime.close());
 	await runtime.registerHostRuntimes([definition]);
 	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	let rejectedTurn: Promise<void> | undefined;
 	let nextTurn: Promise<unknown> | undefined;
 	runtime.subscribeAll((packet) => {
-		if (packet.type === "turn.settled" && !nextTurn)
-			nextTurn = runtime.submitTurn(session.id, { text: "submitted from settlement" });
+		if (packet.type === "turn.settled" && !rejectedTurn)
+			rejectedTurn = assert.rejects(runtime.submitTurn(session.id, { text: "submitted during cleanup" }), {
+				status: 409,
+				reason: "turn_running",
+			});
+		if (packet.type === "snapshot" && packet.snapshot.execution.actions.submit.available && rejectedTurn && !nextTurn)
+			nextTurn = runtime.submitTurn(session.id, { text: "submitted after readiness" });
 	});
 	await runtime.submitTurn(session.id, { text: "first" });
 	await runtime.waitForTurn(session.id);
+	assert(rejectedTurn);
+	await rejectedTurn;
 	assert(nextTurn);
 	await nextTurn;
 	assert.equal((await runtime.waitForTurn(session.id)).turn?.status, "completed");

@@ -143,6 +143,8 @@ Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 T
 
 四个控制入口与 `execution.actions` 共用新操作决策，HTTP 以 `reason` 返回稳定拒绝代码。幂等提交重试只查询当前回执，重复取消复用在途操作，终态取消不产生新操作；恢复可用只允许进入历史、账本及外部结果预检。存储故障会发布所有已装载会话的新摘要；普通新操作拒绝，显式 `bestEffort: true` 的活跃取消只尽力停止本实例，回执 `durable: false`，不保证持久取消或外部任务停止。详细契约见 [嵌入接入](runtime-embedding.md#事件隔离与生命周期)。
 
+宿主可在 submit/steer 提供 `canonicalTurnId`，原样保存在 Turn 和回执中。Submit 优先按 canonical 与原 requestId 的固定关联去重，拒绝同 canonical 换 requestId；不同 canonical 可复用连接本地的数字 requestId，得到新的 native Turn。Steer 保持物理 Turn ID，更新当前关联并保留原始关联供重试。未提供 canonical 时兼容原 requestId 行为；范围和验证见 [固定目标取消 SPEC](specs/targeted-cancellation.md)。
+
 ### 多 Core 会话同步
 
 Astron 的产品会话 ID 在切核前后保持不变。每个 Core 继续拥有自己的数据库和原生会话 ID；Astron 在 `coreBindings` 中按 Core 保存原生 ID，并用 `coreBinding` 标记当前活动 Core。Pie 保存导入转储中的 `source.astronSessionId`，后续再次导出时继续使用产品会话 ID。

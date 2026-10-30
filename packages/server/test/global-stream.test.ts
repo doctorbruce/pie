@@ -198,7 +198,7 @@ for (const cancelAt of ["after confirmation", "during confirmation"]) {
 			const collecting = (async () => {
 				for await (const packet of readEvents(globalResponse)) {
 					globalPackets.push(packet);
-					if (packet.type === "turn.settled") return;
+					if (packet.snapshot?.turn?.status === "cancelled" && packet.execution?.actions.submit.available) return;
 				}
 			})();
 			const sessionStream = readEvents(fetch(`${base}/sessions/${session.id}/events`, { signal: abort.signal }));
@@ -249,7 +249,7 @@ for (const cancelAt of ["after confirmation", "during confirmation"]) {
 					if (cancelAt === "after confirmation")
 						assert.equal((await post(`/sessions/${session.id}/cancel`, { turnId: packet.turnId })).status, 202);
 				}
-				if (packet.type === "turn.settled") break;
+				if (packet.turn?.status === "cancelled" && packet.execution?.actions.submit.available) break;
 			}
 			await collecting;
 			for (const snapshot of waitingSnapshots) {
@@ -261,6 +261,11 @@ for (const cancelAt of ["after confirmation", "during confirmation"]) {
 			assert(packets.some((packet) => packet.execution?.cancellationRequested));
 			assert(packets.some((packet) => packet.execution?.modelStreaming));
 			assert(packets.some((packet) => packet.execution?.activeTools.length));
+			assert.equal(
+				packets.find((packet) => packet.type === "turn.settled")?.execution?.actions.submit.available,
+				false,
+			);
+			assert.equal(projected.execution.actions.submit.available, true);
 			assert.deepEqual(
 				globalPackets.map((packet) => packet.revision),
 				packets.map((packet) => packet.revision),

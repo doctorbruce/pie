@@ -274,20 +274,23 @@ test("a slow external cancellation cannot advance the model while its acknowledg
 	const reference = await until(async () =>
 		host.jobs.submissions ? host.local.readSession(session.id)?.turnCheckpoint?.jobs?.[0] : undefined,
 	);
-	let entered = false;
+	let enterCancellation!: () => void;
+	const entered = new Promise<void>((resolve) => {
+		enterCancellation = resolve;
+	});
 	let acknowledge!: () => void;
 	const acknowledgement = new Promise<void>((resolve) => {
 		acknowledge = resolve;
 	});
 	host.jobs.executor.cancel = async () => {
-		entered = true;
+		enterCancellation();
 		await acknowledgement;
 	};
 	const cancellation = host.runtime.cancelTurn(session.id, { turnId: accepted.turnId });
-	let nextTurn: Promise<unknown> | undefined;
 	let repeated: Promise<unknown> | undefined;
+	let settlement: Promise<SessionSnapshot> | undefined;
 	try {
-		await until(async () => (entered ? true : undefined));
+		await entered;
 		host.jobs.update(reference, {
 			status: "completed",
 			result: { content: [{ type: "text", text: "completed during cancellation" }], details: {} },
@@ -298,19 +301,27 @@ test("a slow external cancellation cannot advance the model while its acknowledg
 		assert.equal(completeToolHistory(messages), true);
 		assert.equal(host.jobs.submissions, 1);
 		repeated = host.runtime.cancelTurn(session.id, { turnId: accepted.turnId });
-		let admitted = false;
-		nextTurn = host.runtime.submitTurn(session.id, { text: "next after cancellation" }).then((receipt) => {
-			admitted = true;
-			return receipt;
+		let settled = false;
+		settlement = host.runtime.waitForTurn(session.id).then((snapshot) => {
+			settled = true;
+			return snapshot;
 		});
-		await delay(30);
-		assert.equal(admitted, false, "The next Turn must wait for cancellation cleanup");
+		await assert.rejects(host.runtime.submitTurn(session.id, { text: "rejected during cancellation" }), {
+			status: 409,
+			reason: "cancellation_in_progress",
+		});
+		const pending = await host.runtime.getSession(session.id);
+		assert.deepEqual(pending.execution.actions.submit, { available: false, reason: "cancellation_in_progress" });
+		assert.equal(settled, false, "waitForTurn must include the external cancellation acknowledgement");
 	} finally {
 		acknowledge();
 		await cancellation;
 		await repeated;
 	}
-	await nextTurn;
+	const cancelled = await settlement;
+	assert.equal(cancelled?.turn?.status, "cancelled");
+	assert.equal(cancelled?.execution.actions.submit.available, true);
+	await host.runtime.submitTurn(session.id, { text: "next after cancellation" });
 	assert.equal((await host.runtime.waitForTurn(session.id)).turn?.status, "completed");
 });
 

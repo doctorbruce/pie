@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test, { type TestContext } from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ContextCompaction, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
+import type { ContextCompaction, GlobalSessionEvent, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
 import type { SavedSession, SessionMetadata } from "@pie/runtime/runtime-store";
 import { exportSession, transferToAgentMessages } from "@pie/runtime/session-transfer";
 import { type MessageTree, syncMessageTree } from "@pie/runtime/session-tree";
@@ -745,6 +745,12 @@ test("failed turn persistence preserves durable history and publishes failure wh
 			"CREATE TRIGGER fail_turn BEFORE UPDATE ON sessions WHEN json_extract(NEW.payload, '$.turn.requestId') = 'reject' BEGIN SELECT RAISE(ABORT, 'disk failure'); END;",
 		),
 	);
+	let ownedDatabase: DatabaseSync | undefined;
+	const prepare = DatabaseSync.prototype.prepare;
+	context.mock.method(DatabaseSync.prototype, "prepare", function (this: DatabaseSync, sql: string) {
+		ownedDatabase = this;
+		return prepare.call(this, sql);
+	});
 	const core = createCoreServer({ PI_DATA_DIR: path });
 	await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
 	try {
@@ -787,6 +793,17 @@ test("failed turn persistence preserves durable history and publishes failure wh
 		});
 		const running = await runtime.submitTurn(active.id, { text: '调用工具 bash {"command":"echo test"}' });
 		await waiting;
+		assert(ownedDatabase);
+		// Read through the owning connection: SQLite is exclusive, and published revisions can advance without a save.
+		const durableBefore = JSON.parse(
+			String(prepare.call(ownedDatabase, "SELECT payload FROM sessions WHERE id = 'rollback'").get()!.payload),
+		) as SessionMetadata;
+		assert.deepEqual(durableBefore.turn, before.turn);
+		const failureEvents: GlobalSessionEvent[] = [];
+		const unsubscribeFailure = runtime.subscribeAll((packet) => {
+			if (packet.sessionId === "rollback") failureEvents.push(packet);
+		});
+		context.after(unsubscribeFailure);
 		const rejected = await fetch(`${base}/sessions/rollback/turns`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -799,6 +816,14 @@ test("failed turn persistence preserves durable history and publishes failure wh
 		assert.deepEqual(after.turn, before.turn);
 		assert(after.revision > before.revision);
 		assert.deepEqual(after.execution.actions.submit, { available: false, reason: "storage_unavailable" });
+		const failure = failureEvents.find((packet) => packet.snapshot.revision === after.revision);
+		assert(failure, "the HTTP failure projection must have a matching published event");
+		assert.deepEqual(JSON.parse(JSON.stringify(failure.snapshot)), {
+			instanceId: after.instanceId,
+			revision: after.revision,
+			turn: after.turn,
+			execution: after.execution,
+		});
 		assert.deepEqual(await (await fetch(`${base}/sessions/rollback/tree`)).json(), tree);
 		const retry = await fetch(`${base}/sessions/rollback/turns`, {
 			method: "POST",
@@ -825,8 +850,11 @@ test("failed turn persistence preserves durable history and publishes failure wh
 			const saved = JSON.parse(
 				String(db.prepare("SELECT payload FROM sessions WHERE id = 'rollback'").get()!.payload),
 			) as SessionMetadata;
-			assert.equal(saved.revision, before.revision);
-			assert.deepEqual(saved.turn, before.turn);
+			assert.deepEqual(
+				saved,
+				durableBefore,
+				"rejected input and failure publication must not change durable metadata",
+			);
 		});
 	} finally {
 		await core.close();

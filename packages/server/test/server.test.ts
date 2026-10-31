@@ -129,18 +129,27 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	assert.equal(accepted.status, 202);
 	const { turnId } = (await accepted.json()) as { turnId: string };
 	const received: MaterializedSessionEvent[] = [];
+	let settled: SessionSnapshot | undefined;
 	for await (const packet of stream) {
 		received.push(packet);
 		assert.equal(packet.sessionId, session.id);
 		assert.equal(packet.turnId, turnId);
-		if (packet.type === "turn.settled") break;
+		if (packet.type === "turn.settled") settled = packet.snapshot;
+		if (settled && packet.type === "snapshot" && packet.snapshot.execution.actions.submit.available) break;
 	}
+	assert(settled);
+	assert.equal(settled.turn?.status, "completed");
+	assert.equal(settled.execution.actions.submit.available, false);
 	assert(received.some((p) => p.event?.type === "tool_execution_start"));
 	assert(received.some((p) => p.event?.type === "message_update"));
 	assert.equal(received.find((p) => p.event?.type === "agent_end")?.snapshot.turn?.status, "running");
 	assert(received.every((packet) => packet.snapshot.execution));
 	const final = received.at(-1)?.snapshot;
 	assert(final);
+	assert(final.revision > settled.revision);
+	assert.equal(final.execution.actions.submit.available, true);
+	assert.deepEqual(final.turn, settled.turn);
+	assert.deepEqual(final.messages, settled.messages);
 	assert.equal(final.turn?.status, "completed");
 	assert.deepEqual(
 		final.messages.map((m) => m.role),
@@ -152,6 +161,7 @@ test("HTTP accepts a turn; SSE carries the real tool loop, settlement and reconn
 	const restored = (await reconnected.next()).value?.snapshot;
 	assert.deepEqual(restored?.messages, final?.messages);
 	assert.deepEqual(restored?.turn, final?.turn);
+	assert.deepEqual(restored?.execution, final.execution);
 	assert.equal(restored?.revision, final?.revision);
 	await reconnected.return(undefined);
 	assert(received.every((p, i) => i === 0 || p.snapshot.revision > received[i - 1].snapshot.revision));

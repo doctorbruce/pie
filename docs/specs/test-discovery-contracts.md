@@ -1,6 +1,6 @@
 # 测试发现与契约回归
 
-状态：已完成（2026-10-30）。
+状态：已完成（2026-11-01，验收边界补强；2026-10-30 的发现规则阶段已完成）。
 
 ## 问题与目标
 
@@ -25,3 +25,14 @@
 - `npm run test:server`：自动发现 36 个文件，289 项通过；包含 Runtime、Server 和提示词调试测试，仅使用 faux/本地 fixture。
 - `npm run check`：只读 Biome、TypeScript、模型数据校验通过；`git diff --check` 通过。
 - 未运行真实 Provider、付费模型、构建或推送；无未完成项。
+
+## 2026-11-01 验收边界补强
+
+Harness 升级完整回归发现三个旧假设：SSE 结算包之后不会再发布 readiness revision、取消确认等于下一轮已经可准入、存储故障后的公开 revision 必须等于数据库 revision。保留自动发现与生产控制语义，改用已有的结算/准入/发布切面观察，并保留对历史和终态的断言；不以延时或放宽入口消除失败。
+
+- `packages/server/test/server.test.ts`：保留 Turn 结算断言，等待后续可准入快照，再严格比较重连的 revision、execution 和历史。
+- `packages/server/test/durable-jobs.test.ts`：用取消确认门闩代替固定延时；确认期间新提交返回 `409 cancellation_in_progress`，投影一致；`waitForTurn` 覆盖确认与结算后，再验证下一轮可提交。
+- `packages/server/test/store.test.ts`：故障前捕获实际持久 metadata，故障后验证完整内容未变；另精确比较同 revision 的全局事件与 HTTP 投影，不把公开版本误当数据库最后保存版本。
+- 首次完整回归：Runtime 73/73；Server 317 项中 314 通过、3 项暴露上述旧假设。三项均定向复现后修正断言，生产实现未因这些失败而放宽。
+- 定向文件：Server/Durable Jobs 共 34/34，Store 19/19。最终 `npm run test:runtime` 73/73、`npm run test:server` 317/317，通过且无跳过；`npm run check` 与 `git diff --check` 通过。
+- 本阶段无未完成项；未调用真实 Provider、付费模型，未执行构建或推送。

@@ -242,6 +242,22 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 验证：根目录 `npm run test:server`，包含假模型测试和本地 OpenAI 兼容模拟端点上的真实 SDK + 工具循环、配置重载/重启/校验/密钥不回显测试，不调用付费服务。
 
+## 模型请求记录
+
+本地宿主默认把每次 Turn 与 compaction 的完整模型 payload 保存到 `PI_DATA_DIR/model-requests/<会话 ID 的 SHA-256>/`。记录的是实际发送的 JSON body，不复制认证 headers；正文仍可能包含代码、工具结果和用户输入。目录和文件分别使用 `0700/0600` 权限。
+
+| 环境变量 | 默认值 | 含义 |
+| --- | --- | --- |
+| `PI_MODEL_REQUEST_RECORDING` | `1` | `0` 关闭新增记录，`1` 开启；仍执行原有 payload hook |
+| `PI_MODEL_REQUEST_MAX_AGE_MS` | `604800000` | 保留 7 天，单位毫秒 |
+| `PI_MODEL_REQUEST_MAX_BYTES` | `104857600` | 当前数据目录跨会话的记录正文总容量，100 MiB |
+| `PI_MODEL_REQUEST_MAX_FILES` | `1000` | 跨会话记录条数上限 |
+| `PI_MODEL_REQUEST_MAX_RECORD_BYTES` | `16777216` | 单条完整 JSON 记录上限，16 MiB |
+
+数值配置必须为正的安全整数，修改后重启生效。容量按旧记录优先淘汰；单条超过自身上限或总容量时跳过记录，不截断，也不改变发送给模型的内容。记录不是完整审计账本，不能依赖它证明所有请求均已留存。
+
+宿主取得数据目录所有权后，在启动和后续写入时清理到期记录及预算，关闭新增记录时仍执行启动维护；静默运行期间没有实时 TTL 定时删除承诺。删除会话会清理对应记录，包括随父会话删除的子会话。文件记录故障只输出不含正文的警告，不阻断模型或把已经完成的数据库删除误报为失败。完整实现与验收见 [资源生命周期 SPEC](../../docs/specs/model-request-retention.md)。
+
 ## 模型配置
 
 默认文件为工作目录下 `.pie/models.json`，可用 `PI_DATA_DIR` 改变目录。不要指向其他 Pi 进程正在使用的配置目录。保存使用临时文件 + 原子替换；发现外部修改时拒绝覆盖，需先 reload。文件保存采用单服务进程所有权，不提供跨进程锁。

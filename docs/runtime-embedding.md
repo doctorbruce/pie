@@ -84,6 +84,8 @@ await runtime.close();
 - `mcp`：提供当前执行范围的配置、状态、连接取得与关闭能力。未实现云端 MCP 时，应明确拒绝非空配置；可能启动本机进程的连接实现在 Local。
 - `recordModelRequest`：提供宿主自己的请求记录策略，可以显式不记录。完整请求写文件的实现在 Local；云端宿主自行处理敏感数据、保存权限和保留时间。
 
+Local 的默认记录器设有跨会话容量、条数、期限及单条上限，支持关闭新增记录，并随会话删除清理文件。超限或文件故障不改变模型 payload 与执行结果；它不是可靠全量审计。嵌入宿主注入自己的记录器时仍自行拥有生命周期，不会隐式创建这些本地文件，配置见 [本地记录策略](../packages/server/README.md#模型请求记录)。
+
 `env` 为可选的工厂环境快照，Runtime 不默认读取 `process.env`。`compactionSettings(model)` 可选；省略时仅使用纯计算的预算默认值，不读文件。本地工厂注入文件配置读取实现。
 
 宿主可以在 `AgentRuntimeConfig.compaction` 提供 `{ thresholdTokens }`，空对象表示使用模型预算默认值。参数随 host runtime revision 在下一 Turn 生效，并传入对应的 Subagent；该模式直接使用宿主参数，不读取本地 `settings.json`。未提供该字段的独立运行模式仍使用工厂注入的 `compactionSettings(model)`。阈值必须为正整数，实际压缩预算仍受模型上下文窗口与保留量约束。

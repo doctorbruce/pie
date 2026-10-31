@@ -33,6 +33,7 @@ export async function createLocalRuntime(options: {
 	traceToolStream: boolean;
 }) {
 	const { agents: factory, plugins, store, traceToolStream } = options;
+	await factory.requestRecords?.ready();
 	const assistants = new Map(store.assistants.map((assistant) => [assistant.id, structuredClone(assistant)]));
 	function localRuntime(assistant: Assistant) {
 		if (!plugins) throw new RuntimeError(405, "当前宿主未启用本地助手配置");
@@ -53,9 +54,23 @@ export async function createLocalRuntime(options: {
 		};
 	}
 
+	const runtimeStore = createSqliteRuntimeStore(store);
 	const runtime = await createRuntime({
 		agents: factory,
-		store: createSqliteRuntimeStore(store),
+		store: {
+			...runtimeStore,
+			async deleteSession(id) {
+				await runtimeStore.deleteSession(id);
+				await factory.requestRecords?.deleteSession(id);
+			},
+			async close() {
+				try {
+					await factory.requestRecords?.close();
+				} finally {
+					await runtimeStore.close();
+				}
+			},
+		},
 		hostRuntimes: store.hostRuntimes,
 		saveHostRuntimes: async (definitions) => store.replaceHostRuntimes(definitions),
 		assistants: { list: () => [...assistants.values()], runtime: localRuntime },

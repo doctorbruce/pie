@@ -24,6 +24,7 @@ export function createAgentFactory(
 	const external = options.tools
 		? new Map<string, ToolFactory>()
 		: loadExternalTools(env, [...nativeTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
+	const requestRecords = options.recordModelRequest ? undefined : createModelRequestRecorder(env);
 	const agents = createRuntimeAgentFactory({
 		env,
 		models: {
@@ -53,8 +54,8 @@ export function createAgentFactory(
 		},
 		skills: options.skills ?? createSkillTools,
 		mcp: options.mcp ?? new McpManager(env),
-		recordModelRequest: options.recordModelRequest ?? createModelRequestRecorder(env),
+		recordModelRequest: options.recordModelRequest ?? requestRecords!,
 		compactionSettings: options.compactionSettings ?? ((model) => readCompactionSettings(env, model)),
 	});
-	return Object.assign(agents, { settings });
+	return Object.assign(agents, { settings, requestRecords });
 }

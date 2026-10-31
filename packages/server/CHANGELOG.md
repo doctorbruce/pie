@@ -27,6 +27,8 @@
 
 ### Changed
 
+- Bound local model-request records by age, total bytes, file count and individual size; allow recording to be disabled without changing payload hooks, maintain existing records on startup, and remove session records with their owning sessions.
+
 - Query session metadata on demand and index pending SQLite recovery instead of retaining a startup snapshot; keep the local HTTP session list complete through paged store reads.
 
 - Split shared runtime contracts and orchestration into `@pie/runtime`, and SQLite, local tools and configuration into `@pie/local`; keep `@pie/server` as the local HTTP/SSE and CLI/Sidecar host. Embedded callers must use `@pie/runtime` and explicitly supply agent capabilities.

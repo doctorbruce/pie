@@ -199,6 +199,9 @@ Astron 当前 Assistant 配置
 | `agent.sqlite` | 助手定义、宿主 runtime 注册表、会话归属和已应用 runtime 快照、完整 Pi 消息、技能记录、最近一次 Turn |
 | `plugins/<id>/` | 导入的插件包副本，以 plugin.json 为清单；启动时重新读取 |
 | `tools/` | 宿主提供的工具代码，默认从这里加载；可用 PI_TOOLS_DIR / --tools-dir 指定其他目录 |
+| `model-requests/<session hash>/` | 本地完整模型请求正文；默认 7 天、宿主共计 100 MiB / 1000 条，单条最多 16 MiB |
+
+本地请求记录支持 `PI_MODEL_REQUEST_RECORDING=0` 关闭新增记录；总容量、条数、期限和单条上限均可配置，启动及写入时执行维护。超限请求跳过记录，不截断或影响模型；删除会话联动清理子会话记录，文件故障不改变执行与数据库事实。它是有保留策略的调试记录，不是持久工具账本；字段和边界见 [服务说明](../packages/server/README.md#模型请求记录)。
 
 SQLite 使用 Node 内置 `node:sqlite`，不增加依赖。当前 Node 会输出此内置模块的实验性提示。数据库采用独占连接锁，同目录第二个服务启动失败；锁由进程退出释放。工具和提供商对象不会序列化进数据库。旧助手及会话记录缺少 pluginIds 时按空列表读取；除此之外没有通用跨版本迁移框架，不支持手工改库。
 

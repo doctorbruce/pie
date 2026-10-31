@@ -8,7 +8,7 @@ import { checkpointMessage, isContextCheckpoint } from "./compaction.ts";
 import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./config.ts";
 import { DurableJobError, type DurableJobExecutor, durableJobResult, pendingDurableJobs } from "./durable-jobs.ts";
 import { projectSessionAgentEvent } from "./event-projection.ts";
-import { type BackgroundJobInfo, BackgroundJobs } from "./jobs.ts";
+import { type BackgroundJobInfo, type BackgroundJobList, BackgroundJobs } from "./jobs.ts";
 import type {
 	ActionUnavailableReason,
 	ActivityRecord,
@@ -1745,6 +1745,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 				return await snapshot(session, options);
 			}, false);
 		},
+		listBackgroundJobs(sessionId: string): Promise<BackgroundJobList> {
+			return execute(async () => {
+				const session = await requireSession(sessionId);
+				return { instanceId, sessionId: session.id, jobs: jobs.listSummaries(session.id) };
+			}, false);
+		},
 		exportSession(sessionId: string) {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
@@ -2322,7 +2328,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 					const page = await store.listSessions({ limit: 200, cursor, parentSessionId: session.id });
 					for (const child of page.sessions) {
 						const loaded = sessions.get(child.id);
-						if ((loaded ?? child).turn?.status === "running" || loaded?.runPromise)
+						if (
+							(loaded ?? child).turn?.status === "running" ||
+							loaded?.runPromise ||
+							jobs.list(child.id).some((job) => job.status === "running")
+						)
 							throw new RuntimeError(409, "请先停止子会话执行");
 						children.push(child.id);
 					}

@@ -213,6 +213,8 @@ export async function createLocalRuntime(options: {
 		createSession: (...args: Parameters<PieRuntime["createSession"]>) =>
 			execute(() => runtime.createSession(...args), true),
 		getSession: (...args: Parameters<PieRuntime["getSession"]>) => execute(() => runtime.getSession(...args), false),
+		listBackgroundJobs: (...args: Parameters<PieRuntime["listBackgroundJobs"]>) =>
+			execute(() => runtime.listBackgroundJobs(...args), false),
 		exportSession: (...args: Parameters<PieRuntime["exportSession"]>) =>
 			execute(() => runtime.exportSession(...args), false),
 		forkSession: (...args: Parameters<PieRuntime["forkSession"]>) =>

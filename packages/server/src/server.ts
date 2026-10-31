@@ -257,7 +257,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (path === "/sessions" && req.method === "POST")
 				return json(201, await runtime.createSession((await readJson(req)) as CreateSessionInput));
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|history|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			if (!match) throw new RuntimeError(404, "会话或接口不存在");
@@ -271,6 +271,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 					),
 				);
 			if (req.method === "GET" && action === "events") return streamEvents(runtime, res, id);
+			if (req.method === "GET" && action === "jobs") return json(200, await runtime.listBackgroundJobs(id));
 			if (req.method === "GET" && action === "history")
 				return json(
 					200,

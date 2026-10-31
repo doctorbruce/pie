@@ -68,6 +68,8 @@ const unsubscribe = await runtime.subscribe(session.id, (packet) => {
 });
 await runtime.submitTurn(session.id, { text: "查询订单状态" });
 const settled = await runtime.waitForTurn(session.id);
+// Turn 已结算；直接拥有的本实例作业仍可能运行。
+const background = await runtime.listBackgroundJobs(session.id);
 unsubscribe();
 await runtime.close();
 ```
@@ -112,6 +114,9 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 ## 事件、隔离与生命周期
 
 - `submitTurn` / `resumeTurn` 返回 `TurnReceipt`：包含会话、Turn、可选 request ID，以及 `accepted / started / settled`。启动表示已发起本实例的执行，不表示模型完成；用 `turn.settled` 或 `waitForTurn` 读取实际结果。
+- `waitForTurn(sessionId)` 等待调用时取得的本实例 Turn 执行 Promise 并返回完整快照，不等待后台作业、后续通知引发的 Turn、后代活动或外部持久任务。`turn.settled` 同样只报告当前 Turn；下一轮准入仍以 `execution.actions.submit` 为准。
+- `listBackgroundJobs(sessionId)` 返回 `{ instanceId, sessionId, jobs }`，只查会话元信息和进程内作业表，不读历史；Local 同名透传，HTTP 对应 `GET /sessions/:id/jobs`。`jobs` 包含直接拥有的 Shell/Task（含前台等待 task 和近期终态），每项只有身份、类型、标题、状态、起止时间及可选错误；标题/错误分别截至 512/2048 字符，不含输出正文和任意 details。标题可能来自命令，摘要不提供脱敏保证。
+- 作业观察是读取瞬间的事实，不属于会话 revision 投影，不消费结果、不确认通知。它不汇总后代，不查询外部持久执行器，也不是完整作业历史；重启后以新 `instanceId` 观察空表，不能推断旧进程副作用已停止。宿主应区分本轮已结算、直接作业仍运行及业务目标完成，不能把空表当成所有工作完成。父会话删除也会拒绝尚有活跃本地作业的子会话。
 - `TurnInput.canonicalTurnId` 可选，非空且最多 256 字符，原样保存到 Turn、快照、事件和回执。有 canonical 时按当前 Turn 的原始或最近 canonical 去重，且必须绑定同一原 requestId，否则返回 409；不同 canonical 即使 requestId 相同也作为新轮准入。Steer 保留 native Turn ID，更新当前 canonical/request 关联，并保留 `rootCanonicalTurnId/rootRequestId`；首轮重试回执仍返回首轮身份。持久化身份不表示 Steer 队列可跨进程恢复。
 - 未提供 canonical 时，`submitTurn` 的同一 request ID 重试只在当前 Turn 的原始或最近 request ID 范围内去重，复用该 Turn 回执，不追加输入或重跑；存储故障后仍可查询这一回执。`steer` 返回 `queued: true, durable: false`，只承诺已进入当前进程队列；`cancelTurn` 另返回 `cancellationRequested / durable`，不能据此推断工具副作用已撤销。
 - `SessionSnapshot.execution.actions` 与四个控制入口共用 Runtime 决策；它描述新操作，不预留准入资格，也不替代宿主权限。相同取消请求复用在途确认，终态取消是 `accepted: false` 的无操作；`resume` 可用只允许进入恢复预检，历史或账本不符返回 `recovery_validation_failed`，外部执行器缺失或任务仍运行分别返回 `external_executor_unavailable / external_job_running`。`RuntimeError.reason` 与 HTTP 错误的 `reason` 使用同一稳定代码，身份不符为 `turn_mismatch`。

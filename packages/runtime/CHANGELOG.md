@@ -20,6 +20,8 @@
 
 ### Added
 
+- Expose `listBackgroundJobs` with instance-scoped, directly owned Shell/Task summaries without history, output or arbitrary details; distinguish Turn settlement from background work and reject parent deletion while a child still owns active local jobs.
+
 - Accept per-turn `toolAvailability` to restrict actual tools, deferred discovery and MCP tools without expanding the assistant's configured scope; preserve the current Turn boundary across steering, recovery and child assistants.
 
 - Accept optional host `canonicalTurnId`, persist and echo it in Turn snapshots and receipts, and prioritize its request binding for submit retries. Steering preserves the native Turn ID and original canonical binding while updating the current binding; conflicting request identities return 409.

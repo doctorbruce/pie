@@ -8,6 +8,7 @@ export {
 	type SkillToolsFactory,
 } from "./capabilities.ts";
 export type { DurableJobExecutor, DurableJobReference, DurableJobSnapshot } from "./durable-jobs.ts";
+export type { BackgroundJobList, BackgroundJobSummary } from "./jobs.ts";
 export type { McpRuntime } from "./mcp.ts";
 export type * from "./protocol.ts";
 export {

@@ -131,6 +131,8 @@ POST /sessions/:id/steer { turnId, text, displayText? }
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
 
+`waitForTurn` 等待当前取得的执行 Promise，不等待所有后台工作或后续通知启动的 Turn。宿主用 SDK `listBackgroundJobs(sessionId)` 或 `GET /sessions/:id/jobs` 单独观察本实例、直接拥有的 Shell/Task 元信息；这不读历史、不汇总后代、不查询持久外部任务。空表、Turn completed 和用户目标完成是不同事实；重启后的新 instanceId 也不证明旧进程副作用停止。父删除会拒绝仍有活跃子作业的情况。
+
 宿主可订阅 `GET /sessions/:id/events`，新连接收到最近 50 条消息的快照，后续按 revision 合并增量。宿主订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射；这个流不传完整 Session 快照或 assistant partial。全局每个包都携带与会话流同源的 `execution`，包含模型、工具、交互和取消变化；即使某条 Agent 事件没有公开内容增量，也保留状态包。`interaction.requested / interaction.resolved` 都会传递；`snapshot / turn.settled` 另带最小 `turn / execution` 快照。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，实例变化或版本缺口时重新读取快照。
 
 需要重连后立即得知断线期间结算结果时，使用 `GET /events?sessionId=A&sessionId=B`：首包 `execution.baseline` 提供指定会话的版本、Turn 与执行摘要，后续丢弃基线已覆盖的事件。此接口只装载指定会话元信息，不读历史或持久重放。发布时同步固定 execution、Turn 和历史叶子；完整快照异步读取也使用该叶子，同版本不会混入后续执行状态。会话卸载后仅保留整数水位，重新装载不复用已观察版本。

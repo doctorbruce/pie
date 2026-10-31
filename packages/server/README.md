@@ -35,6 +35,7 @@
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
 | `PUT /sessions/:id/model-override` | `{ modelOverride: { providerId, model } \| null, initializeOnly? }` | 保存会话模型选择；null 跟随默认模型。initializeOnly 仅补入尚未初始化的历史会话，保留已存在的选择或 null |
 | `GET /sessions/:id` | 可选 `?limit=50` | 会话快照，含消息、当前部分消息、最近一次 turn 和 execution；limit 提供有界历史页 |
+| `GET /sessions/:id/jobs` | 无 | `{ instanceId, sessionId, jobs }`；本实例、直接拥有的 Shell/Task 摘要，不读历史或输出正文 |
 | `GET /events` | 可选重复参数 `?sessionId=A&sessionId=B` | 无参数只发送后续全局事件；指定 1–200 个会话时先发送轻量执行基线，再推送这些会话的新事件 |
 | `GET /sessions/:id/events` | 无 | SSE，第一条是最近 50 条消息与 execution 的快照，然后推送增量 |
 | `GET /sessions/:id/export` | 无 | 导出 canonical `SessionTransfer`；运行中的会话返回 409 |
@@ -52,6 +53,8 @@
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
 `TurnReceipt` 包含 `sessionId / turnId / requestId? / accepted / started / settled`；受理和启动不表示完成。`SteerReceipt` 另含 `queued: true, durable: false`，不承诺未持久化队列的崩溃重放；`CancellationReceipt` 另含 `cancellationRequested / durable`，不代表工具已停止或外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；当前 request ID 的提交重试仅查询已有回执，在途取消复用同一操作，终态取消返回 `accepted: false`。`resume.available` 只允许恢复预检；宿主权限另行叠加。
+
+`turn.settled` 和 SDK `waitForTurn` 不表示后台工作或用户目标完成。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。脱离前台的 Shell 需通过 job_kill 停止，取消已结算 Turn 是无操作；活跃子作业会阻止父删除。
 
 存储故障时新操作以 `storage_unavailable` 拒绝。`bestEffort: true` 仅对当前活跃根 Turn 尽力停止本实例 Agent / MCP、清空输入和交互，回执 `durable: false`；不持久化取消意图、不调用外部持久执行器取消，也不承诺最终保存为 cancelled。存储正常时仍走普通持久取消。
 

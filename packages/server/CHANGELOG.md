@@ -10,6 +10,8 @@
 
 ### Added
 
+- Expose `GET /sessions/:id/jobs` with the same lightweight, instance-scoped local-job observations as the Runtime SDK; keep Turn settlement distinct from background and descendant completion.
+
 - Bootstrap scoped `/events?sessionId=...` subscriptions with a lightweight execution baseline and align subsequent events for reconnects after silent settlement.
 
 - Recover safe interrupted Turns through SQLite startup classification and the HTTP resume/cancel endpoints; keep the original Turn identity and configuration, and settle already committed final answers without another model call.

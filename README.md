@@ -150,6 +150,14 @@ npm run test:server
 
 `packages/ai/test` 保留上游模型层测试，其中部分会读取环境凭据并调用真实服务；只选择需要的测试文件运行。
 
+本地 harness 成本基线使用 faux 和独立临时 SQLite，输出短/长历史分页、16 会话并发、轻量摘要、磁盘与 RSS 的 JSON 测量，不读取模型凭据：
+
+```sh
+node --expose-gc --conditions=source examples/harness-baseline.ts
+```
+
+结果只用于同环境比较；RSS 包含调用者持有的完整快照，不是闲置内存或峰值。固定工作负载和实测见 [成本基线 SPEC](docs/specs/harness-cost-baseline.md)。
+
 完整 Pi 位于相邻的 `../pi-upstream`，保留完整 Git 历史。此处核心源码基线为 `b2602be77cb7b0de45dd616407fd210daa48aa75`；`agent.ts`、`agent-loop.ts`、`types.ts` 和 `stream-fn.ts` 保持该版本的实现，包入口与工程配置按当前范围精简。
 
 原本被 Git 忽略的本地文档和依赖目录保存在 `../pie-local-archive-20260914`。原 MIT 许可见 `LICENSE`。

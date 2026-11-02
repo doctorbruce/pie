@@ -23,7 +23,13 @@ export function createAgentFactory(
 	const nativeTools = options.tools ? [] : systemTools(env);
 	const external = options.tools
 		? new Map<string, ToolFactory>()
-		: loadExternalTools(env, [...nativeTools.map((tool) => tool.name), "skill", "task", "tool_search"]);
+		: loadExternalTools(env, [
+				...nativeTools.map((tool) => tool.name),
+				"skill",
+				"skill_search",
+				"task",
+				"tool_search",
+			]);
 	const requestRecords = options.recordModelRequest ? undefined : createModelRequestRecorder(env);
 	const agents = createRuntimeAgentFactory({
 		env,

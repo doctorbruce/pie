@@ -27,25 +27,16 @@ import type {
 	ModelSelection,
 	RuntimeConfig,
 	ServerInfo,
-	SkillBinding,
 	SubagentBinding,
 	ToolActivity,
 } from "./protocol.ts";
+import { createSkillSearch, skillDescription } from "./skills.ts";
 import { withToolProgress } from "./tool-progress.ts";
 import { toolRepetitionReminder } from "./tool-repetition.ts";
 import { createToolSearch } from "./tool-search.ts";
 import { applyPermissionPolicy, parseToolIds, ToolConfigError, type ToolRuntime } from "./tools.ts";
 
 const SKILL_DESCRIPTION_LIMIT = 160;
-
-// Mirror of the OpenCode skill index: the host language selects the localized
-// summary, and a missing entry falls back to the binding description.
-function skillDescription(binding: SkillBinding, language: string | undefined) {
-	if (!language) return binding.description;
-	const requested = language.trim().toLowerCase();
-	const locale = requested.startsWith("zh") ? "zh-CN" : requested.startsWith("en") ? "en-US" : requested;
-	return binding.descriptions?.[locale] ?? binding.description;
-}
 
 function oneLineDescription(description: string, fallback: string) {
 	const summary =
@@ -62,7 +53,10 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 	const { recordModelRequest, models: settings, mcp } = options;
 	const toolCatalog = structuredClone([...options.tools.catalog]);
 	const toolIds = toolCatalog.map((tool) => tool.id);
-	if (new Set(toolIds).size !== toolIds.length || toolIds.some((id) => ["skill", "task", "tool_search"].includes(id)))
+	if (
+		new Set(toolIds).size !== toolIds.length ||
+		toolIds.some((id) => ["skill", "skill_search", "task", "tool_search"].includes(id))
+	)
 		throw new ToolConfigError("工具 ID 重复或使用了保留名称");
 	const composeSystemPrompt = (runtime: RuntimeConfig, turnSystemPrompt?: string) => {
 		const systemPrompt = [
@@ -81,7 +75,13 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 		const guidance = chinese
 			? "## 可用技能\n以下列出技能 ID 和一句简短说明；完整指引仅在调用 skill 工具后加载。\n不要默认认为技能所需的程序或依赖已安装。"
 			: "## Available Skills\nSkill IDs and one-line descriptions; full instructions are loaded only after calling the skill tool; do not assume missing host dependencies are installed.";
-		return systemPrompt + (skills.length ? `\n\n${guidance}\n${skills.join("\n")}` : "");
+		const discoveryGuidance =
+			runtime.toolAvailability?.skill_search === false
+				? ""
+				: chinese
+					? "\n不确定技能 ID，或用户询问可用技能、能力时，先调用 skill_search；用返回的精确 id 调用 skill，不要扫描插件或技能目录来发现技能。"
+					: "\nUse skill_search when unsure of a skill ID or when asked which skills or capabilities are available. Call skill with an exact id from the index or search results; do not scan plugin or skill directories to discover skills.";
+		return systemPrompt + (skills.length ? `\n\n${guidance}\n${skills.join("\n")}${discoveryGuidance}` : "");
 	};
 
 	return {
@@ -228,6 +228,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			const availableTools = [
 				...tools.filter((tool) => selectedNativeTools.has(tool.name)),
 				...skillTools.tools,
+				...(runtime.skills.length ? [createSkillSearch(runtime)] : []),
 				...(taskTool ? [taskTool] : []),
 			].filter(toolAvailable);
 			const deferredToolNames = [

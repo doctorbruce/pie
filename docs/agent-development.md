@@ -53,7 +53,7 @@ Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以�
 5. 已有 Agent 保留创建时的模型调用配置。Assistant/runtime 变化或服务重启导致重建时，使用会话保存的 `provider/model` 从当前 `models.json` 重新解析端点、凭据和模型参数。
 6. 模型被移除或配置失效时，历史仍可查看；继续执行明确报错，不悄悄切换到其他模型。修好配置后可以再次提交。
 
-助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供 `skill`。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供确认型交互、工作区边界检查和 MCP，尚无进程沙箱。MCP 通过宿主 runtime 注册，配置、权限与生命周期见 [MCP 接入说明](mcp-integration.md)。
+助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供常驻的 `skill_search` 和 `skill`，本轮 `toolAvailability` 可禁用。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供确认型交互、工作区边界检查和 MCP，尚无进程沙箱。MCP 通过宿主 runtime 注册，配置、权限与生命周期见 [MCP 接入说明](mcp-integration.md)。
 
 ## Plugin 与 Skill
 
@@ -66,8 +66,9 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
   → POST /plugins/import → 校验、复制到 PI_DATA_DIR/plugins/<id>
   → Assistant.pluginIds → 创建 Session 时复制挂载关系
   → plugins.runtime() → 解析为带来源的 RuntimeConfig，写入 Session
-  → Agent systemPrompt 只包含 Skill ID、一行说明和来源名称（说明按宿主 language 选 `descriptions[locale]`，回落 `description`）
-  → 模型调用 skill → 读取完整 SKILL.md 和实际目录
+  → Agent systemPrompt 包含 Skill ID 和一行说明（说明按宿主 language 选 `descriptions[locale]`，回落 `description`）
+  → 不确定技能名称、查询能力或完整清单时先调用 skill_search → 返回可加载的绑定 ID 和说明
+  → 模型调用 skill({ id }) → 读取完整 SKILL.md 和实际目录
   → read / bash / write / edit / grep / find / ls
   → 原版 loop 把工具结果交回模型
 ```
@@ -82,9 +83,11 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 本地助手挂载变更在已有会话下一次 Turn 前生效。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
 
+`skill_search({ query, limit? })` 由共享 Runtime 提供，只搜索当前 `runtime.skills` 的绑定 ID、名称、说明及本地化说明，不扫描插件或技能目录。`query` 必填，空字符串或 `list/all/skills/技能/技能清单` 列举技能；`limit` 为 1–100，搜索默认 20 条、列举默认 100 条。结果为 `skills[{id,name,description}]`、`total/shown/truncated`；将结果中的精确 `id` 交给 `skill({ id })` 加载。搜索不读取正文、不加载指引，也不产生 `skill_load` 活动；发现技能应使用该入口，不通过文件工具遍历目录。
+
 `skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`webfetch`、`job_output`、`job_kill`。命令只暴露一个 `bash` ID，实际 Shell 由平台和配置决定。
 
-这十个工具、按绑定出现的 `skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。
+这十个工具、按绑定出现的 `skill_search`、`skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。`tool_search` 搜索按需曝光的工具，`skill_search` 搜索已挂载的技能，两者不互相替代。
 
 `webfetch` 适配 Amio/OpenCode 的抓取和格式转换逻辑，不引入其 Effect 运行框架。它接受 HTTP(S) URL，支持 `text/markdown/html`，默认 Markdown；网络请求及响应读取默认超时 30 秒、最大 120 秒，响应上限 5 MiB。抓取前通过 `context.ask()` 请求 `webfetch` 权限，Turn 取消会中断传输和响应读取。模型结果最多预览 2000 行或 50 KiB，完整长结果保存到临时文件供 `read` 续读。图片和其他二进制文件仍与 Amio 一样拒绝。源码及新增转换依赖的许可随 Sidecar 的 `.LICENSES.txt` 发行。
 
@@ -247,7 +250,7 @@ Astron 的 Assistant 是产品资产；其 OpenCode adapter 把助手配置转�
 | --- | --- | --- |
 | Plugin / Skill 资产 | 导入、安装、更新、卸载、版本、冲突和复用；维护实际文件 | 使用宿主确定的技能来源绑定，不复制或删除 Astron 的资产 |
 | Assistant | 身份、提示词、插件挂载、启停和产品配置存储；启动及配置变化时同步注册表 | 持久化宿主 runtime，以注册版本组装 Agent，执行工具和 Skill 可用范围 |
-| Skill 加载 | 决定技能身份、最终来源及助手可用集合 | 建立运行索引，提供 `skill`，按需读取正文和资源路径，记录实际加载的来源 |
+| Skill 发现与加载 | 决定技能身份、最终来源及助手可用集合 | 建立运行索引，以 `skill_search` 搜索绑定，再由 `skill` 按需读取正文和资源路径，记录实际加载的来源 |
 | Skill 来源 | 提供 Skill 与 Plugin 绑定，定义产品统计口径并汇总 | 记录实际加载的来源、调用 ID 和结果，保留历史绑定快照 |
 | 模型 | 提供商设置、模型选择和凭据管理 | 解析下发的调用配置，通过 `packages/ai` 调用模型 |
 | 环境与权限 | 工作区、依赖、环境变量、产品权限策略及审批决定 | 按配置执行文件/命令工具；实现权限检查、等待和取消的运行机制 |
@@ -327,7 +330,7 @@ Astron 提供适配后的工具文件
   → content 交给模型，details 随工具事件及最终消息返回并保存
 ```
 
-每个 `.ts/.js/.mjs` 文件默认导出一个同步创建函数，返回一个 `AgentTool`；文件名（不含扩展名）就是工具 ID，必须与 tool.name 一致。只扫描目录第一层，跳过 `_` 开头的辅助文件及 `.d.ts`；重复 ID、覆盖内置工具或 `skill` 会报错。默认目录不存在时视为没有外部工具；显式指定不存在的目录会阻止启动。
+每个 `.ts/.js/.mjs` 文件默认导出一个同步创建函数，返回一个 `AgentTool`；文件名（不含扩展名）就是工具 ID，必须与 tool.name 一致。只扫描目录第一层，跳过 `_` 开头的辅助文件及 `.d.ts`；重复 ID、覆盖内置工具或保留名称 `skill_search/skill/task/tool_search` 会报错。默认目录不存在时视为没有外部工具；显式指定不存在的目录会阻止启动。
 
 工具代码是宿主提供的可信代码，与 Core 同进程执行。加载模块会执行顶层代码；创建函数只应组装工具，不应发起业务请求或启动后台任务。`Type` 由 Pie 提供，类型导入会被 Node 擦除，示例复制到仓库外仍可运行。其他运行依赖按工具文件位置通过 Node 解析，由宿主准备。加载采用 Node 原生同步模块机制，TS 仅支持可擦除语法，模块及依赖不能有顶层 await。
 

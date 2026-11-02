@@ -82,7 +82,7 @@ await runtime.close();
 
 - `models`：`current` 返回 `models` 注册对象、默认选择 `selected` 与可选的 `headers(model)` 解析函数。凭据、端点与 header 解析由宿主限定作用域，不要求本地 `models.json` 结构。创建 Agent 时读取快照；同一模型 ID 的端点或凭据变化，应更新宿主的有效 `assistantRevision`，使下一个 Turn 重建 Agent，不改写在途配置。不得靠改写 `process.env` 切租户。
 - `tools`：提供 `catalog` 和 `create(context, enabledToolIds)`。返回现有 `AgentTool` 实现，可用 `exposure: "deferred"` 参与工具发现；`execute(toolCallId, params, signal, onUpdate)` 内调用 tools-sdk，通过 `context.ask` 请求确认。Runtime 不注册本机工具或扫描 `PI_TOOLS_DIR`；参数校验、结果与进度继续走原 Loop。
-- `skills`：提供技能工具装配与工具后处理。尚未实现云端资源读取时，应明确拒绝非空技能配置，而不是把云端路径当成本机目录；读取本地目录的实现在 Local。
+- `skills`：提供技能加载工具装配与工具后处理。共享 Runtime 自行提供 `skill_search`，只查询当前 `runtime.skills` 的绑定元数据，不读取技能文件或调用宿主加载器；具体搜索契约见 [技能发现与加载](agent-development.md#plugin-与-skill)。尚未实现云端资源读取时，应明确拒绝非空技能配置，而不是把云端路径当成本机目录；读取本地目录的实现在 Local。
 - `mcp`：提供当前执行范围的配置、状态、连接取得与关闭能力。未实现云端 MCP 时，应明确拒绝非空配置；可能启动本机进程的连接实现在 Local。
 - `recordModelRequest`：提供宿主自己的请求记录策略，可以显式不记录。完整请求写文件的实现在 Local；云端宿主自行处理敏感数据、保存权限和保留时间。
 

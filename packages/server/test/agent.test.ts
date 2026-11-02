@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { contentText } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "@pie/local/agent";
 import { hydrateHostRuntime } from "@pie/runtime/config";
 import type { HostRuntimeDefinition, RuntimeConfig, ToolActivity } from "@pie/runtime/protocol";
@@ -202,9 +203,16 @@ test("the skill tool still loads complete instructions and preserves skill prove
 	const agent = factory.create("faux", "skill-load", runtime, undefined, [], (activity) => activities.push(activity));
 	assert.equal(agent.state.systemPrompt.includes(body), false);
 	assert.equal(agent.state.systemPrompt.includes("Long description retained"), false);
+	const search = agent.state.tools.find((tool) => tool.name === "skill_search");
+	assert(search);
+	const found: { skills: { id: string }[] } = JSON.parse(
+		contentText((await search.execute("discover-skill", { query: "full-skill" })).content),
+	);
+	assert.equal(activities.length, 0);
+	assert.equal(found.skills[0]?.id, "plugin:full-skill");
 	const skill = agent.state.tools.find((tool) => tool.name === "skill");
 	assert(skill);
-	const result = await skill.execute("load-complete-skill", { id: "plugin:full-skill" });
+	const result = await skill.execute("load-complete-skill", { id: found.skills[0].id });
 	assert(result.content.some((block) => block.type === "text" && block.text.includes(body)));
 	assert.equal(activities.at(-1)?.status, "succeeded");
 	assert.deepEqual(activities.at(-1)?.binding, runtime.skills[0]);

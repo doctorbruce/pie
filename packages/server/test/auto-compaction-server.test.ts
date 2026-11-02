@@ -9,13 +9,20 @@ import type { Assistant, SessionEvent, SessionSnapshot } from "@pie/runtime/prot
 import { createCoreServer } from "../src/server.ts";
 
 type ModelRequest = { summary: boolean; body: string };
-type Reply = { error?: string; status?: number; hold?: boolean; finishReason?: string };
+type Reply = {
+	error?: string;
+	status?: number;
+	hold?: boolean;
+	finishReason?: string;
+	tool?: { name: string; arguments: Record<string, unknown> };
+};
 
 async function start(
 	context: TestContext,
 	handle: (request: ModelRequest, requests: ModelRequest[]) => Reply,
 	thresholdTokens = 300,
-	hostThresholdTokens?: number,
+	hostThresholdTokens?: number | null,
+	options: { retry?: { maxRetries: number; baseDelayMs: number }; toolIds?: string[] } = {},
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-auto-compaction-"));
 	const requests: ModelRequest[] = [];
@@ -27,9 +34,9 @@ async function start(
 			const call = { summary: body.includes("You are a context summarization assistant"), body };
 			requests.push(call);
 			const reply = handle(call, requests);
-			if (reply.error) {
+			if (reply.error || (reply.status !== undefined && reply.status >= 400)) {
 				response.writeHead(reply.status ?? 400, { "content-type": "application/json" });
-				response.end(JSON.stringify({ error: { message: reply.error, type: "test_error" } }));
+				response.end(reply.error ? JSON.stringify({ error: { message: reply.error, type: "test_error" } }) : "");
 				return;
 			}
 			response.writeHead(200, { "content-type": "text/event-stream" });
@@ -45,8 +52,22 @@ async function start(
 					choices: [
 						{
 							index: 0,
-							delta: { content: call.summary ? "checkpoint" : "reply" },
-							finish_reason: reply.finishReason ?? "stop",
+							delta: reply.tool
+								? {
+										tool_calls: [
+											{
+												index: 0,
+												id: "read-once",
+												type: "function",
+												function: {
+													name: reply.tool.name,
+													arguments: JSON.stringify(reply.tool.arguments),
+												},
+											},
+										],
+									}
+								: { content: call.summary ? "checkpoint" : "reply" },
+							finish_reason: reply.finishReason ?? (reply.tool ? "tool_calls" : "stop"),
 						},
 					],
 				})}\n\ndata: [DONE]\n\n`,
@@ -74,7 +95,7 @@ async function start(
 		join(directory, "settings.json"),
 		JSON.stringify({
 			compaction: { thresholdTokens, reserveTokens: 1000, keepRecentTokens: 150 },
-			retry: { maxRetries: 2, baseDelayMs: 1 },
+			retry: options.retry ?? { maxRetries: 2, baseDelayMs: 1 },
 		}),
 	);
 	const core = createCoreServer({ PI_DATA_DIR: directory });
@@ -109,7 +130,7 @@ async function start(
 						assistantRevision: String(threshold ?? "default"),
 						runtime: {
 							systemPrompt: "",
-							toolIds: [],
+							toolIds: options.toolIds ?? [],
 							skills: [],
 							subagents: [],
 							compaction: threshold === undefined ? {} : { thresholdTokens: threshold },
@@ -122,15 +143,19 @@ async function start(
 	}
 	let assistantId: string;
 	if (hostThresholdTokens !== undefined) {
-		await configureHost(hostThresholdTokens);
+		await configureHost(hostThresholdTokens ?? undefined);
 		assistantId = "host-compaction";
 		await writeFile(join(directory, "settings.json"), "not valid JSON");
 	} else {
-		const assistantResponse = await post("/assistants", { name: "Compaction", systemPrompt: "", toolIds: [] });
+		const assistantResponse = await post("/assistants", {
+			name: "Compaction",
+			systemPrompt: "",
+			toolIds: options.toolIds ?? [],
+		});
 		assert.equal(assistantResponse.status, 201);
 		assistantId = ((await assistantResponse.json()) as Assistant).id;
 	}
-	const sessionResponse = await post("/sessions", { mode: "real", assistantId });
+	const sessionResponse = await post("/sessions", { mode: "real", assistantId, workspacePath: directory });
 	assert.equal(sessionResponse.status, 201);
 	const session = (await sessionResponse.json()) as SessionSnapshot;
 	const events: SessionEvent[] = [];
@@ -170,8 +195,91 @@ async function start(
 		assert.equal((await post(`/sessions/${session.id}/turns`, body)).status, 202);
 		return settled();
 	}
-	return { requests, events, post, session, snapshot, settled, submit, configureHost };
+	return { requests, events, post, session, snapshot, settled, submit, configureHost, directory };
 }
+
+test("ordinary model requests recover from an empty-body 503, including host compaction defaults", async (context) => {
+	for (const host of [false, true]) {
+		await context.test(host ? "host compaction: {}" : "local retry settings", async (child) => {
+			const server = await start(
+				child,
+				(_request, requests) => (requests.length === 1 ? { status: 503 } : {}),
+				9000,
+				host ? null : undefined,
+			);
+			const snapshot = await server.submit({ text: "Continue after the provider recovers." });
+			assert.equal(snapshot.turn?.status, "completed", snapshot.turn?.error);
+			assert.equal(server.requests.length, 2);
+			assert.equal(snapshot.messages.filter((message) => message.role === "assistant").length, 1);
+			assert(!snapshot.messages.some((message) => message.role === "assistant" && message.stopReason === "error"));
+		});
+	}
+});
+
+test("ordinary model retries exhaust the configured budget before failing", async (context) => {
+	const server = await start(context, () => ({ status: 503 }), 9000);
+	const snapshot = await server.submit({ text: "Provider remains unavailable." });
+	assert.equal(snapshot.turn?.status, "failed");
+	assert.match(snapshot.turn?.error ?? "", /503/);
+	assert.equal(server.requests.length, 3);
+	assert.equal(snapshot.messages.filter((message) => message.role === "assistant").length, 1);
+});
+
+test("cancelling ordinary model retry backoff settles the turn without another provider request", async (context) => {
+	let receivedFailure = () => {};
+	const firstFailure = new Promise<void>((resolve) => {
+		receivedFailure = resolve;
+	});
+	const server = await start(
+		context,
+		() => {
+			receivedFailure();
+			return { status: 503 };
+		},
+		9000,
+		undefined,
+		{ retry: { maxRetries: 2, baseDelayMs: 10000 } },
+	);
+	assert.equal(
+		(await server.post(`/sessions/${server.session.id}/turns`, { text: "Cancel while retrying." })).status,
+		202,
+	);
+	await firstFailure;
+	await delay(25);
+	const running = await server.snapshot();
+	assert.equal(running.turn?.status, "running");
+	assert.equal((await server.post(`/sessions/${server.session.id}/cancel`, { turnId: running.turn?.id })).status, 202);
+	const snapshot = await server.settled();
+	assert.equal(snapshot.turn?.status, "cancelled");
+	assert.equal(server.requests.length, 1);
+});
+
+test("retrying a model response after a completed tool preserves its result and does not replay the tool", async (context) => {
+	const server = await start(
+		context,
+		(_request, requests) => {
+			if (requests.length === 1)
+				return {
+					tool: { name: "read", arguments: { path: "tool-result.txt", description: "Read the saved result" } },
+				};
+			return requests.length === 2 ? { status: 503 } : {};
+		},
+		9000,
+		undefined,
+		{ toolIds: ["read"] },
+	);
+	await writeFile(join(server.directory, "tool-result.txt"), "completed-tool-result");
+	const snapshot = await server.submit({ text: "Read the saved result, then finish." });
+	assert.equal(snapshot.turn?.status, "completed", snapshot.turn?.error);
+	assert.equal(server.requests.length, 3);
+	const results = snapshot.messages.filter((message) => message.role === "toolResult");
+	assert.equal(results.length, 1);
+	assert.equal(results[0].isError, false);
+	assert.match(JSON.stringify(results[0].content), /completed-tool-result/);
+	assert.equal(server.events.filter((event) => event.event?.type === "tool_execution_start").length, 1);
+	assert.match(server.requests[1].body, /completed-tool-result/);
+	assert.equal(server.requests[1].body, server.requests[2].body);
+});
 
 test("host compaction thresholds hot-update without reading a local settings file", async (context) => {
 	const server = await start(context, () => ({}), 300, 8000);

@@ -54,6 +54,8 @@
 
 ### Fixed
 
+- Retry transient model failures before forwarding response content or tool events, including empty-body HTTP 503s; use five retries with interruptible, jittered exponential backoff capped at 30 seconds, without replaying completed tools or layering SDK retries.
+
 - Pin published execution, Turn and history leaf to their revision, including asynchronous full snapshots; publish cross-session storage failure and preserve revision watermarks across eviction.
 - Share availability decisions across all four control entries while distinguishing new operations, idempotent retries, recovery preflight and best-effort cancellation.
 

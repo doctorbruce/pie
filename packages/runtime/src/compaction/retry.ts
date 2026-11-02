@@ -72,13 +72,15 @@ export interface RetryPolicy {
 	baseDelayMs: number;
 	maxAgentDelayMs?: number;
 }
-export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 60000;
+export const DEFAULT_MAX_AGENT_RETRY_DELAY_MS = 30000;
 export function retryDelayMs(policy: Pick<RetryPolicy, "baseDelayMs" | "maxAgentDelayMs">, attempt: number): number {
 	const delay = policy.baseDelayMs * 2 ** Math.max(0, attempt - 1);
-	const safeDelay = Number.isSafeInteger(delay) ? delay : Number.MAX_SAFE_INTEGER;
+	const jittered = Math.floor(delay * (1 + Math.random() * 0.25));
+	const safeDelay = Number.isSafeInteger(jittered) ? jittered : Number.MAX_SAFE_INTEGER;
 	return Math.min(safeDelay, policy.maxAgentDelayMs ?? DEFAULT_MAX_AGENT_RETRY_DELAY_MS);
 }
 export interface RetryCallbacks {
+	shouldRetry?: (response: AssistantMessage) => boolean;
 	onRetryScheduled?: (
 		attempt: number,
 		maxAttempts: number,
@@ -125,7 +127,11 @@ export async function retryAssistantCall(
 			if (lastRetry) await callbacks?.onRetryFinished?.(true, lastRetry.attempt);
 			return response;
 		}
-		if (attempt >= maxAttempts || !isRetryableAssistantError(response)) {
+		if (
+			attempt >= maxAttempts ||
+			!isRetryableAssistantError(response) ||
+			callbacks?.shouldRetry?.(response) === false
+		) {
 			if (lastRetry) await callbacks?.onRetryFinished?.(false, lastRetry.attempt, response.errorMessage);
 			return response;
 		}

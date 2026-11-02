@@ -56,9 +56,9 @@ export function resolveCompactionSettings(
 		},
 		retry: {
 			enabled: boolean(retry.enabled, true, "retry.enabled"),
-			maxRetries: integer(retry.maxRetries, 3, "retry.maxRetries"),
+			maxRetries: integer(retry.maxRetries, 5, "retry.maxRetries"),
 			baseDelayMs: integer(retry.baseDelayMs, 2000, "retry.baseDelayMs"),
-			maxAgentDelayMs: integer(retry.maxAgentDelayMs, 60000, "retry.maxAgentDelayMs"),
+			maxAgentDelayMs: integer(retry.maxAgentDelayMs, 30000, "retry.maxAgentDelayMs"),
 		},
 	};
 }

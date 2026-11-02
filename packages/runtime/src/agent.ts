@@ -20,6 +20,7 @@ import { type CompactionEvent, createCompactionStream, createCompactionTransform
 import { resolveCompactionSettings } from "./compaction-settings.ts";
 import { BackgroundJobs } from "./jobs.ts";
 import { isMcpError } from "./mcp.ts";
+import { createRetryStream } from "./model-retry.ts";
 import type {
 	ContextCompaction,
 	InteractionRequest,
@@ -306,9 +307,10 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 					headers: { ...options?.headers, ...modelHeaders },
 					onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
 				});
+			const retryStream = createRetryStream(realStream, automation?.retry);
 			const compactStream = compactContext
-				? createCompactionStream(realStream, compactContext, { enabled: automation?.compaction.enabled })
-				: realStream;
+				? createCompactionStream(retryStream, compactContext, { enabled: automation?.compaction.enabled })
+				: retryStream;
 			const sessionAgent = new Agent({
 				sessionId,
 				afterToolCall: async (context) => {

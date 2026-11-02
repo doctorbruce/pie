@@ -56,16 +56,16 @@
   },
   "retry": {
     "enabled": true,
-    "maxRetries": 3,
+    "maxRetries": 5,
     "baseDelayMs": 2000,
-    "maxAgentDelayMs": 60000
+    "maxAgentDelayMs": 30000
   }
 }
 ```
 
 键为 `provider/modelId`，modelId 可包含斜杠。默认 reserveTokens 为 16,384，较小窗口自动限制为四分之一；默认 keepRecentTokens 为 20,000，且不超过安全预算的一半。thresholdTokens 不填写时取 `min(floor(contextWindow * 0.9), contextWindow - reserveTokens)`。显式 reserveTokens 必须小于窗口，阈值必须为正，数字配置必须是非负安全整数。
 
-`compaction.enabled=false` 同时关闭阈值压缩和 Provider 超限恢复。`retry` 控制摘要调用，不改变普通模型 SDK 的重试配置。
+`compaction.enabled=false` 同时关闭阈值压缩和 Provider 超限恢复。`retry` 同时控制摘要与普通模型请求的 Runtime 重试，SDK 重试保持关闭。默认最多重试 5 次，从 2 秒起指数退避，增加最多 25% 抖动，30 秒封顶；调度不使用 Retry-After。普通请求仅在尚未转发内容或工具事件、响应无有效内容时重试，既有工具结果保留，不重放已输出的模型流。宿主提供 `runtime.compaction` 时继续使用内置重试默认值，不读取本地 `settings.json`。边界与验证见 [普通模型请求重试](specs/model-request-retry.md)。
 
 ## 事件与验证
 

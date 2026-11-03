@@ -11,6 +11,7 @@ import type {
 	ExecutionStreamEvent,
 	GlobalSessionEvent,
 	HostRuntimeDefinition,
+	InteractionReply,
 	SessionEvent,
 } from "@pie/runtime/protocol";
 import { historyMessageId } from "@pie/runtime/session-tree";
@@ -311,7 +312,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (req.method === "POST" && action === "interactions")
 				return json(
 					202,
-					await runtime.replyInteraction(id, interactionId, (await readJson(req)) as { approved: boolean }),
+					await runtime.replyInteraction(id, interactionId, (await readJson(req)) as InteractionReply),
 				);
 			if (req.method === "POST" && action === "turns")
 				return json(202, await runtime.submitTurn(id, (await readJson(req, TURN_REQUEST_LIMIT)) as TurnInput));

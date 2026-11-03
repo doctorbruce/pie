@@ -4,6 +4,7 @@ import type {
 	ActivityRecord,
 	Assistant,
 	ContextCompaction,
+	PermissionGrant,
 	RuntimeConfig,
 	SessionSummary,
 	TransferMessage,
@@ -29,6 +30,7 @@ export type SavedSession = SessionSummary & {
 	messages: AgentMessage[];
 	tree?: MessageTree;
 	runtime?: RuntimeConfig;
+	permissionGrants?: PermissionGrant[];
 	activities?: ActivityRecord[];
 	compaction?: ContextCompaction;
 	turnCheckpoint?: TurnCheckpoint;

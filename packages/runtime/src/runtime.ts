@@ -20,7 +20,9 @@ import type {
 	GlobalSessionEvent,
 	HostRuntimeDefinition,
 	ImagePart,
+	InteractionReply,
 	InteractionRequest,
+	PermissionGrant,
 	SessionAction,
 	SessionActions,
 	SessionEvent,
@@ -65,6 +67,40 @@ export class RuntimeError extends Error {
 }
 
 const MAX_TURN_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_PERMISSION_PATTERNS = 128;
+const MAX_PERMISSION_PATTERN_LENGTH = 16384;
+const MAX_SAVED_PERMISSION_PATTERNS = 1024;
+
+function interactionPermission(request: Omit<InteractionRequest, "id">): PermissionGrant | undefined {
+	const value: unknown = request.remember;
+	if (value === undefined) return undefined;
+	if (!value || typeof value !== "object" || Array.isArray(value))
+		throw new RuntimeError(400, "remember 需要有效权限范围");
+	const grant = value as Record<string, unknown>;
+	if (
+		(grant.permission !== "bash" && grant.permission !== "external_directory") ||
+		request.metadata?.permission !== grant.permission ||
+		!Array.isArray(grant.patterns) ||
+		grant.patterns.length === 0 ||
+		grant.patterns.length > MAX_PERMISSION_PATTERNS ||
+		grant.patterns.some(
+			(pattern) =>
+				typeof pattern !== "string" ||
+				!pattern.trim() ||
+				pattern.length > MAX_PERMISSION_PATTERN_LENGTH ||
+				pattern.includes("\0"),
+		)
+	)
+		throw new RuntimeError(400, "remember 需要支持的权限及最多 128 项有效范围");
+	return { permission: grant.permission, patterns: [...new Set(grant.patterns as string[])] };
+}
+
+function hasPermissionGrant(session: SavedSession, grant: PermissionGrant): boolean {
+	const patterns = new Set(
+		session.permissionGrants?.flatMap((saved) => (saved.permission === grant.permission ? saved.patterns : [])),
+	);
+	return grant.patterns.every((pattern) => patterns.has(pattern));
+}
 
 function optionalRequestId(body: Record<string, unknown>): string | undefined {
 	if (body.requestId === undefined) return undefined;
@@ -628,6 +664,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		replaceHistory = false,
 		update?: ReturnType<typeof historyUpdate>,
 		toolExecutions: readonly ToolExecutionRecord[] = [],
+		permissionGrants?: PermissionGrant[],
 	) {
 		const pending = (session.writePromise ?? Promise.resolve()).then(async () => {
 			assertStorageAvailable();
@@ -647,6 +684,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 						messages,
 						tree,
 						runtime: session.runtime,
+						permissionGrants: permissionGrants ?? session.permissionGrants,
 						activities: session.activities,
 						compaction: session.compaction,
 						turnCheckpoint: session.turnCheckpoint,
@@ -660,6 +698,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				storageFailed = true;
 				throw new RuntimeError(503, error instanceof Error ? error.message : String(error), "storage_unavailable");
 			}
+			// Tools can ask while this write is pending; expose grants only after the durable save succeeds.
+			if (permissionGrants) session.permissionGrants = permissionGrants;
 			session.messages = [...messages];
 			session.tree = { nodes: [], leafId: tree.leafId };
 			session.transferBase = undefined;
@@ -768,13 +808,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await settleInteraction(id, false, error);
 		}
 	}
-	function requestInteraction(
+	async function requestInteraction(
 		session: Session,
 		request: Omit<InteractionRequest, "id">,
 		signal?: AbortSignal,
 	): Promise<void> {
+		signal?.throwIfAborted();
 		const owner = session.parentSessionId ? sessions.get(session.parentSessionId) : session;
-		if (!owner?.turn || owner.turn.status !== "running") return Promise.reject(new Error("会话当前不可交互"));
+		if (!owner?.turn || owner.turn.status !== "running") throw new Error("会话当前不可交互");
 		if (
 			request.type !== "confirmation" ||
 			typeof request.title !== "string" ||
@@ -782,8 +823,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 			!request.title.trim() ||
 			!request.message.trim()
 		)
-			return Promise.reject(new Error("交互请求无效"));
-		const interaction: InteractionRequest = { ...request, id: randomUUID() };
+			throw new Error("交互请求无效");
+		const remember = interactionPermission(request);
+		assertStorageAvailable();
+		if (remember && hasPermissionGrant(session, remember)) return;
+		const interaction: InteractionRequest = { ...request, remember, id: randomUUID() };
 		return new Promise<void>((resolve, reject) => {
 			const pending: PendingInteraction = {
 				request: interaction,
@@ -1561,6 +1605,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			assistant: session.assistant,
 			revision: session.revision,
 			runtime: session.runtime,
+			permissionGrants: session.permissionGrants,
 			activities: session.activities,
 			compaction: session.compaction,
 			turnCheckpoint: session.turnCheckpoint,
@@ -2049,15 +2094,55 @@ async function initializeRuntime(options: RuntimeOptions) {
 				} satisfies SteerReceipt;
 			}, false);
 		},
-		replyInteraction(sessionId: string, interactionId: string, body: { approved: boolean }) {
+		replyInteraction(sessionId: string, interactionId: string, body: InteractionReply) {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
 				if (!interactionId) throw new RuntimeError(404, "交互不存在");
 
-				if (typeof body.approved !== "boolean") throw new RuntimeError(400, "approved 必须为布尔值");
+				if (
+					!body ||
+					typeof body.approved !== "boolean" ||
+					(body.remember !== undefined && typeof body.remember !== "boolean") ||
+					(body.remember === true && !body.approved)
+				)
+					throw new RuntimeError(400, "approved、remember 必须为布尔值，且仅允许记忆同意的操作");
 				const pending = pendingInteractions.get(interactionId);
 				if (!pending || pending.sessionId !== session.id) throw new RuntimeError(404, "交互不存在");
 				if (pending.turnId !== session.turn?.id) throw new RuntimeError(409, "交互已失效");
+				if (body.remember) {
+					pending.signal?.throwIfAborted();
+					const grant = interactionPermission(pending.request);
+					if (!grant) throw new RuntimeError(400, "此操作不支持记忆授权");
+					const execution = await requireSession(pending.executionSessionId);
+					const existing = execution.permissionGrants ?? [];
+					const patterns = grant.patterns.filter(
+						(pattern) => !hasPermissionGrant(execution, { permission: grant.permission, patterns: [pattern] }),
+					);
+					if (patterns.length) {
+						if (
+							existing.reduce((count, saved) => count + saved.patterns.length, 0) + patterns.length >
+							MAX_SAVED_PERMISSION_PATTERNS
+						)
+							throw new RuntimeError(400, "会话记忆授权范围不能超过 1024 项");
+						await persist(
+							execution,
+							false,
+							undefined,
+							[],
+							[...existing, { permission: grant.permission, patterns }],
+						);
+					}
+					for (const [id, candidate] of pendingInteractions) {
+						if (
+							candidate.executionSessionId === execution.id &&
+							candidate.turnId === sessions.get(candidate.sessionId)?.turn?.id &&
+							!candidate.signal?.aborted &&
+							candidate.request.remember &&
+							hasPermissionGrant(execution, candidate.request.remember)
+						)
+							await settleInteraction(id, true);
+					}
+				}
 				await settleInteraction(
 					interactionId,
 					body.approved,

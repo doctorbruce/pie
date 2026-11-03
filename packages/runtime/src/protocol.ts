@@ -59,6 +59,7 @@ export type SkillBinding = {
 };
 export type PermissionDecision = "allow" | "ask";
 export type PermissionPolicy = Record<string, PermissionDecision>;
+export type PermissionGrant = { permission: "bash" | "external_directory"; patterns: string[] };
 export type McpServerConfig =
 	| {
 			type: "local";
@@ -248,7 +249,9 @@ export type InteractionRequest = {
 	title: string;
 	message: string;
 	metadata?: Record<string, unknown>;
+	remember?: PermissionGrant;
 };
+export type InteractionReply = { approved: boolean; remember?: boolean };
 export type SessionExecution = {
 	modelStreaming: boolean;
 	activeTools: { toolCallId: string; toolName: string }[];

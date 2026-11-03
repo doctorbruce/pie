@@ -96,6 +96,14 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 
 目前 Skill 绑定仍采用目录字段；对象存储引用、Worker 路径映射和跨环境资源协议尚未实现。这是后续接入工作，不要用虚构路径绕过它。
 
+## 交互授权记忆
+
+原生权限请求可携带 `InteractionRequest.remember: { permission: "bash" | "external_directory", patterns: string[] }`。范围由可信工具实现生成，Runtime 校验它与 `metadata.permission` 一致；宿主只对带有效范围的请求展示“始终允许”。`replyInteraction` 的 `InteractionReply` 为 `{ approved: boolean, remember?: boolean }`：允许一次只传 `approved: true`，始终允许另传 `remember: true`，拒绝传 `approved: false`。拒绝时要求记忆、或为无范围请求要求记忆，均返回 400；凭据、邮件等业务确认不提供此范围。
+
+`patterns` 是精确匹配的内部标识，不是通配符。Local 按命令入口和工作目录生成类别，包括 Git 子命令、包管理器的 `run` 脚本，以及 Python / Node 脚本；同一入口可复用不同参数，换脚本、子命令或工作目录重新确认。复杂 Shell 语法和未识别的命令使用完整命令匹配。工作区外访问保留准确路径与读写操作；命令参数路径另绑定命令类别，不把单个路径授权扩大到父目录。
+
+授权属于实际执行工具的 Session，跨 Turn、Agent 回收和服务重启保留；即使子会话的交互经父会话接口回答，也只记在该子会话。新会话、Fork 和父子会话之间均不继承授权。已有宿主 `permissions` 决策仍独立生效。
+
 ## 存储契约
 
 `RuntimeStore` 只负责运行会话，不要求服务端实现本地助手管理或插件市场。
@@ -104,6 +112,7 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 - `createRuntime` 不查询会话；首次访问才读取目标元信息。适配实现须在目标装载前完成归属核对与遗留执行修复；指定会话仍为 `running` 时该操作返回 409，不阻塞其他会话，也不自动重放。本地 SQLite 通过持久恢复标记和索引修复遗留 Turn / Activity；首次升级会迁移旧数据并创建索引，此后启动不保留全量元信息数组。
 - Runtime 的 `listSessions` 默认每页 50 条，接受 `limit/cursor`，返回 `nextCursor`；过滤使用 `assistantId/includeSubagents`。按 ID 装载在实例内合并，列表与执行缓存独立。更新会话会改变分页位置，分页不是跨写入的固定快照；刷新列表时从第一页重新读取。`listSessionMetadata()` 是显式全范围管理扫描，供本地配置引用检查使用，不用于云端常规查询或启动。
 - `saveSession` 的 `tree.nodes` 是待提交的新节点，`tree.leafId` 是提交后的分支叶子；不要把 `messages` 再保存为第二份完整正文。消息节点、叶子、revision、压缩状态与必要运行状态应原子提交；导入替换同样必须原子完成。必须保留可选 `turnCheckpoint`，并在终态提交时允许清除，不能在元信息映射中丢弃该字段。
+- `SavedSession.permissionGrants?: PermissionGrant[]` 保存当前执行会话已批准的精确范围；`saveSession/readSession` 及元信息映射必须保留它，批准记忆先保存成功才放行工具。本地 SQLite 复用会话 JSON 元信息，不新增表或列；自定义 Store 不得因字段筛选丢失授权。
 - 保存失败必须 reject；运行时不会启动尚未成功提交的用户回合，并停止接受后续写操作。云端事务和并发冲突检测由适配实现负责；当前骨架不提供多实例抢占或恰好一次执行保证。
 - 父指针决定消息路径，seq 用于排序与分页；保留稳定节点 ID、历史分支、导入原文、图片和工具结果。`readHistory` 从选定叶子向上读取 `limit + 1` 个候选节点后停止，`readWorkingPath` 只遍历到 `firstKeptEntryId` 与可选 `turnStartEntryId`；读取工作窗口不能退回全量加载。显式的 `readPath`、`readTree`、导出仍是完整读取。详细数据语义沿用 [历史存储 SPEC](specs/history-storage.md)。
 - `readTurnPath(id, inputEntryId, leafId?)` 从指定叶子沿父指针读取到 Turn 输入即停止，不先遍历全部祖先再过滤；首节点作为局部根节点返回，保留原 ID 和 seq，不改写持久父指针。输入缺失或不在选定分支时返回 `{ leafId, nodes: [] }`，保留选定叶子；叶子缺失及数据库读取错误仍 reject。共享判定将无效路径判为不可恢复；SQLite 失败修复可回读 `readPath`，显式恢复则拒绝执行，不自动切换分支。该接口不限制当前 Turn 本身的长度或字节数。

@@ -139,6 +139,63 @@ test("managed directories allow native file access and shell paths without grant
 	assert.equal(typeof requested[0].risk, "string");
 });
 
+test("PowerShell invocation checks data paths without treating executables as external files", async (context) => {
+	const root = await mkdtemp(join(tmpdir(), "pie-invocation-permissions-"));
+	context.after(() => rm(root, { recursive: true, force: true }));
+	const directory = join(root, "workspace");
+	const managed = join(root, "managed");
+	const report = join(directory, "report.docx");
+	const helper = join(managed, "helper.py");
+	const outside = join(root, "private", "report.docx");
+	assert(!process.execPath.startsWith(root));
+	const jobs = new BackgroundJobs();
+	context.after(() => jobs.close());
+	const requested: Record<string, unknown>[] = [];
+	const runtime: ToolRuntime = {
+		sessionId: "invocation-permissions",
+		directory,
+		allowedDirectories: [managed],
+		jobs,
+		ask: applyPermissionPolicy({ "*": "allow", external_directory: "ask", bash: "ask" }, async (request) => {
+			requested.push(request.metadata ?? {});
+			throw new Error(`denied:${request.metadata?.permission}`);
+		}),
+	};
+	const shell = systemTools({}, directory, runtime).find((tool) => tool.name === "bash");
+	assert(shell);
+	for (const command of [
+		`"${process.execPath}" "${report}"`,
+		`& "${process.execPath}" "${report}"`,
+		`$env:PYTHONIOENCODING="utf-8"\r\n& "${process.execPath}" "${helper}"`,
+		`& "${process.execPath}" "${report}" | & "${process.execPath}" "${helper}"`,
+	]) {
+		requested.length = 0;
+		await assert.rejects(shell.execute("allowed", { command }), /denied:bash/, command);
+		assert.deepEqual(
+			requested.map((request) => request.permission),
+			["bash"],
+		);
+	}
+	for (const command of [
+		`& "${process.execPath}" "${outside}"`,
+		`& "${process.execPath}" \`\n "${outside}"`,
+		`& "${process.execPath}" "${report}" | & "${process.execPath}" "${outside}"`,
+		`& "${process.execPath}" --% & "${outside}"`,
+		`& "${process.execPath}" --% text ; & "${outside}"`,
+		`& "${process.execPath}" "&" "${outside}"`,
+	]) {
+		requested.length = 0;
+		await assert.rejects(shell.execute("outside", { command }), /denied:external_directory/, command);
+		assert.deepEqual(requested[0].paths, [outside]);
+	}
+	requested.length = 0;
+	await assert.rejects(
+		shell.execute("outside-cwd", { command: `& "${process.execPath}" "${report}"`, workdir: root }),
+		/denied:external_directory/,
+	);
+	assert.equal(requested[0].workdir, root);
+});
+
 test("read, edit, write and grep expose optional user-visible activity descriptions", () => {
 	const tools = new Map(systemTools({}).map((tool) => [tool.name, tool]));
 	const cases = [

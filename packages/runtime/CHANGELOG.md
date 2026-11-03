@@ -20,6 +20,8 @@
 
 ### Added
 
+- Add opt-in remembered native `bash` and `external_directory` approvals through `InteractionReply.remember`; persist exact permission scopes in the execution session across turns and restarts without inheriting them into new, forked or related sessions.
+
 - Expose `listBackgroundJobs` with instance-scoped, directly owned Shell/Task summaries without history, output or arbitrary details; distinguish Turn settlement from background work and reject parent deletion while a child still owns active local jobs.
 
 - Add native `skill_search` for searching or listing the current runtime's mounted skill bindings without reading files or recording skill loads; return exact IDs for `skill`, honor per-turn availability, and guide discovery before filesystem scans.

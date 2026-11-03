@@ -47,10 +47,12 @@
 | `POST /sessions/:id/steer` | `{ turnId, text?, images?, displayText?, requestId? }` | `202` + `SteerReceipt`，追加到当前运行回合的进程队列；turnId 必须匹配，取消期间返回 409 |
 | `POST /sessions/:id/cancel` | `{ turnId, bestEffort?: boolean }` | `202` + `CancellationReceipt`；存储故障时显式 bestEffort 只尽力停止当前活跃根 Turn，以回执 durable 和最终结算为准 |
 | `POST /sessions/:id/resume` | `{ "turnId": "原 turn ID" }` | `202` + 原 Turn 的 `TurnReceipt`；只接受安全分类后的 interrupted Turn，其他状态或 ID 不匹配返回 409 |
-| `POST /sessions/:id/interactions/:interactionId` | `{ "approved": true/false }` | `202`，答复当前工具交互；以 SSE 的 `interaction.resolved` 为准 |
+| `POST /sessions/:id/interactions/:interactionId` | `{ approved: boolean, remember?: boolean }` | `202`，答复当前工具交互；以 SSE 的 `interaction.resolved` 为准 |
 | `DELETE /sessions/:id` | 无 | 删除空闲会话并关闭对应事件连接 |
 
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
+
+交互的“允许一次”发送 `{ approved: true }`，“始终允许”发送 `{ approved: true, remember: true }`。后者仅适用于请求携带 `remember: { permission, patterns }` 的原生 `bash/external_directory` 权限，先持久化到实际执行会话，再批准当前工具；匹配范围可跨回合和重启复用，新会话、Fork 及父子会话不互相继承。命令按入口和工作目录分类，外部路径保持准确范围，详见[授权记忆契约](../../docs/runtime-embedding.md#交互授权记忆)。凭据、邮件等业务确认仍逐次回答；拒绝或无范围请求带 `remember: true` 返回 400。
 
 `TurnReceipt` 包含 `sessionId / turnId / requestId? / accepted / started / settled`；受理和启动不表示完成。`SteerReceipt` 另含 `queued: true, durable: false`，不承诺未持久化队列的崩溃重放；`CancellationReceipt` 另含 `cancellationRequested / durable`，不代表工具已停止或外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；当前 request ID 的提交重试仅查询已有回执，在途取消复用同一操作，终态取消返回 `accepted: false`。`resume.available` 只允许恢复预检；宿主权限另行叠加。
 

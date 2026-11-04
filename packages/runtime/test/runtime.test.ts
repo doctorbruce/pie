@@ -26,6 +26,7 @@ import {
 import { applySessionEvent } from "@pie/runtime/session-events";
 import { type MessageTree, treePath } from "@pie/runtime/session-tree";
 import type { ExternalTool } from "@pie/runtime/tools";
+import { isCapabilityCatalog } from "../src/capability-catalog.ts";
 
 function deferred() {
 	let resolve = () => {};
@@ -608,7 +609,8 @@ test("embedded runtime uses injected async storage and tools without creating a 
 	assert.equal(settled.turn?.requestId, "request-1");
 	assert.deepEqual(calls, ["ok"]);
 	assert.equal(settled.messages.length, 4);
-	assert.equal(memory.trees.get(session.id)?.nodes.length, 4);
+	assert.equal(memory.trees.get(session.id)?.nodes.length, 5);
+	assert.equal(memory.trees.get(session.id)?.nodes.filter((node) => isCapabilityCatalog(node.message)).length, 1);
 	const journal = await runtime.readToolExecutions(session.id, { turnId: settled.turn!.id, limit: 200 });
 	assert.deepEqual(
 		journal.entries.map((entry) => entry.phase),
@@ -1748,7 +1750,8 @@ for (const sessionRetention of [undefined, "retain", "release-after-turn"] as co
 			tree.nodes.slice(0, firstIds.length).map((node) => node.id),
 			firstIds,
 		);
-		assert.equal(new Set(tree.nodes.map((node) => node.id)).size, 8);
+		assert.equal(new Set(tree.nodes.map((node) => node.id)).size, 9);
+		assert.equal(tree.nodes.filter((node) => isCapabilityCatalog(node.message)).length, 1);
 		const releasing = sessionRetention === "release-after-turn";
 		assert.equal(observed.created.length, releasing ? 3 : 1);
 		assert.equal(memory.workingReads.length, releasing ? 2 : 0);
@@ -1884,7 +1887,9 @@ test("settlement rejects submissions until readiness and background notification
 	const notify = observed.native.get(session.id)?.notifyBackground;
 	assert(notify);
 	await Promise.all([notify("background-one"), notify("background-two")]);
-	const users = memory.trees.get(session.id)!.nodes.filter((node) => node.message.role === "user");
+	const users = memory.trees
+		.get(session.id)!
+		.nodes.filter((node) => node.message.role === "user" && !isCapabilityCatalog(node.message));
 	assert.equal(users.length, 4);
 	assert.equal(users.filter((node) => JSON.stringify(node.message).includes("background-one")).length, 1);
 	assert.equal(users.filter((node) => JSON.stringify(node.message).includes("background-two")).length, 1);
@@ -1926,7 +1931,7 @@ test("foreground Subagents return their output before release and continue from 
 			(message) => message.role === "toolResult" && message.toolName === "task",
 		);
 		assert(JSON.stringify(results.at(-1)).includes(`part-${index}`));
-		assert.equal(memory.trees.get(childId)!.nodes.length, (index + 1) * 4);
+		assert.equal(memory.trees.get(childId)!.nodes.length, (index + 1) * 4 + 1);
 		const journal = await runtime.readToolExecutions(parent.id, { turnId: settled.turn!.id, limit: 200 });
 		assert.deepEqual(
 			journal.entries.map((entry) => [entry.mode, entry.phase]),
@@ -2010,13 +2015,13 @@ test("cold turns restore the checkpoint window without replacing complete durabl
 		await seed.waitForTurn(session.id);
 	}
 	await seed.close();
-	const boundary = memory.trees.get(session.id)!.nodes[2].id;
+	const boundary = memory.trees.get(session.id)!.nodes[3].id;
 	memory.sessions.get(session.id)!.compaction = {
 		summary: "Earlier conversation summary",
-		firstKeptMessage: 2,
+		firstKeptMessage: 3,
 		firstKeptEntryId: boundary,
 		workingMessageCount: 3,
-		messageCount: 4,
+		messageCount: 5,
 		tokensBefore: 1000,
 		estimatedTokensAfter: 100,
 		compactedAt: Date.now(),
@@ -2044,7 +2049,8 @@ test("cold turns restore the checkpoint window without replacing complete durabl
 		await runtime.waitForTurn(session.id);
 	}
 	assert.equal(memory.workingReads.length, 2);
-	assert.equal(memory.trees.get(session.id)!.nodes.length, 8);
+	assert.equal(memory.trees.get(session.id)!.nodes.length, 10);
+	assert.equal(memory.trees.get(session.id)!.nodes.filter((node) => isCapabilityCatalog(node.message)).length, 2);
 	const full = await runtime.getSession(session.id);
 	assert.equal(full.messages.length, 8);
 	assert(JSON.stringify(full.messages).includes("cold-prefix"));
@@ -2075,7 +2081,7 @@ test("cold import, fork and branch selection preserve history without retaining 
 	assert.equal((await runtime.importSession(target.id, { ...transfer })).session.messages.length, 4);
 	const forked = await runtime.forkSession(session.id, { messageIndex: 2 });
 	assert.equal(forked.session.messages.length, 2);
-	const firstReply = memory.trees.get(session.id)!.nodes[1].id;
+	const firstReply = memory.trees.get(session.id)!.nodes.find((node) => node.message.role === "assistant")!.id;
 	assert.equal((await runtime.selectTree(session.id, { entryId: firstReply })).session.messages.length, 2);
 	await runtime.renameSession(target.id, { title: "renamed cold session" });
 	await runtime.setModelOverride(target.id, { modelOverride: null });
@@ -2084,7 +2090,7 @@ test("cold import, fork and branch selection preserve history without retaining 
 	assert.equal((await runtime.waitForTurn(target.id)).messages.length, 6);
 	await runtime.submitTurn(session.id, { text: "new branch" });
 	assert.equal((await runtime.waitForTurn(session.id)).messages.length, 4);
-	assert.equal(memory.trees.get(session.id)!.nodes.length, 6);
+	assert.equal(memory.trees.get(session.id)!.nodes.length, 7);
 });
 
 test("long-history session events never read full history and bounded views use cursor pages", async (context) => {

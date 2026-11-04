@@ -134,7 +134,8 @@ test("skill discovery guidance and tool availability agree for mounted, empty an
 	for (const language of ["zh", "en-US"]) {
 		const enabled = factory.create("faux", `enabled-${language}`, { ...runtime, language });
 		assert(enabled.state.tools.some((tool) => tool.name === "skill_search"));
-		assert.match(enabled.state.systemPrompt, /skill_search/);
+		assert.doesNotMatch(enabled.state.systemPrompt, /skill_search/);
+		assert.match(factory.composeCapabilityCatalog({ ...runtime, language }), /skill_search/);
 		const disabled = factory.create("faux", `disabled-${language}`, {
 			...runtime,
 			language,
@@ -145,6 +146,10 @@ test("skill discovery guidance and tool availability agree for mounted, empty an
 			false,
 		);
 		assert.doesNotMatch(disabled.state.systemPrompt, /skill_search/);
+		assert.doesNotMatch(
+			factory.composeCapabilityCatalog({ ...runtime, language, toolAvailability: { skill_search: false } }),
+			/skill_search/,
+		);
 	}
 	const empty = factory.create("faux", "no-skills", { ...runtime, skills: [] });
 	assert.equal(

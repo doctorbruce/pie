@@ -81,6 +81,7 @@ export type AgentRuntimeConfig = {
 	compaction?: { thresholdTokens?: number };
 	mcp?: Record<string, McpServerConfig>;
 	systemPrompt: string;
+	capabilityCatalog?: string;
 	language?: string;
 	toolIds: ToolId[];
 	skills: SkillBinding[];

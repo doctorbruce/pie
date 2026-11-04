@@ -4,6 +4,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { createCompactionTransform } from "@pie/runtime/compaction";
 import type { ContextCompaction } from "@pie/runtime/protocol";
+import { nextCapabilityCatalog } from "../../runtime/src/capability-catalog.ts";
 
 function conversation(turns: number, offset = 0): AgentMessage[] {
 	const messages: AgentMessage[] = [];
@@ -17,6 +18,24 @@ function conversation(turns: number, offset = 0): AgentMessage[] {
 	}
 	return messages;
 }
+
+test("a capability reminder does not replace the actual Turn input during compaction", async () => {
+	const messages = conversation(8);
+	const input = { role: "user" as const, content: "CURRENT_USER_INPUT", timestamp: 100 };
+	messages.push(input, fauxAssistantMessage("x".repeat(3000)), nextCapabilityCatalog([], "- skill: Summary")!);
+	let record: ContextCompaction | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 400,
+		settings: { reserveTokens: 40, keepRecentTokens: 20 },
+		summarize: async () => "checkpoint",
+		onCompacted: (next) => {
+			record = next;
+		},
+	});
+	const projected = await transform(messages);
+	assert.equal(record?.turnStartIndex, 16);
+	assert(projected.includes(input));
+});
 
 test("compaction keeps the transcript intact and folds later history into the previous checkpoint", async () => {
 	const original = conversation(12);

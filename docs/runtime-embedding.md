@@ -8,7 +8,7 @@
 - `await createRuntime({ store, agents })` 不创建 HTTP 服务，也不默认打开 SQLite、扫描插件或注册本机工具；这些由注入的实现决定。
 - `@pie/local` 的 `createLocalHost` 装配 SQLite、本地模型配置、原生 / 外部工具、Skill、MCP 与助手管理；`@pie/server` 的 `createCoreServer` 调用它并映射 HTTP / SSE。本地 CLI 和 Sidecar 的启动方式不变。
 
-依赖方向为 `server → local → runtime → agent / ai`，`server` 可直接读取共享协议。Runtime 不导入 Local 或 Server，也不提供本地助手 / 插件的写入接口。云端 `agent-service` 直接使用 Runtime 并装配云端能力，不依赖 Local，不启动另一层 Pie HTTP 服务。本轮采用函数注入，不增加插件扫描或热更新框架。
+依赖方向为 `server → local → runtime → agent / ai`，`server` 可直接读取共享协议。Runtime 不导入 Local 或 Server，也不提供本地助手 / 插件的写入接口。云端 `agent-service` 直接使用 Runtime 并装配云端能力，不依赖 Local，不启动另一层 Pie HTTP 服务。能力采用函数注入；Skill 绑定复用模型调用间隙刷新，不扫描插件或监听文件。
 
 ## 双方开发范围
 
@@ -119,6 +119,10 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 - `readHistory(id, { limit, beforeSeq?, leafId? })` 必须在存储查询中按父指针和游标限制遍历，返回最多 `limit` 条正文及 `nextBeforeSeq`；达到页大小后不继续读取更老节点。`beforeSeq <= 1` 直接返回空页。分页只限制普通读取，不改变显式完整导出和树管理操作。
 
 助手定义和 runtime 注册表由产品宿主提供。`hostRuntimes` 可传入启动快照，`saveHostRuntimes` 可在注册更新时先保存；省略后者时注册只驻留内存，由宿主在重启后重新注册。注册是当前实例范围内的完整替换，不能直接暴露为跨租户的共享注册接口。
+
+运行中发布的新 `runtime.skills` 会在当前工具批次结束、下一次模型调用前生效；本地助手的插件挂载使用相同边界。Runtime 保留 Agent、Turn、历史、MCP 连接及已加载的延迟工具，只刷新 Skill 索引、`skill_search` 和 `skill`，仍遵守本轮 `toolAvailability`。宿主安装工具应先准备资产并挂载到当前助手，再等待 `registerHostRuntimes` 成功后返回；无需额外 submit、steer 或重启。其他配置在下一 Turn 准入时完整应用，`assistantRevision` 继续表示该完整版本。
+
+`turnCheckpoint.turnSystemPrompt` 保存本轮附加系统上下文；技能简介不进入 system，与宿主可选的 `runtime.capabilityCatalog`（最多 16000 字符）合并为隐藏 user 消息。首次或可见历史中的清单变化时追加完整替换清单，未变化沿用历史，删空明确发布空清单，压缩丢失清单后重新提供。发布比较依赖持久消息的 metadata，不依赖进程内标志；自定义 Store 须保留消息块的 synthetic/metadata 和 checkpoint 可选字段。在下一次模型调用前保存最新 runtime 与消息；保存失败阻止继续调用模型，不重放已经完成的安装工具。实现与验证见 [Skill 刷新 SPEC](specs/skill-hot-reload.md)。
 
 ## 事件、隔离与生命周期
 

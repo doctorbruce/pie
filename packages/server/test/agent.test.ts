@@ -74,7 +74,7 @@ test("agent prompts preserve assistant instructions with turn context and a sort
 		],
 	};
 	const original = structuredClone(runtime);
-	const prompt = factory.composeSystemPrompt(runtime);
+	const prompt = factory.composeCapabilityCatalog(runtime);
 	assert.deepEqual(
 		prompt.split("\n").filter((line) => line.startsWith("- ")),
 		[
@@ -89,10 +89,10 @@ test("agent prompts preserve assistant instructions with turn context and a sort
 	assert.match(prompt, /do not assume missing host dependencies are installed/);
 	assert.equal(prompt.includes("Full detailed description"), false);
 	assert.equal(prompt.includes("Verbose plugin source"), false);
-	assert.equal(factory.create("faux", "skill-index", runtime).state.systemPrompt, prompt);
-	assert.equal(factory.composeSystemPrompt(runtime, "Turn context"), `Turn context\n\n${prompt}`);
-	assert.equal(factory.composeSystemPrompt(runtime, runtime.systemPrompt), prompt);
-	assert.equal(factory.composeSystemPrompt(runtime, " \n\t"), prompt);
+	assert.equal(factory.create("faux", "skill-index", runtime).state.systemPrompt, runtime.systemPrompt);
+	assert.equal(factory.composeSystemPrompt(runtime, "Turn context"), `Turn context\n\n${runtime.systemPrompt}`);
+	assert.equal(factory.composeSystemPrompt(runtime, runtime.systemPrompt), runtime.systemPrompt);
+	assert.equal(factory.composeSystemPrompt(runtime, " \n\t"), runtime.systemPrompt);
 	assert.deepEqual(runtime, original);
 	const empty = { ...runtime, skills: [] };
 	assert.equal(factory.composeSystemPrompt(empty), runtime.systemPrompt);
@@ -127,7 +127,7 @@ test("the skill index prefers the host language's localized summary over the bin
 		},
 	];
 	for (const language of ["zh", "ZH-CN"]) {
-		const localizedPrompt = factory.composeSystemPrompt({
+		const localizedPrompt = factory.composeCapabilityCatalog({
 			systemPrompt: "Host system prompt",
 			toolIds: [],
 			subagents: [],
@@ -141,7 +141,7 @@ test("the skill index prefers the host language's localized summary over the bin
 		assert.equal(localizedPrompt.includes("Available skills"), false);
 	}
 	for (const language of ["en-US", "ja-JP", undefined]) {
-		const fallbackPrompt = factory.composeSystemPrompt({
+		const fallbackPrompt = factory.composeCapabilityCatalog({
 			systemPrompt: "Host system prompt",
 			toolIds: [],
 			subagents: [],
@@ -153,7 +153,7 @@ test("the skill index prefers the host language's localized summary over the bin
 	}
 	const prompt = (language?: string) =>
 		factory
-			.composeSystemPrompt({ systemPrompt: "Host system prompt", toolIds: [], subagents: [], skills, language })
+			.composeCapabilityCatalog({ systemPrompt: "Host system prompt", toolIds: [], subagents: [], skills, language })
 			.split("\n")
 			.filter((line) => line.startsWith("- "));
 

@@ -626,6 +626,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 		if (source.turn?.status === "running") throw new RuntimeError(409, "当前会话正在执行，不能分叉");
 		await source.runPromise;
 		const messages = await fullHistory(source);
+		if (!boundary) {
+			const selected = messages.filter((message) => displayAgentMessages([message]).length > 0)[messageIndex];
+			messageIndex = selected ? messages.indexOf(selected) : -1;
+		}
 		const selected = messages[messageIndex];
 		if (
 			!Number.isInteger(messageIndex) ||
@@ -1103,6 +1107,38 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function bindAgent(session: Session, agent: ReturnType<typeof factory.create>) {
 		session.agent = agent;
 		agent.followUpMode = "all";
+		const transformContext = agent.transformContext!;
+		agent.transformContext = async (messages, signal) => {
+			const count = agent.state.messages.length;
+			const projected = await transformContext(messages, signal);
+			if (agent.state.messages.length !== count) await persist(session);
+			signal?.throwIfAborted();
+			return projected;
+		};
+		agent.prepareNextTurnWithContext = async ({ context }, signal) => {
+			assertStorageAvailable();
+			signal?.throwIfAborted();
+			const latest = resolveTurnConfiguration(session, {}).runtime;
+			if (
+				JSON.stringify(latest.skills) === JSON.stringify(session.runtime!.skills) &&
+				latest.capabilityCatalog === session.runtime!.capabilityCatalog
+			)
+				return;
+			const runtime = {
+				...session.runtime!,
+				skills: structuredClone(latest.skills),
+				capabilityCatalog: latest.capabilityCatalog,
+			};
+			const systemPrompt = factory.composeSystemPrompt(runtime, session.turnCheckpoint?.turnSystemPrompt);
+			agent.refreshSkills(runtime.skills, systemPrompt, runtime.capabilityCatalog);
+			session.runtime = runtime;
+			if (session.turnCheckpoint) session.turnCheckpoint.systemPrompt = systemPrompt;
+			session.updatedAt = Date.now();
+			await persist(session);
+			signal?.throwIfAborted();
+			await publish(session, "snapshot");
+			return { context: { ...context, systemPrompt, tools: agent.state.tools } };
+		};
 		session.modelStreaming = false;
 		session.activeTools = new Map();
 		agent.subscribe(async (event) => {
@@ -1309,10 +1345,28 @@ async function initializeRuntime(options: RuntimeOptions) {
 		revisionFloors.set(session.id, session.projection.revision);
 		return session.projection;
 	}
+	async function visibleHistory(
+		sessionId: string,
+		options: { limit: number; beforeSeq?: number; leafId?: string | null },
+	) {
+		const visible = (entry: MessageTree["nodes"][number]) => displayAgentMessages([entry.message]).length > 0;
+		const page = await store.readHistory(sessionId, options);
+		page.entries = page.entries.filter(visible);
+		while (page.entries.length < options.limit && page.nextBeforeSeq !== null) {
+			const older = await store.readHistory(sessionId, {
+				...options,
+				limit: options.limit - page.entries.length,
+				beforeSeq: page.nextBeforeSeq,
+			});
+			page.entries.unshift(...older.entries.filter(visible));
+			page.nextBeforeSeq = older.nextBeforeSeq;
+		}
+		return page;
+	}
 	async function snapshot(session: Session, options?: { limit: number }): Promise<SessionSnapshot> {
 		const state = sessionState(session);
 		const leafId = publishedProjection(session).leafId;
-		const page = options ? await store.readHistory(session.id, { ...options, leafId }) : undefined;
+		const page = options ? await visibleHistory(session.id, { ...options, leafId }) : undefined;
 		const messages = page
 			? page.entries.map((entry) => entry.message)
 			: (await store.readPath(session.id, leafId)).nodes.map((node) => node.message);
@@ -1957,7 +2011,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				validateHistoryOptions(options);
 				const leafId = options.leafId === undefined ? (session.tree?.leafId ?? null) : options.leafId;
 				const revision = session.revision;
-				const page = await store.readHistory(session.id, { ...options, leafId });
+				const page = await visibleHistory(session.id, { ...options, leafId });
 				return {
 					...page,
 					instanceId,
@@ -2499,6 +2553,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					turnId: session.turn.id,
 					inputEntryId: update.identities.get(userMessage)!,
 					systemPrompt,
+					turnSystemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
 					blockedReason: jobs.list(session.id).some((job) => job.status === "running")
 						? "存在先前尚未结束的后台任务"
 						: undefined,

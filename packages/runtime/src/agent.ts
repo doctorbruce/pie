@@ -14,6 +14,7 @@ import {
 	Type,
 } from "@earendil-works/pi-ai";
 import { type AgentFactoryOptions, ModelSettingsError } from "./capabilities.ts";
+import { isCapabilityCatalog, nextCapabilityCatalog } from "./capability-catalog.ts";
 import { retryAssistantCall } from "./compaction/retry.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction/utils.ts";
 import { type CompactionEvent, createCompactionStream, createCompactionTransform } from "./compaction.ts";
@@ -61,14 +62,16 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 	)
 		throw new ToolConfigError("工具 ID 重复或使用了保留名称");
 	const composeSystemPrompt = (runtime: RuntimeConfig, turnSystemPrompt?: string) => {
-		const systemPrompt = [
+		return [
 			...(turnSystemPrompt?.trim() && turnSystemPrompt !== runtime.systemPrompt ? [turnSystemPrompt] : []),
 			runtime.systemPrompt,
 		]
 			.filter((prompt) => prompt.trim().length > 0)
 			.join("\n\n");
+	};
+	const composeCapabilityCatalog = (runtime: RuntimeConfig) => {
 		const chinese = runtime.language?.trim().toLowerCase().startsWith("zh") ?? false;
-		const skills = [...runtime.skills]
+		const skills = [...(runtime.toolAvailability?.skill === false ? [] : runtime.skills)]
 			.sort((first, second) => first.id.localeCompare(second.id))
 			.map(
 				(binding) =>
@@ -83,7 +86,16 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				: chinese
 					? "\n不确定技能 ID，或用户询问可用技能、能力时，先调用 skill_search；用返回的精确 id 调用 skill，不要扫描插件或技能目录来发现技能。"
 					: "\nUse skill_search when unsure of a skill ID or when asked which skills or capabilities are available. Call skill with an exact id from the index or search results; do not scan plugin or skill directories to discover skills.";
-		return systemPrompt + (skills.length ? `\n\n${guidance}\n${skills.join("\n")}${discoveryGuidance}` : "");
+		return [
+			skills.length
+				? `${guidance}\n${skills.join("\n")}${discoveryGuidance}`
+				: chinese
+					? "当前没有可用专项技能。"
+					: "No specialized skills are currently available.",
+			runtime.capabilityCatalog,
+		]
+			.filter(Boolean)
+			.join("\n\n");
 	};
 
 	return {
@@ -91,6 +103,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 		mcp,
 		toolIds,
 		composeSystemPrompt,
+		composeCapabilityCatalog,
 		toolCatalog,
 		get info(): ServerInfo {
 			return {
@@ -152,7 +165,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			const tools = options.tools.create(context, runtime.toolIds);
 			if (tools.some((tool) => !toolIds.includes(tool.name)))
 				throw new ToolConfigError("工具实现未在 catalog 中注册");
-			const skillTools = options.skills(runtime, record);
+			let skillTools = options.skills(runtime, record);
 			const taskParameters = Type.Object(
 				{
 					description: Type.String({ description: "Short description of the delegated task" }),
@@ -228,7 +241,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				selectedNativeTools.add("job_output");
 				selectedNativeTools.add("job_kill");
 			}
-			const availableTools = [
+			let availableTools = [
 				...tools.filter((tool) => selectedNativeTools.has(tool.name)),
 				...skillTools.tools,
 				...(runtime.skills.length ? [createSkillSearch(runtime)] : []),
@@ -239,7 +252,6 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			];
 			let toolSearch = createToolSearch(availableTools, deferredToolNames);
 			toolSearch.restoreLoaded(compaction?.current?.loadedToolNames);
-			let checkpoint = compaction?.current;
 			const automation =
 				mode === "real" && realModel
 					? runtime.compaction
@@ -255,7 +267,6 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							onCompacted: async (next, source, projected) => {
 								next.loadedToolNames = toolSearch.loadedToolNames;
 								await compaction.update(next, source, projected);
-								checkpoint = next;
 								sessionAgent.replaceMessages(projected);
 								source.length = 0;
 								for (const message of projected) source.push(message);
@@ -303,17 +314,23 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							},
 						})
 					: undefined;
-			const realStream: StreamFn = (model, context, options) =>
-				models.streamSimple(model, context, {
+			const realStream: StreamFn = async (model, context, options) => {
+				// Compaction can remove the last published list before this provider request.
+				context.messages = (await sessionAgent.transformContext!(
+					context.messages,
+					options?.signal,
+				)) as typeof context.messages;
+				return models.streamSimple(model, context, {
 					...options,
 					headers: { ...options?.headers, ...modelHeaders },
 					onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
 				});
+			};
 			const retryStream = createRetryStream(realStream, automation?.retry, report);
 			const compactStream = compactContext
 				? createCompactionStream(retryStream, compactContext, { enabled: automation?.compaction.enabled })
 				: retryStream;
-			const sessionAgent = new Agent({
+			const sessionAgent: Agent = new Agent({
 				sessionId,
 				afterToolCall: async (context) => {
 					let skillResult = await skillTools.afterToolCall(context);
@@ -339,6 +356,11 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				},
 				transformContext: async (messages) => {
 					toolSearch.restore(messages);
+					const catalog = nextCapabilityCatalog(messages, composeCapabilityCatalog(runtime), runtime.language);
+					if (catalog) {
+						messages.push(catalog);
+						if (messages !== sessionAgent.state.messages) sessionAgent.state.messages.push(catalog);
+					}
 					return messages;
 				},
 				initialState: {
@@ -350,7 +372,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				streamFn: (model, context, options) => {
 					context = toolSearch.expose(context);
 					if (mode === "real") return compactStream(model, context, options);
-					const last = context.messages.at(-1);
+					const last = [...context.messages].reverse().find((message) => !isCapabilityCatalog(message));
 					const availableTools = context.tools ?? [];
 					if (last?.role === "toolResult") {
 						faux.setResponses([
@@ -398,21 +420,38 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 					return localModels.streamSimple(model, context, options);
 				},
 			});
+			let mcpLease: Awaited<ReturnType<typeof mcp.acquire>> | undefined;
+			function refreshTools() {
+				const loadedToolNames = toolSearch.loadedToolNames;
+				toolSearch = createToolSearch(
+					[...availableTools, ...(mcpLease?.tools ?? []).filter(toolAvailable)],
+					[...deferredToolNames, ...(mcpLease?.tools ?? []).map((tool) => tool.name)],
+					mcpLease?.instructions,
+				);
+				toolSearch.restoreLoaded(loadedToolNames);
+				toolSearch.restore(sessionAgent.state.messages);
+				sessionAgent.state.tools = toolSearch.tools.filter(toolAvailable).map(withToolProgress);
+			}
 			return Object.assign(sessionAgent, {
+				refreshSkills(skills: RuntimeConfig["skills"], systemPrompt: string, capabilityCatalog?: string) {
+					runtime.skills = structuredClone(skills);
+					runtime.capabilityCatalog = capabilityCatalog;
+					skillTools = options.skills(runtime, record);
+					availableTools = [
+						...availableTools.filter((tool) => tool.name !== "skill" && tool.name !== "skill_search"),
+						...skillTools.tools,
+						...(runtime.skills.length ? [createSkillSearch(runtime)] : []),
+					].filter(toolAvailable);
+					refreshTools();
+					sessionAgent.state.systemPrompt = systemPrompt;
+				},
 				async prepareMcp(signal?: AbortSignal) {
-					const lease = await mcp.acquire(runtime.mcp ?? {}, context.directory, requestInteraction, signal, [
+					mcpLease = await mcp.acquire(runtime.mcp ?? {}, context.directory, requestInteraction, signal, [
 						...availableTools.map((tool) => tool.name),
 						"tool_search",
 					]);
-					toolSearch = createToolSearch(
-						[...availableTools, ...lease.tools.filter(toolAvailable)],
-						[...deferredToolNames, ...lease.tools.map((tool) => tool.name)],
-						lease.instructions,
-					);
-					toolSearch.restoreLoaded(checkpoint?.loadedToolNames);
-					toolSearch.restore(sessionAgent.state.messages);
-					sessionAgent.state.tools = toolSearch.tools.filter(toolAvailable).map(withToolProgress);
-					return lease.release;
+					refreshTools();
+					return mcpLease.release;
 				},
 			});
 		},

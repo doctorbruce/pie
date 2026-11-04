@@ -7,6 +7,7 @@ import {
 	fauxAssistantMessage,
 	type Usage,
 } from "@earendil-works/pi-ai";
+import { isCapabilityCatalog } from "./capability-catalog.ts";
 import { isContextOverflow, isRecoverableLength } from "./compaction/overflow.ts";
 import {
 	computeFileLists,
@@ -202,7 +203,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 			let firstKeptMessage = findFirstKeptMessage(messages, boundary, settings.keepRecentTokens);
 			if (budget.force && firstKeptMessage === undefined) {
 				for (let index = messages.length - 1; index > boundary; index--) {
-					if (messages[index].role === "user") {
+					if (messages[index].role === "user" && !isCapabilityCatalog(messages[index])) {
 						firstKeptMessage = index;
 						break;
 					}
@@ -212,7 +213,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 				throw new Error("上下文超限且没有可压缩的历史；请缩短当前输入、工具输出或附件。");
 			let turnStartIndex: number | undefined;
 			for (let index = messages.length - 1; index >= boundary; index--) {
-				if (messages[index].role === "user") {
+				if (messages[index].role === "user" && !isCapabilityCatalog(messages[index])) {
 					if (index < firstKeptMessage) turnStartIndex = index;
 					break;
 				}

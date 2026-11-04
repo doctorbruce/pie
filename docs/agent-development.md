@@ -51,11 +51,13 @@ Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以�
 ### 配置何时生效
 
 1. 服务首次启动自动创建“默认助手”，`toolIds`、`pluginIds` 和 `subagentIds` 为空。十个内置工具均已注册，默认启用集合后续再定。
-2. 本地会话保存 `assistantId`、已应用的 Assistant 版本和解析后的 `runtime`（提示词、工具、技能路径、来源绑定和可调用助手）。每次 Turn 准入前重新读取当前 Assistant 及目标 Assistant；版本或 runtime 变化时保留消息并重建 Agent。正在运行的 Turn 使用受理时配置，下一次提交才应用后续修改。
+2. 本地会话保存 `assistantId`、已应用的 Assistant 版本和解析后的 `runtime`（提示词、工具、技能路径、来源绑定和可调用助手）。每次 Turn 准入前重新读取当前 Assistant 及目标 Assistant；版本或 runtime 变化时保留消息并重建 Agent。运行中仅 Skill 绑定在当前工具批次结束、下一次模型调用前刷新；其他配置仍在下一次提交时应用。
 3. 宿主启动 Pie 后用 `PUT /host-runtimes` 注册全部 Assistant runtime，配置刷新时事务性替换注册表。创建 Session 只提供 `assistantId`；每次 Turn 准入时，Pie 从注册表解析该 Assistant 及其 Subagent 的最新版本。Turn 只额外接收时间、记忆、附件等本轮动态 `systemPrompt`，不重复传稳定 runtime。
 4. 模型在新建会话时独立选择，省略时使用提供商配置的默认模型。模型选择不放进 Assistant，也不把凭据复制进助手或会话记录。
 5. 已有 Agent 保留创建时的模型调用配置。Assistant/runtime 变化或服务重启导致重建时，使用会话保存的 `provider/model` 从当前 `models.json` 重新解析端点、凭据和模型参数。
 6. 模型被移除或配置失效时，历史仍可查看；继续执行明确报错，不悄悄切换到其他模型。修好配置后可以再次提交。
+
+Skill 刷新复用 `prepareNextTurnWithContext`，同时更新技能简介、`skill_search` 和实际 `skill` 工具，支持首次挂载、更新和移除；不重建 Agent、不改变 Turn ID、不重放工具。技能简介与可选宿主 `capabilityCatalog` 合并为隐藏 user 消息，首次或清单变化才追加完整清单，明确替代历史版本；删空发布空清单，压缩丢失清单后重新提供。清单不进入 system，不改历史前缀。保留本轮动态系统上下文、工具禁用设置、已加载的延迟工具和 MCP 连接，先保存 runtime 与消息再继续模型请求。宿主安装工具须在返回前完成资产准备、助手挂载和 `PUT /host-runtimes` 发布；只下载文件不会改变可用绑定。`assistantRevision` 仍代表准入时完整应用的版本，当前 Skill 集合以 Session 的 `runtime.skills` 为准。
 
 助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供常驻的 `skill_search` 和 `skill`，本轮 `toolAvailability` 可禁用。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供确认型交互、工作区边界检查和 MCP，尚无进程沙箱。MCP 通过宿主 runtime 注册，配置、权限与生命周期见 [MCP 接入说明](mcp-integration.md)。
 
@@ -85,7 +87,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 导入先复制到临时目录，校验成功后重命名发布，失败不登记。限制 32 个插件，每个插件 128 个 Skill、10000 个文件/目录、50 MiB，manifest 和单个 SKILL.md 最多 64 KiB；拒绝绝对 Skill 路径、路径越界与包内符号链接/目录联接。复制过程目前同步执行，较大包会短暂占用事件循环。崩溃残留 `.import-*` 目录不加载。
 
-本地助手挂载变更在已有会话下一次 Turn 前生效。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
+本地助手挂载变更在运行中会话的下一次模型调用前刷新，当前工具批次仍使用原绑定；空闲会话在下一次 Turn 准入时应用。源目录修改不影响已经导入的副本；同 ID 重复导入拒绝覆盖。卸载前同时检查助手定义、会话已应用配置和来源绑定，有引用则返回 `409`。更新包暂时需要解除助手挂载、让相关会话执行一次配置刷新或删除会话、卸载后重导，不提供包覆盖和版本管理。不要手工修改已安装包；这些副本不是内容不可变或隔离的运行环境。
 
 `skill_search({ query, limit? })` 由共享 Runtime 提供，只搜索当前 `runtime.skills` 的绑定 ID、名称、说明及本地化说明，不扫描插件或技能目录。`query` 必填，空字符串或 `list/all/skills/技能/技能清单` 列举技能；`limit` 为 1–100，搜索默认 20 条、列举默认 100 条。结果为 `skills[{id,name,description}]`、`total/shown/truncated`；将结果中的精确 `id` 交给 `skill({ id })` 加载。搜索不读取正文、不加载指引，也不产生 `skill_load` 活动；发现技能应使用该入口，不通过文件工具遍历目录。
 
@@ -259,9 +261,9 @@ Astron 的 Assistant 是产品资产；其 OpenCode adapter 把助手配置转�
 | 模型 | 提供商设置、模型选择和凭据管理 | 解析下发的调用配置，通过 `packages/ai` 调用模型 |
 | 环境与权限 | 工作区、依赖、环境变量、产品权限策略及审批决定 | 按配置执行文件/命令工具；实现权限检查、等待和取消的运行机制 |
 | Session / Turn | 产品归属、标题、入口、展示、`coreBinding` 和可调用 Assistant 集合 | 消息上下文、父子 Session、Agent 实例、循环、运行状态、恢复和事件 |
-| 配置变更 | 生成权威 runtime 注册表、发起刷新，协调资产文件的更新时间 | 事务性替换注册表；下一 Turn 准入时应用，不中断在途 Turn |
+| 配置变更 | 生成权威 runtime 注册表、发起刷新，协调资产文件的更新时间 | 事务性替换注册表；Skill 在模型调用间隙刷新，其他配置下一 Turn 准入时应用 |
 
-来源绑定、Skill 加载记录、确认型交互和 Turn 边界的配置刷新已在 Pie 实现。Astron adapter 已接入提示词、工具、Skill/Subagent runtime、会话和交互字段。限制 `skill` 的可用 ID 不能代替系统文件或命令工具的访问控制。APA、App、RPA 的业务含义和服务仍留在 Astron。通过 `bash` 执行的命令不自动关联到某个 Skill 或 APA。
+来源绑定、Skill 加载记录、确认型交互和配置刷新已在 Pie 实现。Astron adapter 已接入提示词、工具、Skill/Subagent runtime、会话和交互字段。限制 `skill` 的可用 ID 不能代替系统文件或命令工具的访问控制。APA、App、RPA 的业务含义和服务仍留在 Astron。通过 `bash` 执行的命令不自动关联到某个 Skill 或 APA。
 
 Pie adapter 位于 Astron 一侧，负责把产品配置转换为 Pie 接受的运行配置、启动/连接服务、映射会话和转换事件。产品服务继续使用 `core_contract`，不直接消费 Pi 原始事件或依赖 OpenCode 的角色命名和消息格式。
 
@@ -288,7 +290,7 @@ Pie 不必创建或维护 `.agents/skills`，但应能消费 Astron 已整理的
 
 ### Skill 加载来源记录
 
-来源绑定由宿主生成，标识“通过哪个 Plugin 加载哪个 Skill”。`SkillBinding.id` 是可选择的绑定 ID，name/description 是技能说明，directory 是实际 Skill 目录；source 保存 Plugin 身份和可选 pluginVersion。创建会话时固定配置，调用记录再保存当时的绑定。未提供来源的 Skill 可以省略 source。
+来源绑定由宿主生成，标识“通过哪个 Plugin 加载哪个 Skill”。`SkillBinding.id` 是可选择的绑定 ID，name/description 是技能说明，directory 是实际 Skill 目录；source 保存 Plugin 身份和可选 pluginVersion。配置在 Turn 准入或模型调用间隙应用，调用记录保存当时的绑定。未提供来源的 Skill 可以省略 source。
 
 Pie 根据模型选择的允许绑定查找来源，技能记录包含独立 id，并关联 `sessionId/turnId/toolCallId`。来源不由模型自由填写，也不靠解析工具返回文本。实现复用 Pi 的工具 `details` 和 `afterToolCall`，错误结果也保留来源；agent loop 源码未改动。
 
@@ -298,11 +300,11 @@ Pie 根据模型选择的允许绑定查找来源，技能记录包含独立 id�
 
 ### Pie 下一步开发边界
 
-当前运行输入已支持提示词、内置/外部工具选择和技能绑定；模型仍通过 Pie 模型配置和会话选择接口解析，环境来自服务进程。Pie 已定义已有会话刷新语义：宿主更新注册表，Core 在下一 Turn 执行前按稳定 Assistant ID 应用当前版本。Astron adapter 从产品态组装完整 Skill 与 Subagent 引用，并在 Assistant、群聊、插件或 Skill 配置变化时重新同步；普通 Turn 只传文本和动态系统上下文。TurnMetadata.skill_ids/plugin_contexts 不等于实际使用证据。
+当前运行输入已支持提示词、内置/外部工具选择和技能绑定；模型仍通过 Pie 模型配置和会话选择接口解析，环境来自服务进程。宿主更新注册表后，Core 在当前工具批次结束、下一次模型调用前刷新 Skill；完整配置仍在下一 Turn 准入时按稳定 Assistant ID 应用。Astron adapter 从产品态组装完整 Skill 与 Subagent 引用，并在 Assistant、群聊、插件或 Skill 配置变化时重新同步；普通 Turn 只传文本和动态系统上下文。TurnMetadata.skill_ids/plugin_contexts 不等于实际使用证据。
 
 本地助手、模型和插件管理接口继续供宿主和独立测试使用。plugins.ts 已负责将本地挂载转换为 runtime；agent.ts / skills.ts 消费 runtime，不依赖 plugin.json 或插件导入 API。无需为此建立市场服务或共享技能资产库。
 
-配置在下一次 Turn 准入前生效，不中断正在运行的 Turn。宿主仍需协调旧文件的保留/替换；快照不冻结运行文件，插件资产更新闭环尚未实现。本地助手、模型和插件管理接口继续保留，Astron 通过 host runtime 使用同一执行入口。
+Skill 刷新不打断正在运行的 Turn，当前工具批次使用原绑定。宿主仍需协调旧文件的保留/替换；快照不冻结运行文件，插件资产更新闭环尚未实现。本地助手、模型和插件管理接口继续保留，Astron 通过 host runtime 使用同一执行入口。
 
 ### Astron 工具文件接入
 

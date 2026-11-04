@@ -18,7 +18,7 @@
 | `GET /tools` | 无 | `{ tools: [{ id, label }] }`，已注册的内置和外部工具；外部工具在会话创建前以 ID 作为 label |
 | `GET /assistants` | 无 | `{ assistants: [...] }`，助手定义列表 |
 | `POST /assistants` | `{ name, systemPrompt, toolIds, pluginIds?, subagentIds? }` | `201` + 助手定义，ID 由服务生成；省略列表字段时为空 |
-| `PUT /assistants/:id` | `{ name, systemPrompt, toolIds, pluginIds?, subagentIds? }` | 完整更新定义；已有本地会话在下一次 Turn 前应用；助手不能调用自己 |
+| `PUT /assistants/:id` | `{ name, systemPrompt, toolIds, pluginIds?, subagentIds? }` | 完整更新定义；Skill 挂载在当前工具批次后、下一次模型调用前刷新，其他配置下一 Turn 应用；助手不能调用自己 |
 | `GET /plugins` | 无 | `{ plugins: [...] }`，插件信息及已启用的 Skill ID/name/description/path |
 | `POST /plugins/import` | `{ path: "本地插件目录" }` | `201` + 插件信息；复制并校验 schemaVersion 1 包，不自动安装依赖 |
 | `DELETE /plugins/:id` | 无 | 卸载；存在助手或会话引用时返回 409 |
@@ -68,13 +68,13 @@
 
 这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或 `task` 时自动向 Agent 加入 `job_output/job_kill`。`skill_search/skill` 和 `task` 也由 Pie 提供，但分别只在当前 runtime 有 Skill 或 Subagent 绑定时加入 Agent。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
 
-会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。配置变化发生在 Turn 准入前：已有消息保留，空闲 Agent 按最新注册版本重建；正在运行的 Turn 不被切换，下一次提交才应用新配置。
+会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。完整配置在 Turn 准入时应用，保留已有消息并按需重建 Agent。运行中 Skill 绑定在当前工具批次结束、下一次模型调用前单独刷新，保留 Turn 与 Agent；当前集合以 `runtime.skills` 为准，`assistantRevision` 仍代表准入时完整应用的版本。
 
 宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知；`job_output` 可增量读取，`job_kill` 可停止任务。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。父会话取消会取消前台子会话；子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
 
 独立本地模式通过 Assistant 接口设置 `subagentIds`，Core 将其转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
 
-模型系统提示词按“本轮 `systemPrompt` → 助手 `runtime.systemPrompt` → 可用技能索引”拼接，不用本轮规则覆盖助手角色。省略或传空白的本轮规则时保留助手提示词；与助手提示词完全相同的内容不重复添加，技能索引只追加一次。
+模型系统提示词按“本轮 `systemPrompt` → 助手 `runtime.systemPrompt`”拼接，不用本轮规则覆盖助手角色。省略或传空白的本轮规则时保留助手提示词；与助手提示词完全相同的内容不重复添加。现有技能简介与宿主可选 `runtime.capabilityCatalog` 合并为隐藏 user 消息，首次或清单变化才追加完整替换清单，未变化沿用历史，删空明确发布空清单，压缩丢失清单后重新提供；不改历史前缀或 system。
 
 ## 外部工具文件
 
@@ -163,7 +163,9 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 }
 ```
 
-注册成功后用 `POST /sessions { "assistantId": "astron-assistant-id", "mode": "faux" }` 创建会话。runtime 包含完整 systemPrompt/toolIds/skills 及可省略的 subagents；最多 128 个 Skill 绑定和 32 个 Subagent 绑定，各自 ID 必须唯一。多个 Skill 绑定可以共用同一个 directory。directory 和可选 resourceRoot 必须是绝对路径。source 可省略，表示没有指定 Plugin 来源；pluginVersion 可省略。本地插件导入会自动生成 Plugin 来源字段。
+注册成功后用 `POST /sessions { "assistantId": "astron-assistant-id", "mode": "faux" }` 创建会话。runtime 包含完整 systemPrompt/toolIds/skills 及可省略的 subagents；可选 capabilityCatalog 是最多 16000 字符的宿主插件清单，与技能简介一起在 user 上下文中按变化发布。最多 128 个 Skill 绑定和 32 个 Subagent 绑定，各自 ID 必须唯一。多个 Skill 绑定可以共用同一个 directory。directory 和可选 resourceRoot 必须是绝对路径。source 可省略，表示没有指定 Plugin 来源；pluginVersion 可省略。本地插件导入会自动生成 Plugin 来源字段。
+
+在工具内安装插件时，应先完成资产准备与当前助手挂载，再等待 `PUT /host-runtimes` 成功后返回。下一次模型调用会看到新 Skill 的索引及 `skill_search/skill` 工具，正文仍由模型调用 `skill` 按需读取；无需重启、另发 Turn 或 Steer。本地模式通过助手接口更新 `pluginIds` 即可。当前批次使用原绑定，工具禁用设置和已加载的工具保持；模型、权限和 MCP 配置仍在下一 Turn 应用。
 
 `language` 可省略；`zh` 选中 `descriptions["zh-CN"]`，`en` 选中 `descriptions["en-US"]`，其它语言按原值查找，缺失时回落到 `description`（与 OpenCode 的技能索引一致）。
 

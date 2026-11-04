@@ -17,6 +17,7 @@ export type TurnCheckpoint = {
 	turnId: string;
 	inputEntryId: string;
 	systemPrompt: string;
+	turnSystemPrompt?: string;
 	blockedReason?: string;
 	cancelRequested?: boolean;
 	jobs?: DurableJobReference[];

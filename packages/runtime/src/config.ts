@@ -61,6 +61,9 @@ function parseAgentRuntimeConfig(
 ): AgentRuntimeConfig {
 	if (typeof input.systemPrompt !== "string" || input.systemPrompt.length > 16000)
 		throw new SkillConfigError("systemPrompt 需要字符串，最多 16000 字符");
+	const capabilityCatalog = input.capabilityCatalog;
+	if (capabilityCatalog !== undefined && (typeof capabilityCatalog !== "string" || capabilityCatalog.length > 16000))
+		throw new SkillConfigError("capabilityCatalog 需要字符串，最多 16000 字符");
 	const toolIds = parseToolIds(input.toolIds, availableToolIds);
 	if (!Array.isArray(input.skills) || input.skills.length > 128)
 		throw new SkillConfigError("skills 需要数组，最多 128 项");
@@ -105,6 +108,7 @@ function parseAgentRuntimeConfig(
 	}
 	return {
 		systemPrompt: input.systemPrompt,
+		...(capabilityCatalog !== undefined ? { capabilityCatalog } : {}),
 		...(language ? { language } : {}),
 		toolIds,
 		skills,
@@ -161,6 +165,7 @@ export function hydrateHostRuntime(
 				assistantRevision: target.assistantRevision,
 				runtime: {
 					systemPrompt: target.runtime.systemPrompt,
+					capabilityCatalog: target.runtime.capabilityCatalog,
 					language: target.runtime.language,
 					toolIds: structuredClone(target.runtime.toolIds),
 					skills: structuredClone(target.runtime.skills),

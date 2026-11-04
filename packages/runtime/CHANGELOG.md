@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Publish the existing skill index and optional host `capabilityCatalog` as persisted, hidden user context only on first use or change. Append complete replacements, including empty lists, preserve system/history prefixes, and republish after compaction removes the list.
+
 ### Removed
 
 - Stop injecting tool discovery guidance and catalogs into model system prompts; keep generic discovery and availability guidance in `tool_search`, with on-demand tool schemas and MCP service guidance in search results.
@@ -51,6 +55,8 @@
 - Added optional `sessionRetention: "release-after-turn"` to release idle Agents and working history after durable settlement and reload them through the injected store, while keeping local in-memory reuse by default.
 
 ### Changed
+
+- Refresh mounted skills between model calls in the same Turn, including skill discovery, loading and prompt metadata; preserve tool restrictions, loaded deferred tools, MCP leases and durable Turn context without rebuilding the Agent.
 
 - List currently available, unloaded deferred tools by ID and a brief summary in `tool_search.description`, refreshing the list before each model request without changing the system prompt.
 

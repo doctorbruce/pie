@@ -31,6 +31,7 @@ import type {
 	SessionState,
 	SessionSummary,
 	SessionTransfer,
+	SteerAdmission,
 	SteerReceipt,
 	SubagentBinding,
 	ToolActivity,
@@ -344,6 +345,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	let queuedCommands = 0;
 	const pendingInteractions = new Map<string, PendingInteraction>();
 	const entryIds = new WeakMap<AgentMessage, string>();
+	const queuedSteers = new WeakMap<AgentMessage, SteerAdmission>();
 	function turnHasSettled(status: Turn["status"] | undefined) {
 		return status === "completed" || status === "cancelled" || status === "failed";
 	}
@@ -359,14 +361,33 @@ async function initializeRuntime(options: RuntimeOptions) {
 			turnId: session.turn.id,
 			...(requestId ? { requestId } : {}),
 			...(canonicalTurnId !== undefined ? { canonicalTurnId } : {}),
+			...(canonicalTurnId !== undefined &&
+			canonicalTurnId === session.turn.canonicalTurnId &&
+			session.turn.replacesCanonicalTurnId !== undefined
+				? { replacesCanonicalTurnId: session.turn.replacesCanonicalTurnId }
+				: {}),
 			accepted: overrides.accepted ?? true,
 			started: overrides.started ?? Boolean(session.runPromise),
 			settled: overrides.settled ?? turnHasSettled(session.turn.status),
 		};
 	}
-	function retryTurnReceipt(session: Session, requestId: string | undefined, canonicalTurnId: string | undefined) {
+	function retryTurnReceipt(
+		session: Session,
+		requestId: string | undefined,
+		canonicalTurnId: string | undefined,
+	): (TurnReceipt & Partial<Pick<SteerReceipt, "queued" | "applied" | "admission" | "durable">>) | undefined {
 		const turn = session.turn;
 		if (!turn) return undefined;
+		const admission = turn.steerAdmissions?.find((value) =>
+			canonicalTurnId !== undefined
+				? value.canonicalTurnId === canonicalTurnId
+				: requestId && value.requestId === requestId,
+		);
+		if (admission) {
+			if (canonicalTurnId !== undefined && requestId !== admission.requestId)
+				throw new RuntimeError(409, "canonicalTurnId 已绑定其他 requestId");
+			return steerReceipt(session, admission);
+		}
 		if (canonicalTurnId !== undefined) {
 			if (canonicalTurnId !== turn.canonicalTurnId && canonicalTurnId !== turn.rootCanonicalTurnId) return undefined;
 			const root = canonicalTurnId !== turn.canonicalTurnId;
@@ -380,6 +401,24 @@ async function initializeRuntime(options: RuntimeOptions) {
 				canonicalTurnId: requestId === turn.requestId ? turn.canonicalTurnId : turn.rootCanonicalTurnId,
 			});
 		return undefined;
+	}
+	function steerReceipt(session: Session, admission: SteerAdmission): SteerReceipt {
+		return {
+			sessionId: session.id,
+			turnId: session.turn!.id,
+			...(admission.requestId !== undefined ? { requestId: admission.requestId } : {}),
+			...(admission.canonicalTurnId !== undefined ? { canonicalTurnId: admission.canonicalTurnId } : {}),
+			...(admission.replacesCanonicalTurnId !== undefined
+				? { replacesCanonicalTurnId: admission.replacesCanonicalTurnId }
+				: {}),
+			accepted: true,
+			started: admission.applied,
+			settled: admission.status === "settled",
+			queued: admission.status === "queued",
+			durable: false,
+			applied: admission.applied,
+			admission: structuredClone(admission),
+		};
 	}
 	function cancellationReceipt(session: Session, accepted = true, settled?: boolean): CancellationReceipt {
 		return {
@@ -883,6 +922,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				notifyBackground: (message, jobId) => notifyBackground(session, message, jobId),
 				runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 			},
+			async (event) => await publish(session, event.type, event),
 		);
 	}
 	async function runJob(session: Session, toolCallId: string, signal?: AbortSignal) {
@@ -1006,17 +1046,17 @@ async function initializeRuntime(options: RuntimeOptions) {
 		session.cancelRequested = true;
 		if (session.turnCheckpoint) session.turnCheckpoint.cancelRequested = true;
 		if (session.turnCheckpoint?.jobs?.length) session.jobInterruption = "外部任务取消已请求";
-		const cancellation = Promise.all([persist(session), pendingJobs(session), publish(session, "snapshot")]).then(
-			async ([, pending]) => {
-				if (pending.length && !options.jobs)
-					throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消", "external_executor_unavailable");
-				for (const reference of pending) await options.jobs!.cancel(reference);
-				await rejectSessionInteractions(session.id, new Error("会话已取消"));
-				await persist(session);
-				return cancellationReceipt(session, true, false);
-			},
-		);
+		const cancellation = Promise.all([persist(session), pendingJobs(session)]).then(async ([, pending]) => {
+			await cancellationPublished;
+			if (pending.length && !options.jobs)
+				throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消", "external_executor_unavailable");
+			for (const reference of pending) await options.jobs!.cancel(reference);
+			await rejectSessionInteractions(session.id, new Error("会话已取消"));
+			await persist(session);
+			return cancellationReceipt(session, true, false);
+		});
 		session.cancelPromise = cancellation;
+		const cancellationPublished = publish(session, "snapshot");
 		const pending = Promise.allSettled([running, cancellation])
 			.then(([result]) => {
 				if (result.status === "rejected") throw result.reason;
@@ -1067,6 +1107,26 @@ async function initializeRuntime(options: RuntimeOptions) {
 		session.activeTools = new Map();
 		agent.subscribe(async (event) => {
 			if (session.jobInterruption) return;
+			const admission =
+				event.type === "message_end" && event.message.role === "user" ? queuedSteers.get(event.message) : undefined;
+			if (admission?.status === "queued") {
+				const turn = session.turn!;
+				const previous = turn.steerAdmissions?.find((value) => value.status === "applied");
+				if (previous) {
+					previous.status = "settled";
+					previous.stopReason = "guided";
+					previous.settledAtMs = Date.now();
+				}
+				admission.status = "applied";
+				admission.applied = true;
+				admission.appliedAtMs = Date.now();
+				const previousCanonicalTurnId = turn.canonicalTurnId;
+				if (admission.canonicalTurnId !== undefined || admission.requestId) turn.requestId = admission.requestId;
+				turn.canonicalTurnId = admission.canonicalTurnId;
+				turn.replacesCanonicalTurnId =
+					admission.canonicalTurnId !== previousCanonicalTurnId ? previousCanonicalTurnId : undefined;
+				if (event.type === "message_end") queuedSteers.delete(event.message);
+			}
 			if (event.type === "message_start" && event.message.role === "assistant") session.modelStreaming = true;
 			if ((event.type === "message_end" && event.message.role === "assistant") || event.type === "agent_end")
 				session.modelStreaming = false;
@@ -1152,6 +1212,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 							]
 						: [];
 				await persist(session, false, undefined, records);
+				if (admission) await publish(session, "turn.applied", undefined, undefined, undefined, admission);
 			}
 			if (event.type === "tool_execution_end")
 				traceToolStream(session, {
@@ -1221,8 +1282,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				: {}),
 		};
 	}
-	function sessionState(session: Session): SessionState {
-		const projection = publishedProjection(session);
+	function sessionState(session: Session, projection = publishedProjection(session)): SessionState {
 		return structuredClone({
 			instanceId,
 			execution: projection.execution,
@@ -1280,18 +1340,28 @@ async function initializeRuntime(options: RuntimeOptions) {
 		event?: SessionEvent["event"],
 		activity?: ActivityRecord,
 		interaction?: InteractionRequest,
+		steerAdmission?: SteerAdmission,
 	) {
+		const projection = structuredClone({
+			execution: executionState(session),
+			turn: session.turn,
+			revision: session.revision,
+			leafId: session.tree?.leafId ?? null,
+		});
+		const state = type === "agent.event" ? undefined : sessionState(session, projection);
+		const payload = structuredClone({ event, activity, interaction, steerAdmission });
 		const pending = (session.publishPromise ?? Promise.resolve()).then(async () => {
 			session.revision++;
-			session.projection = undefined;
-			const { execution, turn } = publishedProjection(session);
+			projection.revision = session.revision;
+			session.projection = projection;
+			revisionFloors.set(session.id, projection.revision);
+			if (state) state.revision = projection.revision;
+			const { execution, turn } = projection;
 			const packet: GlobalSessionEvent = {
 				type,
 				sessionId: session.id,
 				turnId: turn?.id,
-				event,
-				activity,
-				interaction,
+				...payload,
 				snapshot: { instanceId, revision: session.revision, turn, execution },
 			};
 			if (session.clients.size)
@@ -1302,11 +1372,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 					instanceId,
 					revision: session.revision,
 					turn,
-					activity,
-					interaction,
+					...payload,
 					execution,
-					event: type === "agent.event" ? projectSessionAgentEvent(event) : event,
-					...(type === "agent.event" ? {} : { state: sessionState(session) }),
+					event: type === "agent.event" ? projectSessionAgentEvent(payload.event) : payload.event,
+					...(state ? { state } : {}),
 				});
 			notifySubscribers(globalClients, packet);
 		});
@@ -1493,7 +1562,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 				assertStorageAvailable();
 				mcpAbort.signal.throwIfAborted();
 				await agent.continue();
-			} while (agent.hasQueuedMessages() && !session.cancelRequested && !session.jobInterruption);
+			} while (
+				agent.hasQueuedMessages() &&
+				!agent.state.errorMessage &&
+				!session.cancelRequested &&
+				!session.jobInterruption
+			);
 			turn.error = agent.state.errorMessage;
 			turn.status = session.cancelRequested ? "cancelled" : turn.error ? "failed" : "completed";
 		} catch (error) {
@@ -1515,6 +1589,20 @@ async function initializeRuntime(options: RuntimeOptions) {
 				turn.error = session.cancelRequested ? undefined : session.jobInterruption;
 			}
 			session.updatedAt = Date.now();
+			const admissions = turn.steerAdmissions?.filter((admission) => admission.status !== "settled") ?? [];
+			agent.clearSteeringQueue();
+			for (const admission of admissions) {
+				admission.status = "settled";
+				admission.stopReason =
+					turn.status === "completed"
+						? "end_turn"
+						: turn.status === "cancelled"
+							? "cancelled"
+							: turn.status === "interrupted"
+								? "interrupted"
+								: "error";
+				admission.settledAtMs = Date.now();
+			}
 			try {
 				const records =
 					session.cancelRequested && session.turnCheckpoint?.jobs?.length ? await closeCancelledJobs(session) : [];
@@ -1523,11 +1611,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 			} catch {
 				turn.status = "failed";
 				turn.error = "会话写入失败，请检查存储后重启服务。";
+				for (const admission of admissions) admission.stopReason = "error";
 			}
 			// Other commands may hold uncommitted state; their finally publishes after rollback.
 			if (!commandActive) await publishStorageFailure();
 			// Agent's agent_end listeners have settled; only now may another submit be admitted.
 			try {
+				for (const admission of admissions)
+					await publish(session, "steer.settled", undefined, undefined, undefined, admission);
 				if (session.jobInterruption) await publish(session, "snapshot", { type: "history.reset" });
 				await publish(session, "turn.settled");
 			} catch {
@@ -1595,6 +1686,27 @@ async function initializeRuntime(options: RuntimeOptions) {
 			cancelRequested: false,
 			clients: new Set(),
 		};
+		const abandoned =
+			loaded.turn?.steerAdmissions?.filter(
+				(admission) =>
+					admission.status === "queued" || (admission.status === "applied" && turnHasSettled(loaded.turn?.status)),
+			) ?? [];
+		for (const admission of abandoned) {
+			admission.stopReason =
+				admission.status === "queued"
+					? "interrupted"
+					: loaded.turn?.status === "completed"
+						? "end_turn"
+						: loaded.turn?.status === "cancelled"
+							? "cancelled"
+							: "error";
+			admission.status = "settled";
+			admission.settledAtMs = Date.now();
+		}
+		if (abandoned.length) {
+			await persist(loaded);
+			await publish(loaded, "snapshot");
+		}
 		sessions.set(id, loaded);
 		return loaded;
 	}
@@ -1753,6 +1865,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 						notifyBackground: (message, jobId) => notifyBackground(session, message, jobId),
 						runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 					},
+					async (event) => await publish(session, event.type, event),
 				);
 				session = {
 					id,
@@ -2056,7 +2169,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				return cancellationReceipt(session, false);
 			}, false);
 		},
-		steer(sessionId: string, body: TurnInput & { turnId: string }) {
+		steer(sessionId: string, body: TurnInput & { turnId: string }): Promise<SteerReceipt> {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
 				const content = turnContent(body);
@@ -2065,7 +2178,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const canonicalTurnId = optionalCanonicalTurnId(body);
 				const retry =
 					canonicalTurnId === undefined ? undefined : retryTurnReceipt(session, requestId, canonicalTurnId);
-				if (retry) return { ...retry, queued: true, durable: false } satisfies SteerReceipt;
+				if (retry)
+					return { ...retry, queued: retry.queued ?? false, durable: false, applied: retry.applied ?? true };
 				const messageIdentity = optionalMessageIdentity(body);
 				if (session.turnCheckpoint) {
 					session.turnCheckpoint.blockedReason = "包含尚未持久化的 Steer 队列";
@@ -2082,16 +2196,29 @@ async function initializeRuntime(options: RuntimeOptions) {
 					...messageIdentity,
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
-				if (canonicalTurnId !== undefined || requestId) session.turn!.requestId = requestId;
-				session.turn!.canonicalTurnId = canonicalTurnId;
+				const turn = session.turn!;
+				const predecessor = turn.steerAdmissions?.at(-1);
+				const previousCanonicalTurnId = predecessor ? predecessor.canonicalTurnId : turn.canonicalTurnId;
+				const admission: SteerAdmission = {
+					...(canonicalTurnId !== undefined ? { canonicalTurnId } : {}),
+					...(requestId !== undefined ? { requestId } : {}),
+					...(canonicalTurnId !== undefined &&
+					canonicalTurnId !== previousCanonicalTurnId &&
+					previousCanonicalTurnId !== undefined
+						? { replacesCanonicalTurnId: previousCanonicalTurnId }
+						: {}),
+					status: "queued",
+					applied: false,
+					acceptedAtMs: userMessage.timestamp,
+				};
+				turn.steerAdmissions ??= [];
+				turn.steerAdmissions.push(admission);
+				queuedSteers.set(userMessage, admission);
 				agent.steer(userMessage);
+				const receipt = steerReceipt(session, admission);
 				await persist(session);
 				await publish(session, "snapshot");
-				return {
-					...turnReceipt(session, { started: true, settled: false }),
-					queued: true,
-					durable: false,
-				} satisfies SteerReceipt;
+				return receipt;
 			}, false);
 		},
 		replyInteraction(sessionId: string, interactionId: string, body: InteractionReply) {

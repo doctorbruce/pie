@@ -25,6 +25,7 @@ import type {
 	ContextCompaction,
 	InteractionRequest,
 	Mode,
+	ModelRetryEvent,
 	ModelSelection,
 	RuntimeConfig,
 	ServerInfo,
@@ -132,6 +133,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				report?: (event: CompactionEvent) => unknown;
 			},
 			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground" | "runJob">,
+			report?: (event: ModelRetryEvent) => unknown,
 		) {
 			const runtime = structuredClone(configInput);
 			parseToolIds(runtime.toolIds, toolIds);
@@ -307,7 +309,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 					headers: { ...options?.headers, ...modelHeaders },
 					onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
 				});
-			const retryStream = createRetryStream(realStream, automation?.retry);
+			const retryStream = createRetryStream(realStream, automation?.retry, report);
 			const compactStream = compactContext
 				? createCompactionStream(retryStream, compactContext, { enabled: automation?.compaction.enabled })
 				: retryStream;

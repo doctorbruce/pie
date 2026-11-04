@@ -56,6 +56,11 @@
 
 ### Fixed
 
+- Publish ordinary model retry attempts and final outcomes through `model.retry` with a stable per-call identity, independently of compaction, so hosts can show progress and stop silent waiting.
+- Retry explicit `Upstream API error: 530` gateway failures wrapped in a successful HTTP response without treating unrelated numeric text as a retryable error.
+
+- Separate queued steering admission from applied execution ownership through `steerAdmissions`, `turn.applied` and `steer.settled`; keep old model/tool events on their original owner until input consumption, preserve ordered admissions and retries, settle abandoned inputs without replay, and capture publication payloads before asynchronous delivery. Keep post-admission save failures observable without claiming durable steering queues.
+
 - Retry transient model failures before forwarding response content or tool events, including empty-body HTTP 503s; use five retries with interruptible, jittered exponential backoff capped at 30 seconds, without replaying completed tools or layering SDK retries.
 
 - Pin published execution, Turn and history leaf to their revision, including asynchronous full snapshots; publish cross-session storage failure and preserve revision watermarks across eviction.

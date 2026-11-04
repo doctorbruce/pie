@@ -54,7 +54,9 @@
 
 交互的“允许一次”发送 `{ approved: true }`，“始终允许”发送 `{ approved: true, remember: true }`。后者仅适用于请求携带 `remember: { permission, patterns }` 的原生 `bash/external_directory` 权限，先持久化到实际执行会话，再批准当前工具；匹配范围可跨回合和重启复用，新会话、Fork 及父子会话不互相继承。命令按入口和工作目录分类，外部路径保持准确范围，详见[授权记忆契约](../../docs/runtime-embedding.md#交互授权记忆)。凭据、邮件等业务确认仍逐次回答；拒绝或无范围请求带 `remember: true` 返回 400。
 
-`TurnReceipt` 包含 `sessionId / turnId / requestId? / accepted / started / settled`；受理和启动不表示完成。`SteerReceipt` 另含 `queued: true, durable: false`，不承诺未持久化队列的崩溃重放；`CancellationReceipt` 另含 `cancellationRequested / durable`，不代表工具已停止或外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；当前 request ID 的提交重试仅查询已有回执，在途取消复用同一操作，终态取消返回 `accepted: false`。`resume.available` 只允许恢复预检；宿主权限另行叠加。
+`TurnReceipt` 包含 `sessionId / turnId / requestId? / canonicalTurnId? / replacesCanonicalTurnId? / accepted / started / settled`；受理和启动不表示完成。`turns/steer` 可提供 `canonicalTurnId`；Steer 保留 native Turn ID 与首轮 `rootCanonicalTurnId`。受理回执的前驱是最近受理 canonical，实际应用事件的 Turn 前驱是实际旧 owner；handoff 不表示 native cancelled。
+
+`SteerReceipt` 另含 `queued/applied/durable` 与 `admission`。新受理时 `queued: true, started/applied: false, durable: false`，`turn.canonicalTurnId/requestId` 仍属旧执行者；消费输入后原子保存 owner、历史和 applied，发布 `turn.applied`。`Turn.steerAdmissions` 保存有序受理记录的 `status: queued|applied|settled`、`applied`、身份、前驱、时间与 `stopReason`，重试可查询对应事实。取消或结算可能早于 HTTP 回执；未消费的受理也逐条 `steer.settled`，不能 guided 旧 owner。排队后保存失败的 503 是未知结果，须读取 admission 核实，不能自动重发。重启丢失队列会结算 interrupted，不重放。命中原始 submit 身份的 steer 重试 `applied: true, queued: false`，不包含 admission。`CancellationReceipt` 的 `cancellationRequested/durable` 不代表外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；在途取消复用操作，终态取消 `accepted: false`，恢复可用只允许预检；宿主权限另行叠加。
 
 `turn.settled` 和 SDK `waitForTurn` 不表示后台工作或用户目标完成。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。脱离前台的 Shell 需通过 job_kill 停止，取消已结算 Turn 是无操作；活跃子作业会阻止父删除。
 
@@ -221,13 +223,16 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 
 - `snapshot`：会话 SSE 新连接/重连时发送最近 50 条消息与运行状态，后续以增量更新；不回放断线期间的原始事件。
 - `agent.event`：原版 Agent 事件，携带 session/turn 标识；不要把内部 `turn_end`（一轮模型响应）当成用户提交完成。
+- `model.retry`：普通模型请求重试，`event` 含稳定的 `retryId`、`status: started/completed/failed`、`attempt` 和错误 `message`；仅 started 带 Unix 毫秒时间 `next`。同次调用保持 ID，不同调用使用新 ID；关闭压缩仍通知，会话与全局流均携带发布时的 Turn 身份。重试终态先于 Turn 结算；取消等待时重试为 failed，Turn 仍为 cancelled。
 - `activity.updated`：携带持久技能记录 activity，同一个 id 从 running 更新至最终状态；snapshot.activities 保存历史。
 - `compaction.updated`：模型上下文达到预算后生成新摘要；snapshot.compaction 保存摘要边界、压缩次数和压缩前后的估算 token 数。
 - `compaction.started` / `compaction.retry` / `compaction.finished`：自动压缩的开始、退避重试和结束；结束状态为 completed、failed 或 cancelled，全局 SSE 也提供这些生命周期事件。
 - `interaction.requested / interaction.resolved`：携带确认请求及其结束；execution 同步反映是否仍有待回答交互。
+- `turn.applied`：Steer 用户消息已消费并保存，顶层 `steerAdmission` 标明本条应用事实，Turn 归属此时才切换。
+- `steer.settled`：顶层 `steerAdmission` 给出受理的结束原因；`applied: false` 表示尚未进入执行，不结算旧 owner 为 guided。
 - `turn.settled`：先持久化输入，再等待 `agent.continue()` 完成、Agent 空闲后发送。状态为 `completed`、`cancelled` 或 `failed`，会话增量中的失败原因在 `turn.error`。
 
-不带参数的全局 `/events` 不发送启动快照。每个包携带同源的 `instanceId / revision / execution`；Agent 原始内容不公开时仍保留状态包，交互结束也不会被过滤。全局 `snapshot / turn.settled` 另带最小 `snapshot: { turn, execution }`，不携带完整历史或 assistant partial。同一版本的全局摘要、会话增量与 HTTP 快照一致；模型流与活动工具可以同时存在，结算后的瞬时活动归零。
+不带参数的全局 `/events` 不发送启动快照。每个包携带同源的 `instanceId / revision / execution` 和最小 `snapshot: { turn, execution }`，保留事件发布时的 canonical/request owner；`turn.applied / steer.settled` 同时保留顶层 `steerAdmission`。Agent 原始内容不公开时仍保留状态包，交互结束也不会被过滤；不携带完整历史或 assistant partial。同一版本的全局摘要、会话增量与 HTTP 快照一致；模型流与活动工具可以同时存在，结算后的瞬时活动归零。
 
 指定 `GET /events?sessionId=A&sessionId=B` 时，首包为 `{ type: "execution.baseline", instanceId, sessions: [{ sessionId, revision, turn?, execution }] }`。后续只推送指定会话高于各自基线水位的事件；即使断线期间已经结算且重连后没有新事件，也能立即恢复终态。不读取历史、不扫描全部会话、不持久重放；不存在的会话返回 404，空 ID 或超过 200 个返回 400。调用方先按自己的权限确定会话范围。
 

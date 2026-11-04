@@ -30,6 +30,7 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
 	"504",
 	"520",
 	"524",
+	"\\bupstream api error:\\s*530\\b",
 	"service.?unavailable",
 	"server.?error",
 	"internal.?error",

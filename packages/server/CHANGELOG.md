@@ -41,6 +41,10 @@
 
 ### Fixed
 
+- Retain `model.retry` lifecycle payloads in global and scoped HTTP SSE projections so hosts receive the retry identity, status, attempt, message and next-attempt time.
+
+- Preserve the frozen Turn identity on every global HTTP SSE packet and forward `steerAdmission` on `turn.applied` and `steer.settled`, so hosts observe steering application and keep subsequent content on the correct execution owner.
+
 - Preserve Runtime control rejection reason codes and cancellation durability through HTTP and Local wrappers, including current-Turn retries and explicit best-effort stops after storage failure.
 
 - Forward the same execution projection on every global SSE packet, retain interaction resolution and state-only Agent events, and include execution in session bootstraps.

@@ -44,7 +44,9 @@ Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以�
 
 停止由共享 Agent loop 中断模型流、工具执行和钩子的异步等待；底层 Promise 不响应 `AbortSignal` 时也不阻塞本轮结束。中断时保留助手已输出的文本，为已启动的工具记录中断错误，并丢弃迟到的进度与结果；Runtime 仍等待终态事件和持久化完成后放行下一轮。取消不能撤销工具已经产生的外部副作用，工具仍须响应信号释放连接、进程等资源；同线程同步阻塞也不能由异步取消抢占。
 
-真实模型的瞬时错误（包括空正文 HTTP 503）在 Runtime 模型流入口自动重试，默认最多 5 次、2 秒起指数退避并增加最多 25% 抖动、30 秒封顶，等待可取消。仅重试尚未转发内容或工具事件且无有效响应内容的请求，保留原 Turn 与已完成工具结果；已输出的模型流不会自动重放。SDK 重试关闭，上下文超限仍走压缩恢复。独立模式沿用 `settings.retry`，宿主压缩配置继续隔离本地设置文件，详见[配置与重试边界](compaction-integration.md#配置)。
+真实模型的瞬时错误（包括空正文 HTTP 503 和 `Upstream API error: 530`）在 Runtime 模型流入口自动重试，默认最多 5 次、2 秒起指数退避并增加最多 25% 抖动、30 秒封顶，等待可取消。仅重试尚未转发内容或工具事件且无有效响应内容的请求，保留原 Turn 与已完成工具结果；已输出的模型流不会自动重放。SDK 重试关闭，上下文超限仍走压缩恢复。独立模式沿用 `settings.retry`，宿主压缩配置继续隔离本地设置文件，详见[配置与重试边界](compaction-integration.md#配置)。
+
+普通模型重试通过 `model.retry` 发布 `started/completed/failed`，同次模型调用保持一个 `retryId`，携带重试次数和错误说明，`started.next` 为下次尝试的 Unix 毫秒时间。会话与全局订阅均收到该事件及发布时固定的 Turn 身份；HTTP `/events` 和 `/events?sessionId=...` 的轻量投影同样保留完整重试载荷，关闭上下文压缩仍会通知。重试结束先于 Turn 结算，等待时取消发布 `failed`，实际 Turn 仍按取消结算。
 
 ### 配置何时生效
 
@@ -150,7 +152,7 @@ Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 T
 
 四个控制入口与 `execution.actions` 共用新操作决策，HTTP 以 `reason` 返回稳定拒绝代码。幂等提交重试只查询当前回执，重复取消复用在途操作，终态取消不产生新操作；恢复可用只允许进入历史、账本及外部结果预检。存储故障会发布所有已装载会话的新摘要；普通新操作拒绝，显式 `bestEffort: true` 的活跃取消只尽力停止本实例，回执 `durable: false`，不保证持久取消或外部任务停止。详细契约见 [嵌入接入](runtime-embedding.md#事件隔离与生命周期)。
 
-宿主可在 submit/steer 提供 `canonicalTurnId`，原样保存在 Turn 和回执中。Submit 优先按 canonical 与原 requestId 的固定关联去重，拒绝同 canonical 换 requestId；不同 canonical 可复用连接本地的数字 requestId，得到新的 native Turn。Steer 保持物理 Turn ID，更新当前关联并保留原始关联供重试。未提供 canonical 时兼容原 requestId 行为；范围和验证见 [固定目标取消 SPEC](specs/targeted-cancellation.md)。
+宿主可在 submit/steer 提供 `canonicalTurnId`，Submit 按 canonical 与原 requestId 的固定关联去重；不同 canonical 可复用连接本地的数字 requestId，得到新的 native Turn。Steer 保持物理 Turn ID，受理仅追加 `Turn.steerAdmissions`，回执 `queued: true, applied/started: false`；`turn.canonicalTurnId/requestId` 继续表示实际执行者。旧模型、工具和交互完成后，消费 user 消息时原子保存历史、实际 owner 与 applied，再发 `turn.applied`。受理前驱指向最近受理者，应用前驱指向实际被接替者；原始关联保留，连续队列逐条应用。取消、失败和关闭逐条发 `steer.settled`，未消费记录 `applied: false`，清空消息而不重放。回执固定准入瞬间，保存失败的 503 仍可能已受理，需通过 `turn.steerAdmissions` 核对 queued/applied/settled；冷装载把丢失队列结算为 interrupted，不能自动重发。范围和验证见 [固定目标取消 SPEC](specs/targeted-cancellation.md)。
 
 ### 多 Core 会话同步
 

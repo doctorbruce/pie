@@ -98,7 +98,7 @@ function globalAgentEvent(event: SessionEvent["event"]) {
 }
 
 function projectGlobalPacket(packet: GlobalSessionEvent) {
-	const { type, sessionId, turnId, snapshot, interaction, event, activity } = packet;
+	const { type, sessionId, turnId, snapshot, interaction, event, activity, steerAdmission } = packet;
 	const base = {
 		type,
 		sessionId,
@@ -106,13 +106,13 @@ function projectGlobalPacket(packet: GlobalSessionEvent) {
 		instanceId: snapshot.instanceId,
 		revision: snapshot.revision,
 		execution: snapshot.execution,
+		snapshot: { turn: snapshot.turn, execution: snapshot.execution },
 	};
 	if (type === "agent.event") return { ...base, event: globalAgentEvent(event) };
-	if (type === "snapshot" || type === "turn.settled")
-		return { ...base, snapshot: { turn: snapshot.turn, execution: snapshot.execution } };
+	if (type === "turn.applied" || type === "steer.settled") return { ...base, steerAdmission };
 	if (type === "interaction.requested" || type === "interaction.resolved") return { ...base, interaction, event };
 	if (type === "activity.updated") return { ...base, activity };
-	if (type.startsWith("compaction.")) return { ...base, event };
+	if (type.startsWith("compaction.") || type === "model.retry") return { ...base, event };
 	return base;
 }
 

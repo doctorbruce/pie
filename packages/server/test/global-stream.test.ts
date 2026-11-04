@@ -10,6 +10,7 @@ import {
 	type ExecutionBaseline,
 	type SessionEvent,
 	type SessionSnapshot,
+	type SteerReceipt,
 	type TurnReceipt,
 } from "@pie/runtime";
 import { applySessionEvent } from "@pie/runtime/session-events";
@@ -94,6 +95,127 @@ async function* readEvents<Packet = SessionEvent>(response: Promise<Response>): 
 		await reader.cancel();
 	}
 }
+
+test("global HTTP SSE preserves execution ownership and applied steer facts", { timeout: 15000 }, async (context) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-global-handoff-"));
+	const core = createCoreServer({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });
+	const abort = new AbortController();
+	context.after(async () => {
+		abort.abort();
+		await core.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+	const address = core.server.address();
+	assert(address && typeof address !== "string");
+	const base = `http://127.0.0.1:${address.port}`;
+	const post = (path: string, body: unknown) =>
+		fetch(`${base}${path}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+	const runtime = await core.ready;
+	await runtime.registerHostRuntimes([
+		{
+			assistantId: "handoff",
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Test", toolIds: ["bash"], skills: [], subagents: [] },
+		},
+	]);
+	const session = await runtime.createSession({ assistantId: "handoff", mode: "faux" });
+	const packets: SessionEvent[] = [];
+	let requested = () => {};
+	const waiting = new Promise<void>((resolve) => {
+		requested = resolve;
+	});
+	await runtime.subscribe(session.id, (packet) => {
+		packets.push(packet);
+		if (packet.type === "interaction.requested") requested();
+	});
+	let subscribed = () => {};
+	const ready = new Promise<void>((resolve) => {
+		subscribed = resolve;
+	});
+	const subscribeAll = runtime.subscribeAll;
+	runtime.subscribeAll = (...args) => {
+		const unsubscribe = subscribeAll(...args);
+		subscribed();
+		return unsubscribe;
+	};
+	const global = readEvents(fetch(`${base}/events`, { signal: abort.signal }));
+	const globalPackets: SessionEvent[] = [];
+	const collect = async (stream: AsyncGenerator<SessionEvent>, target: SessionEvent[]) => {
+		for await (const packet of stream) {
+			target.push(packet);
+			if (packet.type === "snapshot" && packet.snapshot?.turn?.status === "completed") return;
+		}
+	};
+	const collectingGlobal = collect(global, globalPackets);
+	await ready;
+	const scoped = readEvents<ExecutionBaseline | SessionEvent>(
+		fetch(`${base}/events?sessionId=${session.id}`, { signal: abort.signal }),
+	);
+	assert.equal((await scoped.next()).value?.type, "execution.baseline");
+	const scopedPackets: SessionEvent[] = [];
+	const collectingScoped = (async () => {
+		for await (const packet of scoped) {
+			assert(packet.type !== "execution.baseline");
+			scopedPackets.push(packet);
+			if (packet.type === "snapshot" && packet.snapshot?.turn?.status === "completed") return;
+		}
+	})();
+	const first = (await (
+		await post(`/sessions/${session.id}/turns`, {
+			text: '调用工具 bash {"command":"must-not-execute"}',
+			requestId: "request-A",
+			canonicalTurnId: "canonical-A",
+		})
+	).json()) as TurnReceipt;
+	await waiting;
+	const steering = await post(`/sessions/${session.id}/steer`, {
+		turnId: first.turnId,
+		text: "continue with the comparison",
+		requestId: "request-B",
+		canonicalTurnId: "canonical-B",
+	});
+	assert.equal(steering.status, 202);
+	const receipt = (await steering.json()) as SteerReceipt;
+	assert.equal(receipt.applied, false);
+	const queued = await runtime.getSession(session.id, { limit: 1 });
+	assert.equal(queued.turn?.canonicalTurnId, "canonical-A");
+	assert.equal(queued.turn?.steerAdmissions?.[0].status, "queued");
+	await runtime.replyInteraction(session.id, queued.interactions[0].id, { approved: false });
+	await runtime.waitForTurn(session.id);
+	await Promise.all([collectingGlobal, collectingScoped]);
+	for (const received of [globalPackets, scopedPackets]) {
+		assert.deepEqual(
+			received.map((packet) => packet.revision),
+			packets.map((packet) => packet.revision),
+		);
+		const applied = received.find((packet) => packet.type === "turn.applied");
+		assert.equal(applied?.steerAdmission?.canonicalTurnId, "canonical-B");
+		assert.equal(applied?.steerAdmission?.replacesCanonicalTurnId, "canonical-A");
+		assert.equal(applied?.steerAdmission?.applied, true);
+		const oldTool = received.find((packet) => packet.event?.type === "tool_execution_end");
+		assert.equal(oldTool?.snapshot?.turn?.canonicalTurnId, "canonical-A");
+		assert(oldTool && applied && oldTool.revision < applied.revision);
+		const continued = received.find(
+			(packet) => packet.revision > applied.revision && packet.event?.type === "message_update",
+		);
+		assert.equal(continued?.snapshot?.turn?.canonicalTurnId, "canonical-B");
+		const settled = received.find((packet) => packet.type === "steer.settled");
+		assert.equal(settled?.steerAdmission?.canonicalTurnId, "canonical-B");
+		assert.equal(settled?.steerAdmission?.stopReason, "end_turn");
+		for (const packet of received) {
+			const local = packets.find((value) => value.revision === packet.revision);
+			assert(local);
+			assert.deepEqual(packet.snapshot?.turn, JSON.parse(JSON.stringify(local.turn)));
+			assert.deepEqual(packet.steerAdmission, local.steerAdmission);
+			assert.equal("messages" in (packet.snapshot ?? {}), false);
+		}
+	}
+});
 
 test(
 	"Local cancellation reaches active execution before queued history and shutdown",

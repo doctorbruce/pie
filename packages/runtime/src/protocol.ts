@@ -186,14 +186,28 @@ export type Turn = {
 	rootRequestId?: string;
 	canonicalTurnId?: string;
 	rootCanonicalTurnId?: string;
+	replacesCanonicalTurnId?: string;
+	steerAdmissions?: SteerAdmission[];
 	status: "running" | "interrupted" | "completed" | "cancelled" | "failed";
 	error?: string;
+};
+export type SteerAdmission = {
+	canonicalTurnId?: string;
+	requestId?: string;
+	replacesCanonicalTurnId?: string;
+	status: "queued" | "applied" | "settled";
+	applied: boolean;
+	stopReason?: "guided" | "end_turn" | "cancelled" | "interrupted" | "error";
+	acceptedAtMs: number;
+	appliedAtMs?: number;
+	settledAtMs?: number;
 };
 export type TurnReceipt = {
 	sessionId: string;
 	turnId: string;
 	requestId?: string;
 	canonicalTurnId?: string;
+	replacesCanonicalTurnId?: string;
 	accepted: boolean;
 	started: boolean;
 	settled: boolean;
@@ -205,6 +219,8 @@ export type CancellationReceipt = TurnReceipt & {
 export type SteerReceipt = TurnReceipt & {
 	queued: boolean;
 	durable: boolean;
+	applied: boolean;
+	admission?: SteerAdmission;
 };
 export type SessionAction = "submit" | "steer" | "cancel" | "resume";
 export type ActionUnavailableReason =
@@ -323,16 +339,27 @@ export type SessionTransfer = {
 	createdAt?: number;
 	updatedAt?: number;
 };
+export type ModelRetryEvent = {
+	type: "model.retry";
+	retryId: string;
+	status: "started" | "completed" | "failed";
+	attempt: number;
+	message: string;
+	next?: number;
+};
 export type SessionEvent = {
 	type:
 		| "snapshot"
 		| "agent.event"
 		| "turn.settled"
+		| "turn.applied"
+		| "steer.settled"
 		| "activity.updated"
 		| "compaction.updated"
 		| "compaction.started"
 		| "compaction.finished"
 		| "compaction.retry"
+		| "model.retry"
 		| "interaction.requested"
 		| "interaction.resolved";
 	sessionId: string;
@@ -343,6 +370,7 @@ export type SessionEvent = {
 	event?: { type: string; [key: string]: unknown };
 	activity?: ActivityRecord;
 	interaction?: InteractionRequest;
+	steerAdmission?: SteerAdmission;
 	execution?: SessionExecution;
 	state?: SessionState;
 	snapshot?: SessionSnapshot;
@@ -350,7 +378,7 @@ export type SessionEvent = {
 export type MaterializedSessionEvent = Omit<SessionEvent, "snapshot"> & { snapshot: SessionSnapshot };
 export type GlobalSessionEvent = Pick<
 	SessionEvent,
-	"type" | "sessionId" | "turnId" | "event" | "activity" | "interaction"
+	"type" | "sessionId" | "turnId" | "event" | "activity" | "interaction" | "steerAdmission"
 > & {
 	snapshot: Pick<SessionSnapshot, "instanceId" | "revision" | "turn" | "execution">;
 };

@@ -21,6 +21,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "@pie/local/agent";
 import { createRuntime } from "@pie/runtime";
+import { isCapabilityCatalog } from "@pie/runtime/capability-catalog";
 import { BackgroundJobs } from "@pie/runtime/jobs";
 import { withToolProgress } from "@pie/runtime/tool-progress";
 import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
@@ -117,7 +118,10 @@ test("terminal job_output removes queued receipts without removing other follow-
 	);
 	await host.runtime.waitForTurn(host.session.id);
 	assert.equal(host.requests, 3);
-	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 2);
+	assert.equal(
+		host.agent.state.messages.filter((message) => message.role === "user" && !isCapabilityCatalog(message)).length,
+		2,
+	);
 	assert.doesNotMatch(JSON.stringify(host.agent.state.messages), /Receipt /);
 });
 
@@ -144,7 +148,10 @@ test("late completion receipts do not wake a model after terminal job_output", a
 	release.resolve();
 	await notified.promise;
 	assert.equal(host.requests, 2);
-	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 1);
+	assert.equal(
+		host.agent.state.messages.filter((message) => message.role === "user" && !isCapabilityCatalog(message)).length,
+		1,
+	);
 });
 
 test("unread completion receipts are delivered together in one follow-up model request", async (context) => {
@@ -168,7 +175,10 @@ test("unread completion receipts are delivered together in one follow-up model r
 	host.respond(fauxAssistantMessage("Initial answer"));
 	await host.runtime.waitForTurn(host.session.id);
 	assert.equal(host.requests, 2);
-	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 4);
+	assert.equal(
+		host.agent.state.messages.filter((message) => message.role === "user" && !isCapabilityCatalog(message)).length,
+		4,
+	);
 });
 
 test("running job_output preserves the later completion notification", async (context) => {
@@ -191,7 +201,10 @@ test("running job_output preserves the later completion notification", async (co
 	completion.resolve({ output: "finished" });
 	await notified.promise;
 	assert.equal(host.requests, 3);
-	assert.equal(host.agent.state.messages.filter((message) => message.role === "user").length, 2);
+	assert.equal(
+		host.agent.state.messages.filter((message) => message.role === "user" && !isCapabilityCatalog(message)).length,
+		2,
+	);
 });
 
 function tool(execute: AgentTool["execute"]): AgentTool {

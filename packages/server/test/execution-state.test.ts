@@ -461,6 +461,7 @@ test("an admitted command keeps the storage rejection contract if another sessio
 
 test("storage failure fanout waits for another command to roll back its uncommitted Turn", async (context) => {
 	const host = await start(context);
+	await until(() => host.requests === 1);
 	const idle = await host.runtime.createSession({ assistantId: "assistant" });
 	let entered = false;
 	let release = () => {};
@@ -478,11 +479,16 @@ test("storage failure fanout waits for another command to roll back its uncommit
 	try {
 		await until(() => entered);
 		host.finishModel();
-		await until(() => host.events.some((packet) => packet.type === "turn.settled"));
+		await until(() => !host.runtime.storageAvailable);
+		assert.equal(
+			host.global.some((packet) => packet.sessionId === idle.id && packet.snapshot.turn !== undefined),
+			false,
+		);
 	} finally {
 		release();
 	}
 	await assert.rejects(admission, { reason: "storage_unavailable" });
+	await host.runtime.waitForTurn(host.session.id);
 	const snapshot = await host.runtime.getSession(idle.id, { limit: 1 });
 	assert.equal(snapshot.turn, undefined);
 	assert.deepEqual(snapshot.execution.actions.submit, { available: false, reason: "storage_unavailable" });

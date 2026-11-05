@@ -125,8 +125,12 @@ test("tree retains alternate branches, restores them after restart, and forks af
 	assert.equal(rewind.session.turn, undefined);
 	const alternative = await submit(running.base, source.id, "修改后的第二条消息");
 	const branched = await getTree();
-	assert.equal(branched.entries.length, original.messages.length + 2);
-	assert.equal(branched.entries.filter((entry) => entry.active).length, alternative.messages.length);
+	assert.equal(branched.entries.length, tree.entries.length + 2);
+	// Hidden capability context is a durable tree node, not a displayed message.
+	assert.equal(
+		branched.entries.filter((entry) => entry.active && entry.selectable).length,
+		alternative.messages.length,
+	);
 	assert.equal(branched.entries.find((entry) => entry.id === originalLeaf)?.active, false);
 	assert.equal((await post(running.base, `/sessions/${source.id}/tree`, { entryId: "missing" })).status, 400);
 	assert.deepEqual(

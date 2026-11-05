@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { setTimeout } from "node:timers/promises";
-import { createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
+import { contentText, createModels, fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "@pie/local/agent";
+import { isCapabilityCatalog } from "@pie/runtime/capability-catalog";
 import type {
 	Assistant,
 	MaterializedSessionEvent,
@@ -129,7 +130,7 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 			permissionRequests.push(String(request.metadata?.permission ?? ""));
 		},
 	);
-	assert.match(agent.state.systemPrompt, /sample\/nested/);
+	assert.doesNotMatch(agent.state.systemPrompt, /sample\/nested/);
 	assert.doesNotMatch(agent.state.systemPrompt, /NESTED_BODY_ONLY_AFTER_LOAD/);
 	const skillTool = agent.state.tools.find((tool) => tool.name === "skill");
 	assert(skillTool);
@@ -157,7 +158,17 @@ test("Astron manifest paths flatten to skills; assistant mounting survives resta
 	]);
 	const models = createModels();
 	models.setProvider(faux.provider);
-	agent.streamFunction = models.streamSimple.bind(models);
+	let firstRequest = true;
+	agent.streamFunction = (model, request, options) => {
+		if (firstRequest) {
+			firstRequest = false;
+			const catalog = request.messages.find(isCapabilityCatalog);
+			assert(catalog, "skills must be advertised in the first model request");
+			assert.match(contentText(catalog.content), /sample\/nested/);
+			assert.doesNotMatch(contentText(catalog.content), /NESTED_BODY_ONLY_AFTER_LOAD/);
+		}
+		return models.streamSimple(model, request, options);
+	};
 	await agent.prompt("测试插件脚本");
 	assert.equal(agent.state.errorMessage, undefined);
 	assert.equal(permissionRequests.includes("skill"), false);

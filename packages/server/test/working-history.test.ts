@@ -16,7 +16,13 @@ import {
 } from "@earendil-works/pi-ai";
 import { createAgentFactory } from "@pie/local/agent";
 import { checkpointMessage } from "@pie/runtime/compaction";
-import type { Assistant, ContextCompaction, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
+import type {
+	Assistant,
+	ContextCompaction,
+	SessionSnapshot,
+	SessionTransfer,
+	SessionTree,
+} from "@pie/runtime/protocol";
 import type { SavedSession } from "@pie/runtime/runtime-store";
 import { openStore } from "../../local/src/store.ts";
 import { createCoreServer } from "../src/server.ts";
@@ -301,8 +307,12 @@ test("compressed sessions release old message objects and retain disk-backed for
 	assert.equal(forkResponse.status, 201);
 	const fork = (await forkResponse.json()) as { session: SessionSnapshot };
 	assert.deepEqual(fork.session.messages, snapshot.messages.slice(0, 2));
-	const tree = (await (await fetch(`${base}/sessions/${session.id}/tree`)).json()) as { entries: { id: string }[] };
-	assert.equal(tree.entries.length, 14);
+	const tree = (await (await fetch(`${base}/sessions/${session.id}/tree`)).json()) as SessionTree;
+	assert.equal(tree.entries.filter((entry) => entry.selectable).length, 14);
+	const secondUser = tree.entries.find(
+		(entry) => entry.role === "user" && entry.text === contentText(snapshot.messages[2].content),
+	);
+	assert(secondUser);
 	await core.close();
 	const db = new DatabaseSync(join(directory, "agent.sqlite"));
 	const metadata = JSON.parse(
@@ -311,7 +321,7 @@ test("compressed sessions release old message objects and retain disk-backed for
 	assert(!("messages" in metadata) && !("tree" in metadata));
 	assert.equal(
 		db.prepare("SELECT COUNT(*) AS count FROM session_entries WHERE session_id = ?").get(session.id)!.count,
-		14,
+		tree.entries.length,
 	);
 	db.close();
 	core = createCoreServer({ PI_DATA_DIR: directory });
@@ -326,14 +336,14 @@ test("compressed sessions release old message objects and retain disk-backed for
 			.at(-1)
 			?.body.includes("<previous-summary>"),
 	);
-	const oldBranch = await post(`/sessions/${session.id}/tree`, { entryId: tree.entries[2].id });
+	const oldBranch = await post(`/sessions/${session.id}/tree`, { entryId: secondUser.id });
 	assert.equal(oldBranch.status, 200);
 	const selected = (await oldBranch.json()) as { session: SessionSnapshot };
 	assert.equal(selected.session.messages.length, 2);
 	assert.equal(selected.session.compaction, undefined);
 	const alternate = await submit("alternate branch");
 	assert.equal(alternate.messages.length, 4);
-	const restoredBranch = await post(`/sessions/${session.id}/tree`, { entryId: tree.entries[13].id });
+	const restoredBranch = await post(`/sessions/${session.id}/tree`, { entryId: tree.leafId });
 	assert.equal(restoredBranch.status, 200);
 	const original = (await restoredBranch.json()) as { session: SessionSnapshot };
 	assert.deepEqual(original.session.messages, snapshot.messages);

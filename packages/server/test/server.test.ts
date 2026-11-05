@@ -317,7 +317,7 @@ test("global SSE stays incremental when the session snapshot exceeds the client 
 		if (packet.snapshot) assert.deepEqual(Object.keys(packet.snapshot), ["turn", "execution"]);
 		if (packet.type === "agent.event") {
 			receivedAgentEvent = true;
-			assert.equal("snapshot" in packet, false);
+			assert(packet.snapshot?.execution, "global events retain the lightweight execution projection");
 			assert.equal("message" in (packet.event ?? {}), false);
 			assert.equal("messages" in (packet.event ?? {}), false);
 			if (packet.event?.type === "message_update") {

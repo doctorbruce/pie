@@ -154,11 +154,13 @@ for (const checkpoint of ["missing", "off-branch"] as const) {
 		try {
 			if (checkpoint === "off-branch")
 				database
-					.prepare("INSERT INTO session_entries VALUES (?, ?, NULL, ?, ?)")
+					.prepare(
+						"INSERT INTO session_entries (session_id, id, parent_id, seq, payload) VALUES (?, ?, NULL, (SELECT COALESCE(MAX(seq), 0) + 1 FROM session_entries WHERE session_id = ?), ?)",
+					)
 					.run(
 						saved.sessionId,
 						checkpoint,
-						3,
+						saved.sessionId,
 						JSON.stringify({ role: "user", content: "another branch", timestamp: 1 }),
 					);
 			database

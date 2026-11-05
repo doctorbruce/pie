@@ -62,6 +62,8 @@
 
 ### Fixed
 
+- Cancel local Shell/Task jobs belonging to an explicitly stopped Turn, including descendant background work after a Task returns; wait for their cleanup before Turn settlement and suppress cancellation wakeups. Preserve jobs from normally completed earlier Turns and other sessions.
+
 - Publish ordinary model retry attempts and final outcomes through `model.retry` with a stable per-call identity, independently of compaction, so hosts can show progress and stop silent waiting.
 - Retry explicit `Upstream API error: 530` gateway failures wrapped in a successful HTTP response without treating unrelated numeric text as a retryable error.
 

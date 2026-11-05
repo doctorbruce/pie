@@ -99,9 +99,9 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 对齐 Amio v1 的文件读取边界：文本按行流式读取，默认最多 2000 行/50 KiB，单行最多 2000 字符并返回正确的续读 offset；前 4 KiB 用于图片/PDF/二进制识别，缺失路径会返回同目录候选。它也支持目录、图片和 PDF 文本分页，PDF 一次最多 20 页；PDF.js worker 随单文件 sidecar 打包。`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
 
-`bash` 对齐 Amio v1 契约：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 和 Turn 取消影响，只由 `job_kill` 停止；`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。完成通知作为 synthetic 用户内容进入模型和 follow-up 队列，但从产品快照和会话导出中隐藏，不表示用户主动发送。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
+`bash` 的参数对齐 Amio v1：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 影响，Turn 正常结束后继续运行；显式取消活跃 Turn 会停止该 Turn 创建的 Shell/Task 及子任务遗留的 Shell，清理完成后才结算。先前已结束 Turn 的作业仍由 `job_kill` 停止，不随新 Turn 取消。`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。完成通知作为 synthetic 用户内容进入模型和 follow-up 队列，但从产品快照和会话导出中隐藏，不表示用户主动发送。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
 
-显式调用 `job_kill` 停止后台 Shell 或 Subagent 时，取消结果只通过当前工具调用返回，不再额外发送 synthetic 取消通知唤醒模型。工具最多等待 5 秒；若任务稍后才结束，同样保持静默，最终状态和已有输出仍可通过 `job_output` 查询。正常完成、失败及其他调用方的默认取消通知不变。
+显式调用 `job_kill` 停止后台 Shell 或 Subagent 时，取消结果只通过当前工具调用返回，不再额外发送 synthetic 取消通知唤醒模型。工具最多等待 5 秒；若任务稍后才结束，同样保持静默，最终状态和已有输出仍可通过 `job_output` 查询。Turn 取消同样抑制所属作业的完成通知，避免停止后重新唤醒模型；正常完成和失败的通知保持。范围与验收见 [后台作业取消 SPEC](specs/background-job-cancellation.md)。
 
 `job_output/job_kill` 已向模型交付任务终态时，Runtime 确认该结果并撤销同一 Job 尚未消费的通知；迟到的完成回调也不再重复唤醒。返回 `running` 不确认终态，任务仍会正常通知完成。当前排队的未读完成通知一次性进入下一轮模型请求，避免逐条续跑；内部关联使用 Job ID，不解析通知正文。
 
@@ -140,7 +140,7 @@ POST /sessions/:id/steer { turnId, text, displayText? }
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
 
-`waitForTurn` 等待当前取得的执行 Promise，不等待所有后台工作或后续通知启动的 Turn。宿主用 SDK `listBackgroundJobs(sessionId)` 或 `GET /sessions/:id/jobs` 单独观察本实例、直接拥有的 Shell/Task 元信息；这不读历史、不汇总后代、不查询持久外部任务。空表、Turn completed 和用户目标完成是不同事实；重启后的新 instanceId 也不证明旧进程副作用停止。父删除会拒绝仍有活跃子作业的情况。
+`waitForTurn` 等待当前取得的执行 Promise；正常完成不等待后台作业，显式取消则等待本轮所属 Shell/Task 及子任务作业清理。不等待其他 Turn 的作业、后续通知启动的 Turn 或外部持久任务。宿主用 SDK `listBackgroundJobs(sessionId)` 或 `GET /sessions/:id/jobs` 单独观察本实例、直接拥有的 Shell/Task 元信息；这不读历史、不汇总后代、不查询持久外部任务。空表、Turn completed 和用户目标完成是不同事实；重启后的新 instanceId 也不证明旧进程副作用停止。父删除会拒绝仍有活跃子作业的情况。
 
 宿主可订阅 `GET /sessions/:id/events`，新连接收到最近 50 条消息的快照，后续按 revision 合并增量。宿主订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射；这个流不传完整 Session 快照或 assistant partial。全局每个包都携带与会话流同源的 `execution`，包含模型、工具、交互和取消变化；即使某条 Agent 事件没有公开内容增量，也保留状态包。`interaction.requested / interaction.resolved` 都会传递；`snapshot / turn.settled` 另带最小 `turn / execution` 快照。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，实例变化或版本缺口时重新读取快照。
 
@@ -198,7 +198,7 @@ Astron 当前 Assistant 配置
 
 未传 `task_id` 时创建新子 Session，不复制父消息；传入当前父 Session 拥有、且 Subagent 类型匹配的 `task_id` 时，在原子 Session 消息后追加新用户消息并继续同一个 Agent。子 Session 保存 `parentSessionId/parentToolCallId/subagentType`，完整子事件仍属于子 Session；父 Session 的 task 结果 details 带 `childSessionId/targetAssistantId/subagentType`，后台模式再带 `background/jobId`。默认会话列表隐藏子会话，`includeSubagents=true` 可查询，快照可直接读取。
 
-子 Session 的 HTTP 修改、直接续聊和单独取消被拒绝；父取消通过 task 的 AbortSignal 向下取消。子工具调用 `context.ask()` 时，请求发布到父 Session，用户仍从父会话答复。子 runtime 强制没有 subagents，因此仍只有一层调用。`background=true` 立即返回，子 Session 在后台继续；完成或失败后，Server 向父 Agent 的 follow-up 队列注入带 task ID 的合成消息，父 Agent 正在运行时由当前 loop 消费，已空闲时启动一个新 Turn。后台作业也可由 `job_output/job_kill` 查询或取消。
+子 Session 的 HTTP 修改、直接续聊和单独取消被拒绝；取消父活跃 Turn 会停止本轮的前台、后台 Task 及其 Shell，即使 Task 已返回而 Shell 仍在运行。父 Turn 正常完成不触发这些取消。子工具调用 `context.ask()` 时，请求发布到父 Session，用户仍从父会话答复。子 runtime 强制没有 subagents，因此仍只有一层调用。`background=true` 立即返回，子 Session 在后台继续；完成或失败后，Server 向父 Agent 的 follow-up 队列注入带 task ID 的合成消息，父 Agent 正在运行时由当前 loop 消费，已空闲时启动一个新 Turn。后台作业也可由 `job_output/job_kill` 查询或取消。
 
 ## 持久化和中断恢复
 

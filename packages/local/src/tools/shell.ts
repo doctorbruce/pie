@@ -123,6 +123,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 		description: `Execute a command using ${shell.name} on ${process.platform}. This is the only native command tool. Always set description to a short user-visible action phrase in the user's language. Supports workdir, permission confirmation, declared artifacts, a ${defaultTimeoutMs}ms foreground timeout, automatic backgrounding after ${defaultYieldMs}ms, incremental job output, and cancellation. timeout and yieldMs use milliseconds. Foreground output keeps the last ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB. Results report command status and exit code even for nonzero exits; inspect these rather than inferring success or failure from output text.`,
 		parameters,
 		async execute(_id, { command, description, workdir, timeout, yieldMs, outputs }, signal, onUpdate) {
+			const cancellationSignals = runtime.cancellationSignals;
 			const cwd = resolvePath(workdir ?? ".", runtime.directory);
 			await authorizeCommand(runtime, command, cwd, signal);
 			if (!(await stat(cwd)).isDirectory()) throw new Error(`工作目录不存在：${cwd}`);
@@ -165,6 +166,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 			});
 			const started = runtime.jobs.start({
 				ownerSessionId: runtime.sessionId,
+				cancellationSignals,
 				type: "shell",
 				title: description?.trim() || command.slice(0, 120),
 				details: { outputPath, command, workdir: cwd, shell: shell.name },

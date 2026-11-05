@@ -58,9 +58,9 @@
 
 `SteerReceipt` 另含 `queued/applied/durable` 与 `admission`。新受理时 `queued: true, started/applied: false, durable: false`，`turn.canonicalTurnId/requestId` 仍属旧执行者；消费输入后原子保存 owner、历史和 applied，发布 `turn.applied`。`Turn.steerAdmissions` 保存有序受理记录的 `status: queued|applied|settled`、`applied`、身份、前驱、时间与 `stopReason`，重试可查询对应事实。取消或结算可能早于 HTTP 回执；未消费的受理也逐条 `steer.settled`，不能 guided 旧 owner。排队后保存失败的 503 是未知结果，须读取 admission 核实，不能自动重发。重启丢失队列会结算 interrupted，不重放。命中原始 submit 身份的 steer 重试 `applied: true, queued: false`，不包含 admission。`CancellationReceipt` 的 `cancellationRequested/durable` 不代表外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；在途取消复用操作，终态取消 `accepted: false`，恢复可用只允许预检；宿主权限另行叠加。
 
-`turn.settled` 和 SDK `waitForTurn` 不表示后台工作或用户目标完成。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。脱离前台的 Shell 需通过 job_kill 停止，取消已结算 Turn 是无操作；活跃子作业会阻止父删除。
+`turn.settled` 和 SDK `waitForTurn` 不表示所有后台工作或用户目标完成。正常完成保留后台作业；显式取消活跃 Turn 会停止本轮所属 Shell/Task 及子任务遗留 Shell，并在清理后结算，不唤醒模型。先前正常结束 Turn 的作业需通过 `job_kill` 停止，取消已结算 Turn 是无操作。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。活跃子作业会阻止父删除。
 
-存储故障时新操作以 `storage_unavailable` 拒绝。`bestEffort: true` 仅对当前活跃根 Turn 尽力停止本实例 Agent / MCP、清空输入和交互，回执 `durable: false`；不持久化取消意图、不调用外部持久执行器取消，也不承诺最终保存为 cancelled。存储正常时仍走普通持久取消。
+存储故障时新操作以 `storage_unavailable` 拒绝。`bestEffort: true` 仅对当前活跃根 Turn 尽力停止本实例 Agent / MCP 和所属本地作业、清空输入和交互，回执 `durable: false`；不持久化取消意图、不调用外部持久执行器取消，也不承诺最终保存为 cancelled。存储正常时仍走普通持久取消。
 
 `400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或本地助手达到 32 个的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明", "reason"?: "稳定代码" }`；控制状态拒绝使用与 `execution.actions` 相同的原因码，另有 `turn_mismatch / invalid_request / recovery_validation_failed / external_executor_unavailable / external_job_running`。不要解析中文说明判断状态。
 
@@ -70,7 +70,7 @@
 
 会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。完整配置在 Turn 准入时应用，保留已有消息并按需重建 Agent。运行中 Skill 绑定在当前工具批次结束、下一次模型调用前单独刷新，保留 Turn 与 Agent；当前集合以 `runtime.skills` 为准，`assistantRevision` 仍代表准入时完整应用的版本。
 
-宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知；`job_output` 可增量读取，`job_kill` 可停止任务。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。父会话取消会取消前台子会话；子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
+宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知；`job_output` 可增量读取，`job_kill` 可停止任务。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。取消父活跃 Turn 会停止本轮前台、后台 Task 及其遗留 Shell；正常完成保留后台工作。子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
 
 独立本地模式通过 Assistant 接口设置 `subagentIds`，Core 将其转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
 

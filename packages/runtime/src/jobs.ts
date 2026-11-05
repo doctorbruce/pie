@@ -44,6 +44,7 @@ export function formatJobStatus(job: BackgroundJobInfo): string {
 
 type MutableJob = BackgroundJobInfo & {
 	controller: AbortController;
+	cancellationSignals: readonly AbortSignal[];
 	notifyOnSettled: boolean;
 	readOffset: number;
 	settled: Promise<void>;
@@ -58,6 +59,7 @@ export class BackgroundJobs {
 	start(input: {
 		id?: string;
 		ownerSessionId: string;
+		cancellationSignals?: readonly AbortSignal[];
 		type: BackgroundJobInfo["type"];
 		title: string;
 		details?: Record<string, unknown>;
@@ -78,6 +80,7 @@ export class BackgroundJobs {
 		const previous = this.#jobs.get(id);
 		if (previous?.status === "running") throw new Error(`后台任务正在运行：${id}`);
 		const controller = new AbortController();
+		const cancellationSignals = [...(input.cancellationSignals ?? [])];
 		let resolveSettled = () => {};
 		const settled = new Promise<void>((resolve) => {
 			resolveSettled = resolve;
@@ -92,12 +95,17 @@ export class BackgroundJobs {
 			output: "",
 			details: input.details,
 			controller,
+			cancellationSignals,
 			notifyOnSettled: true,
 			readOffset: 0,
 			settled,
 			resolveSettled,
 		};
 		this.#jobs.set(id, job);
+		if (cancellationSignals.some((signal) => signal.aborted)) {
+			job.notifyOnSettled = false;
+			controller.abort();
+		}
 		const append = (text: string) => {
 			job.output += text;
 			if (Buffer.byteLength(job.output) > MAX_OUTPUT_BYTES) {
@@ -189,6 +197,15 @@ export class BackgroundJobs {
 		return [...this.#jobs.values()]
 			.filter((job) => ownerSessionId === undefined || job.ownerSessionId === ownerSessionId)
 			.map((job) => this.snapshot(job));
+	}
+
+	async cancelScope(signal: AbortSignal): Promise<void> {
+		const jobs = [...this.#jobs.values()].filter((job) => job.cancellationSignals.includes(signal));
+		for (const job of jobs) {
+			job.notifyOnSettled = false;
+			if (job.status === "running") job.controller.abort();
+		}
+		await Promise.all(jobs.map((job) => job.settled));
 	}
 
 	listSummaries(ownerSessionId: string): BackgroundJobSummary[] {

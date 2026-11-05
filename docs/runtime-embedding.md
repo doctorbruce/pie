@@ -127,7 +127,7 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 ## 事件、隔离与生命周期
 
 - `submitTurn` / `resumeTurn` 返回 `TurnReceipt`：包含会话、Turn、可选 request ID，以及 `accepted / started / settled`。启动表示已发起本实例的执行，不表示模型完成；用 `turn.settled` 或 `waitForTurn` 读取实际结果。
-- `waitForTurn(sessionId)` 等待调用时取得的本实例 Turn 执行 Promise 并返回完整快照，不等待后台作业、后续通知引发的 Turn、后代活动或外部持久任务。`turn.settled` 同样只报告当前 Turn；下一轮准入仍以 `execution.actions.submit` 为准。
+- `waitForTurn(sessionId)` 等待调用时取得的本实例 Turn 执行 Promise 并返回完整快照。正常完成不等待后台作业；显式取消则等待本轮所属的本地 Shell/Task 及子任务作业清理。不等待其他 Turn 的作业、后续通知引发的 Turn 或外部持久任务。`turn.settled` 同样只报告当前 Turn；下一轮准入仍以 `execution.actions.submit` 为准。
 - 普通模型重试通过 `model.retry` 事件携带 `event: { type: "model.retry", retryId, status, attempt, message, next? }`，`status` 为 `started/completed/failed`；同次模型调用保持稳定 ID，不同模型调用各用新 ID。仅 `started` 带下一次尝试的 Unix 毫秒时间 `next`；终态先于 `turn.settled` 发布。事件归属发布时固定的 `sessionId/turnId/snapshot.turn`，可用 request/canonical 身份区分共用 native Turn 的 Steer；关闭压缩不影响通知。重试状态不替代 Turn 结果，取消等待时重试为 `failed`、Turn 仍为 `cancelled`。
 - `listBackgroundJobs(sessionId)` 返回 `{ instanceId, sessionId, jobs }`，只查会话元信息和进程内作业表，不读历史；Local 同名透传，HTTP 对应 `GET /sessions/:id/jobs`。`jobs` 包含直接拥有的 Shell/Task（含前台等待 task 和近期终态），每项只有身份、类型、标题、状态、起止时间及可选错误；标题/错误分别截至 512/2048 字符，不含输出正文和任意 details。标题可能来自命令，摘要不提供脱敏保证。
 - 作业观察是读取瞬间的事实，不属于会话 revision 投影，不消费结果、不确认通知。它不汇总后代，不查询外部持久执行器，也不是完整作业历史；重启后以新 `instanceId` 观察空表，不能推断旧进程副作用已停止。宿主应区分本轮已结算、直接作业仍运行及业务目标完成，不能把空表当成所有工作完成。父会话删除也会拒绝尚有活跃本地作业的子会话。
@@ -139,8 +139,8 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 - Steer 回执在同步排队准入时固定身份和 admission，后续应用、取消或结算可能先于 HTTP 回执到达。排队后的保存失败仍返回 503，不能据此推断未受理；当前实例 snapshot/SSE 的 `turn.steerAdmissions` 可精确核对 queued、applied 和 settled，普通新操作因存储屏障拒绝。队列继续是 `durable: false`，重启后不能用身份记录推断消息仍在。
 - HTTP 会话 SSE 用最近 50 条消息的快照启动，后续发送增量；每个全局包保留 `snapshot: { turn, execution }`，`turn.applied / steer.settled` 保留顶层 `steerAdmission`，不包含完整历史或 assistant partial。每次发布同步固定 `revision / execution / turn / leafId`；异步完整快照和有界快照都读取该叶子，存储等待期间不以旧 revision 暴露新的执行摘要。跨会话写入失败会为已装载会话发布新的禁用摘要；卸载后保留整数版本水位，重新装载不复用旧版本。相同 `instanceId / sessionId / revision` 的摘要与会话流、全局流一致。
 - `await subscribe(...)` 装载目标元信息并返回取消订阅函数；`subscribeAll(...)` 仍同步返回。两者不自动发送初始快照。需要全局重连对齐时使用 `await subscribeExecutions(sessionIds, next)`：1–200 个已授权会话 ID，首包 `execution.baseline` 含实例 ID 与各会话的 `sessionId / revision / turn / execution`，随后只发送指定会话高于基线水位的事件。装载元信息后，订阅、基线捕获和交付之间没有异步等待，先前的变化直接由基线覆盖，不积压冷读取期间的内容事件；不读历史、不扫描全部会话、不持久重放。HTTP 对应 `GET /events?sessionId=A&sessionId=B`，无参数 `/events` 仍只发送后续全局事件。订阅回调不应阻塞或抛错，异步投递与背压由宿主承担。
-- `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。活跃 Turn 的取消在内存中校验身份后立即向 Agent / MCP 发出停止信号，不等待普通命令队列、历史读取或持久化；重复请求复用同一取消操作。取消确认仍等待意图保存与必要清理，外部任务仍先保存意图再请求执行器取消；SDK / Worker 必须核对实际停止状态。
-- 存储故障时普通新控制操作返回 `storage_unavailable`；显式 `cancelTurn(id, { turnId, bestEffort: true })` 只对当前活跃根 Turn 尽力停止本实例的 Agent / MCP、清空队列和交互，回执 `durable: false`。它不保存取消意图，也不请求外部持久执行器取消；终态可能因保存失败为 `failed`，不能当成可靠取消。存储正常时此选项仍执行普通持久取消。
+- `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。活跃 Turn 的取消在内存中校验身份后立即向 Agent / MCP 和本轮所属的本地 Shell/Task 发出停止信号，不等待普通命令队列、历史读取或持久化；重复请求复用同一取消操作。子任务已经返回时，其遗留 Shell 仍在父 Turn 的取消范围内；先前正常结束 Turn 及其他会话的作业不受影响。所属作业的完成通知被抑制，取消结算等待其清理，见 [后台作业取消 SPEC](specs/background-job-cancellation.md)。取消确认仍等待意图保存与必要清理，外部任务仍先保存意图再请求执行器取消；SDK / Worker 必须核对实际停止状态。
+- 存储故障时普通新控制操作返回 `storage_unavailable`；显式 `cancelTurn(id, { turnId, bestEffort: true })` 只对当前活跃根 Turn 尽力停止本实例的 Agent / MCP 和所属本地作业、清空队列和交互，回执 `durable: false`。它不保存取消意图，也不请求外部持久执行器取消；终态可能因保存失败为 `failed`，不能当成可靠取消。存储正常时此选项仍执行普通持久取消。
 - 当前单实例按顺序接纳普通控制操作，避免异步存储下重复提交；不同会话的模型执行可并行。活跃取消独立于该队列，其清理仍属于当前回合的生命周期屏障，下一 Turn、会话卸载和关闭不能越过；未激活会话与中断 Turn 的取消继续串行处理。此处不是分布式锁，也不是跨节点调度器。
 - Local 封装直接转交 `cancelTurn`，不经过助手管理和会话读取的外层队列；关闭开始后仍拒绝新的取消请求，Runtime 继续负责取消身份校验、持久化与关闭屏障。
 - Steer 受理持久化后发布新 `snapshot`，保留旧 execution owner 与 queued admission；实际应用后发布 `turn.applied`。发布队列入口固定 Turn、执行摘要、历史叶子和载荷，后续投递不读取可变 owner。`turn.settled` 发出时执行清理可能尚未结束，`actions.submit.available` 仍为 false；清理结束后再发布可提交的 `snapshot`，宿主据此发起下一轮。

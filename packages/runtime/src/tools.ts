@@ -38,6 +38,8 @@ export type ToolRuntime = {
 	allowedDirectories?: readonly string[];
 	ask: ToolAsk;
 	jobs: BackgroundJobs;
+	/** Runtime Turn/ancestor cancellation scopes; normal completion does not abort these signals. */
+	cancellationSignals?: readonly AbortSignal[];
 	notifyBackground?: (message: string, jobId?: string) => Promise<void>;
 	runJob?: (toolCallId: string, signal?: AbortSignal) => Promise<AgentToolResult<unknown>>;
 };

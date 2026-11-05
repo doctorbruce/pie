@@ -145,7 +145,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				update: (next: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => unknown;
 				report?: (event: CompactionEvent) => unknown;
 			},
-			native?: Pick<ToolRuntime, "directory" | "jobs" | "notifyBackground" | "runJob">,
+			native?: Pick<ToolRuntime, "directory" | "jobs" | "cancellationSignals" | "notifyBackground" | "runJob">,
 			report?: (event: ModelRetryEvent) => unknown,
 		) {
 			const runtime = structuredClone(configInput);
@@ -159,6 +159,9 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				Type,
 				ask: requestInteraction,
 				jobs: native?.jobs ?? new BackgroundJobs(),
+				get cancellationSignals() {
+					return native?.cancellationSignals;
+				},
 				notifyBackground: native?.notifyBackground,
 				runJob: native?.runJob,
 			});

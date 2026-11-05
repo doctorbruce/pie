@@ -315,6 +315,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		waiters?: number;
 		executionObservers?: number;
 		mcpAbort?: AbortController;
+		parentJobSignals?: readonly AbortSignal[];
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
 		modelStreaming?: boolean;
@@ -893,6 +894,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 			void publish(owner, "interaction.requested", undefined, undefined, interaction).catch(reject);
 		});
 	}
+	function jobCancellationSignals(session: Session): readonly AbortSignal[] {
+		return [...(session.parentJobSignals ?? []), ...(session.mcpAbort ? [session.mcpAbort.signal] : [])];
+	}
 	function createSessionAgent(
 		session: Session,
 		runtime: NonNullable<Session["runtime"]>,
@@ -923,6 +927,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 			{
 				directory: session.workspacePath ?? process.cwd(),
 				jobs,
+				get cancellationSignals() {
+					return jobCancellationSignals(session);
+				},
 				notifyBackground: (message, jobId) => notifyBackground(session, message, jobId),
 				runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 			},
@@ -1075,6 +1082,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			});
 		session.runPromise = pending;
 		session.agent?.clearAllQueues();
+		if (session.mcpAbort) void jobs.cancelScope(session.mcpAbort.signal);
 		session.agent?.abort();
 		session.mcpAbort?.abort();
 		return cancellation;
@@ -1453,12 +1461,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 	) {
 		if (parent.kind !== "root" || !parent.turn || parent.turn.status !== "running")
 			throw new Error("父会话当前不能调用 Subagent");
+		const cancellationSignals = jobCancellationSignals(parent);
 		signal?.throwIfAborted();
 		if (parent.turnCheckpoint) {
 			parent.turnCheckpoint.blockedReason = "包含 Subagent 执行，尚不支持级联恢复";
 			await persist(parent);
 		}
 		const child = await execute(async () => {
+			signal?.throwIfAborted();
 			const runtime = {
 				...structuredClone(binding.runtime),
 				subagents: [],
@@ -1530,12 +1540,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 				await persist(child);
 				sessions.set(id, child);
 			}
+			child.parentJobSignals = cancellationSignals;
 			return child;
 		}, true);
 		const background = options.background === true;
 		const started = jobs.start({
 			id: child.id,
 			ownerSessionId: parent.id,
+			cancellationSignals,
 			type: "task",
 			title: child.title,
 			async run(jobSignal) {
@@ -1628,6 +1640,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			turn.status = session.cancelRequested ? "cancelled" : "failed";
 			turn.error = error instanceof Error ? error.message : String(error);
 		} finally {
+			if (mcpAbort.signal.aborted) await jobs.cancelScope(mcpAbort.signal);
 			releaseMcp?.();
 			session.mcpAbort = undefined;
 			session.modelStreaming = false;
@@ -1916,6 +1929,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 					{
 						directory: typeof body.workspacePath === "string" ? body.workspacePath.trim() : process.cwd(),
 						jobs,
+						get cancellationSignals() {
+							return session ? jobCancellationSignals(session) : [];
+						},
 						notifyBackground: (message, jobId) => notifyBackground(session, message, jobId),
 						runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 					},
@@ -2181,6 +2197,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (storageFailed && body.bestEffort === true) {
 					active.cancelRequested = true;
 					active.agent?.clearAllQueues();
+					if (active.mcpAbort) void jobs.cancelScope(active.mcpAbort.signal);
 					active.agent?.abort();
 					active.mcpAbort?.abort();
 					await rejectSessionInteractions(active.id, new Error("会话已停止，取消意图未持久化"));

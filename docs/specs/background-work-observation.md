@@ -16,7 +16,7 @@
 
 ## 验收
 
-使用门闩控制的本地作业和 faux 模型，验证 Turn 结束但作业仍运行、取消 Turn 不停止已脱离的作业、会话隔离、摘要不读正文、子作业阻止删除，以及 HTTP/SDK 和重启实例边界。执行相关 Node 回归、`npm run check`，不调用付费模型。
+使用门闩控制的本地作业和 faux 模型，验证 Turn 正常结束但作业仍运行、取消已结算 Turn 为无操作、会话隔离、摘要不读正文、子作业阻止删除，以及 HTTP/SDK 和重启实例边界。运行中 Turn 的显式取消与关联后台作业收尾见 [取消 SPEC](background-job-cancellation.md)。执行相关 Node 回归、`npm run check`，不调用付费模型。
 
 ## 实施记录
 

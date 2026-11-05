@@ -3,13 +3,16 @@ import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { InputBatch, YieldRecord } from "@pie/runtime/coordination";
 import type { Assistant, ContextCompaction, HostRuntimeDefinition } from "@pie/runtime/protocol";
 import type {
 	RuntimeStore,
 	SavedSession,
+	SessionCreationRecord,
 	SessionListOptions,
 	SessionMetadata,
 	SessionPage,
+	SessionWriteOptions,
 } from "@pie/runtime/runtime-store";
 import { completeToolHistory, type MessageTree, syncMessageTree, treePath } from "@pie/runtime/session-tree";
 import {
@@ -36,6 +39,9 @@ export function openStore(env: NodeJS.ProcessEnv) {
 			CREATE TABLE IF NOT EXISTS assistants (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, assistant_id TEXT NOT NULL, payload TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS host_runtimes (id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS session_creations (creation_key TEXT PRIMARY KEY, payload TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS coordination_input_batches (batch_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS coordination_yields (yield_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL);
 		`);
 		if (db.prepare("PRAGMA foreign_key_list(sessions)").all().length > 0) {
 			db.exec("PRAGMA foreign_keys = OFF");
@@ -114,6 +120,7 @@ export function openStore(env: NodeJS.ProcessEnv) {
 			session: SavedSession,
 			replaceHistory = false,
 			toolExecutions: readonly ToolExecutionRecord[] = [],
+			options?: SessionWriteOptions,
 		): SessionMetadata => {
 			const { messages, tree: savedTree, transferBase: _transferBase, ...fields } = session;
 			const tree = savedTree ?? syncMessageTree(undefined, messages);
@@ -163,6 +170,13 @@ export function openStore(env: NodeJS.ProcessEnv) {
 					db.prepare(
 						"INSERT INTO tool_execution_journal (session_id, turn_id, record_id, payload) VALUES (?, ?, ?, ?)",
 					).run(session.id, record.turnId, record.id, JSON.stringify(record));
+				}
+				if (options?.creation) {
+					if (options.creation.sessionId !== session.id) throw new Error("会话创建记录身份不匹配");
+					db.prepare("INSERT INTO session_creations (creation_key, payload) VALUES (?, ?)").run(
+						options.creation.creationKey,
+						JSON.stringify(options.creation),
+					);
 				}
 				db.exec("COMMIT");
 			} catch (error) {
@@ -380,6 +394,65 @@ export function openStore(env: NodeJS.ProcessEnv) {
 			},
 			hostRuntimes,
 			saveSession,
+			async createInputBatch(batch: InputBatch) {
+				const existing = db
+					.prepare("SELECT payload FROM coordination_input_batches WHERE batch_id = ?")
+					.get(batch.batchId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as InputBatch;
+					if (saved.sessionId !== batch.sessionId || saved.requestFingerprint !== batch.requestFingerprint)
+						throw new Error("输入批次身份冲突");
+					return saved;
+				}
+				db.prepare("INSERT INTO coordination_input_batches (batch_id, session_id, payload) VALUES (?, ?, ?)").run(
+					batch.batchId,
+					batch.sessionId,
+					JSON.stringify(batch),
+				);
+				return batch;
+			},
+			async readInputBatch(batchId: string) {
+				const row = db.prepare("SELECT payload FROM coordination_input_batches WHERE batch_id = ?").get(batchId);
+				return row ? (JSON.parse(String(row.payload)) as InputBatch) : undefined;
+			},
+			async updateInputBatch(
+				batchId: string,
+				update: Partial<Pick<InputBatch, "status" | "acceptedTurnId" | "consumedAt" | "error">>,
+			) {
+				const row = db.prepare("SELECT payload FROM coordination_input_batches WHERE batch_id = ?").get(batchId);
+				if (!row) throw new Error("输入批次不存在");
+				const next = { ...(JSON.parse(String(row.payload)) as InputBatch), ...update };
+				db.prepare("UPDATE coordination_input_batches SET payload = ? WHERE batch_id = ?").run(
+					JSON.stringify(next),
+					batchId,
+				);
+				return next;
+			},
+			async createYield(record: YieldRecord) {
+				const existing = db
+					.prepare("SELECT payload FROM coordination_yields WHERE yield_id = ?")
+					.get(record.yieldId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as YieldRecord;
+					if (saved.sessionId !== record.sessionId || saved.turnId !== record.turnId)
+						throw new Error("让出记录身份冲突");
+					return saved;
+				}
+				db.prepare("INSERT INTO coordination_yields (yield_id, session_id, payload) VALUES (?, ?, ?)").run(
+					record.yieldId,
+					record.sessionId,
+					JSON.stringify(record),
+				);
+				return record;
+			},
+			async readYield(yieldId: string) {
+				const row = db.prepare("SELECT payload FROM coordination_yields WHERE yield_id = ?").get(yieldId);
+				return row ? (JSON.parse(String(row.payload)) as YieldRecord) : undefined;
+			},
+			readSessionCreation(creationKey: string): SessionCreationRecord | undefined {
+				const row = db.prepare("SELECT payload FROM session_creations WHERE creation_key = ?").get(creationKey);
+				return row ? (JSON.parse(String(row.payload)) as SessionCreationRecord) : undefined;
+			},
 			readToolExecutions(id: string, options: ToolExecutionReadOptions): ToolExecutionPage {
 				validateToolExecutionRead(options);
 				const rows = db
@@ -401,6 +474,7 @@ export function openStore(env: NodeJS.ProcessEnv) {
 				if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new Error("会话分页需要 1–200 条");
 				const clauses: string[] = [];
 				const parameters: (string | number)[] = [];
+				if (options.includeArchived === false) clauses.push("COALESCE(json_extract(payload, '$.archived'), 0) = 0");
 				if (assistantId !== undefined) {
 					clauses.push("assistant_id = ?");
 					parameters.push(assistantId);
@@ -566,6 +640,12 @@ export function createSqliteRuntimeStore(store: ReturnType<typeof openStore>): R
 		readSession: async (...args) => store.readSession(...args),
 		listSessions: async (...args) => store.listSessions(...args),
 		saveSession: async (...args) => store.saveSession(...args),
+		createInputBatch: async (...args) => store.createInputBatch(...args),
+		readInputBatch: async (...args) => store.readInputBatch(...args),
+		updateInputBatch: async (...args) => store.updateInputBatch(...args),
+		createYield: async (...args) => store.createYield(...args),
+		readYield: async (...args) => store.readYield(...args),
+		readSessionCreation: async (...args) => store.readSessionCreation(...args),
 		readToolExecutions: async (...args) => store.readToolExecutions(...args),
 		readPath: async (...args) => store.readPath(...args),
 		readTurnPath: async (...args) => store.readTurnPath(...args),

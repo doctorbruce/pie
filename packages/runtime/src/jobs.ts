@@ -4,6 +4,7 @@ export type BackgroundJobStatus = "running" | "completed" | "failed" | "cancelle
 
 export type BackgroundJobInfo = {
 	id: string;
+	executionId: string;
 	ownerSessionId: string;
 	type: "shell" | "task";
 	title: string;
@@ -17,7 +18,7 @@ export type BackgroundJobInfo = {
 
 export type BackgroundJobSummary = Pick<
 	BackgroundJobInfo,
-	"id" | "ownerSessionId" | "type" | "title" | "status" | "startedAt" | "finishedAt" | "error"
+	"id" | "executionId" | "ownerSessionId" | "type" | "title" | "status" | "startedAt" | "finishedAt" | "error"
 >;
 
 export type BackgroundJobList = {
@@ -25,6 +26,28 @@ export type BackgroundJobList = {
 	sessionId: string;
 	jobs: BackgroundJobSummary[];
 };
+
+export type BackgroundJobCancellationReceipt = {
+	instanceId: string;
+	sessionId: string;
+	accepted: boolean;
+	durable: false;
+	job: BackgroundJobSummary;
+};
+
+export function summarizeBackgroundJob(job: BackgroundJobInfo): BackgroundJobSummary {
+	return {
+		id: job.id,
+		executionId: job.executionId,
+		ownerSessionId: job.ownerSessionId,
+		type: job.type,
+		title: job.title.slice(0, 512),
+		status: job.status,
+		startedAt: job.startedAt,
+		...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
+		...(job.error === undefined ? {} : { error: job.error.slice(0, 2048) }),
+	};
+}
 
 export function formatJobStatus(job: BackgroundJobInfo): string {
 	const wallTimeMs = (job.finishedAt ?? Date.now()) - job.startedAt;
@@ -87,6 +110,7 @@ export class BackgroundJobs {
 		});
 		const job: MutableJob = {
 			id,
+			executionId: randomUUID(),
 			ownerSessionId: input.ownerSessionId,
 			type: input.type,
 			title: input.title,
@@ -211,16 +235,7 @@ export class BackgroundJobs {
 	listSummaries(ownerSessionId: string): BackgroundJobSummary[] {
 		return [...this.#jobs.values()]
 			.filter((job) => job.ownerSessionId === ownerSessionId)
-			.map((job) => ({
-				id: job.id,
-				ownerSessionId: job.ownerSessionId,
-				type: job.type,
-				title: job.title.slice(0, 512),
-				status: job.status,
-				startedAt: job.startedAt,
-				...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
-				...(job.error === undefined ? {} : { error: job.error.slice(0, 2048) }),
-			}));
+			.map(summarizeBackgroundJob);
 	}
 
 	close(): void {
@@ -230,6 +245,7 @@ export class BackgroundJobs {
 	private snapshot(job: MutableJob): BackgroundJobInfo {
 		return {
 			id: job.id,
+			executionId: job.executionId,
 			ownerSessionId: job.ownerSessionId,
 			type: job.type,
 			title: job.title,

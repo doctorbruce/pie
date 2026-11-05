@@ -138,8 +138,16 @@ export type Assistant = {
 	createdAt: number;
 	updatedAt: number;
 };
+export type SessionCreationReceipt = {
+	creationKey: string;
+	sessionId: string;
+	createdAt: number;
+	sessionExists: boolean;
+};
+
 export type SessionSummary = {
 	id: string;
+	archived?: boolean;
 	kind: "root" | "subagent";
 	forkedFromSessionId?: string;
 	parentSessionId?: string;

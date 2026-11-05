@@ -3,7 +3,13 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import { createLocalHost } from "@pie/local";
 import { PluginError } from "@pie/local/plugins";
-import { type CreateSessionInput, type PieRuntime, RuntimeError, type TurnInput } from "@pie/runtime";
+import {
+	CoordinationError,
+	type CreateSessionInput,
+	type PieRuntime,
+	RuntimeError,
+	type TurnInput,
+} from "@pie/runtime";
 import { ModelSettingsError } from "@pie/runtime/capabilities";
 import { SkillConfigError } from "@pie/runtime/config";
 import { McpConfigError } from "@pie/runtime/mcp";
@@ -197,10 +203,12 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			const runtime = await ready;
 			const url = new URL(req.url ?? "/", "http://127.0.0.1");
 			const path = url.pathname;
+			const jobCancel = /^\/sessions\/([^/]+)\/jobs\/([^/]+)\/cancel$/.exec(path);
 			if (
 				!runtime.storageAvailable &&
 				req.method !== "GET" &&
-				!/^\/sessions\/[^/]+\/(turns|steer|resume|cancel)$/.test(path)
+				!/^\/sessions\/[^/]+\/(turns|steer|resume|cancel)$/.test(path) &&
+				!(req.method === "POST" && jobCancel)
 			)
 				throw new RuntimeError(503, "存储不可用，请检查后重启服务", "storage_unavailable");
 			if (path === "/health" && req.method === "GET") return json(200, { healthy: true, ...runtime.info });
@@ -225,6 +233,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				const { sessions } = await runtime.listSessions({
 					assistantId: url.searchParams.get("assistantId") ?? undefined,
 					includeSubagents: url.searchParams.get("includeSubagents") === "true",
+					includeArchived: url.searchParams.get("includeArchived") === "true",
 				});
 				return json(200, { sessions });
 			}
@@ -257,8 +266,57 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			}
 			if (path === "/sessions" && req.method === "POST")
 				return json(201, await runtime.createSession((await readJson(req)) as CreateSessionInput));
+			if (path === "/session-creations" && req.method === "GET")
+				return json(200, await runtime.getSessionCreation(url.searchParams.get("creationKey") ?? ""));
+			const inputBatch = /^\/sessions\/([^/]+)\/input-batches(?:\/([^/]+))?$/.exec(path);
+			if (inputBatch && req.method === "POST" && !inputBatch[2])
+				return json(
+					202,
+					await runtime.createInputBatch(
+						inputBatch[1],
+						(await readJson(req)) as {
+							batchId?: string;
+							inputId?: string;
+							content: string;
+							requestFingerprint?: string;
+						},
+					),
+				);
+			if (inputBatch && req.method === "GET" && inputBatch[2])
+				return json(200, await runtime.readInputBatch(inputBatch[2]));
+			if (inputBatch && req.method === "POST" && inputBatch[2]) {
+				const body = (await readJson(req)) as { action?: "accept" | "consume"; turnId: string };
+				if (body.action === "consume")
+					return json(200, await runtime.consumeInputBatch(inputBatch[1], inputBatch[2], body.turnId));
+				return json(200, await runtime.acceptInputBatch(inputBatch[1], inputBatch[2], body.turnId));
+			}
+			const yieldTurn = /^\/sessions\/([^/]+)\/yield$/.exec(path);
+			if (yieldTurn && req.method === "POST")
+				return json(
+					200,
+					await runtime.yieldTurn(
+						yieldTurn[1],
+						(await readJson(req)) as {
+							turnId: string;
+							reason: "waiting_for_message" | "paused";
+							checkpoint: Record<string, unknown>;
+							yieldId?: string;
+						},
+					),
+				);
+			if (jobCancel && req.method === "POST") {
+				const body = await readJson(req);
+				return json(
+					202,
+					await runtime.cancelBackgroundJob(jobCancel[1], {
+						instanceId: body.instanceId as string,
+						jobId: jobCancel[2],
+						executionId: body.executionId as string,
+					}),
+				);
+			}
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override|archive)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			if (!match) throw new RuntimeError(404, "会话或接口不存在");
@@ -297,6 +355,8 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (req.method === "PUT" && action === "model-override")
 				return json(200, await runtime.setModelOverride(id, await readJson(req)));
 			if (req.method === "PATCH" && !action) return json(200, await runtime.renameSession(id, await readJson(req)));
+			if (req.method === "POST" && action === "archive")
+				return json(200, await runtime.archiveSession(id, await readJson(req)));
 			if (req.method === "POST" && action === "cancel")
 				return json(
 					202,
@@ -322,7 +382,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 		})().catch((error: unknown) => {
 			if (res.headersSent) return res.destroy();
 			json(
-				error instanceof RuntimeError
+				error instanceof RuntimeError || error instanceof CoordinationError
 					? error.status
 					: error instanceof ModelSettingsError ||
 							error instanceof ToolConfigError ||

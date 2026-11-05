@@ -226,6 +226,71 @@ for (const workerCompletes of [false, true]) {
 	);
 }
 
+test(
+	"host stop cleans up a completed Turn's shell without cancelling another session or waking the model",
+	{ timeout: 15000 },
+	async (context) => {
+		const host = await fixture(context);
+		const session = await host.runtime.createSession({ assistantId: "parent", workspacePath: host.directory });
+		const other = await host.runtime.createSession({ assistantId: "parent", workspacePath: host.directory });
+		const pidPath = join(host.directory, "stopped.pid");
+		const otherPidPath = join(host.directory, "preserved.pid");
+		for (const [owner, path] of [
+			[session, pidPath],
+			[other, otherPidPath],
+		] as const) {
+			host.plans.set(owner.id, [
+				call("bash", { command: host.command(path), yieldMs: 0 }),
+				fauxAssistantMessage("done"),
+			]);
+			await host.runtime.submitTurn(owner.id, { text: "start shell" });
+			assert.equal((await host.runtime.waitForTurn(owner.id)).turn?.status, "completed");
+		}
+		const processId = await host.pid(pidPath);
+		const otherPid = await host.pid(otherPidPath);
+		const observed = await host.runtime.listBackgroundJobs(session.id);
+		const receipt = await host.runtime.cancelBackgroundJob(session.id, {
+			instanceId: observed.instanceId,
+			jobId: observed.jobs[0].id,
+			executionId: observed.jobs[0].executionId,
+		});
+		assert.equal(receipt.job.status, "cancelled");
+		assert.throws(() => process.kill(processId, 0), { code: "ESRCH" });
+		assert.doesNotThrow(() => process.kill(otherPid, 0));
+		assert.equal((await host.runtime.getSession(session.id)).turn?.status, "completed");
+		assert.equal(host.requests.get(session.id), 2);
+	},
+);
+
+test("host stop of a detached Task waits for its child Turn and shell cleanup", { timeout: 15000 }, async (context) => {
+	const host = await fixture(context);
+	const session = await host.runtime.createSession({ assistantId: "parent", workspacePath: host.directory });
+	host.plans.set(session.id, [
+		call("task", { description: "Detached child", prompt: "start", subagent_type: "worker", background: true }),
+		fauxAssistantMessage("done"),
+	]);
+	await host.runtime.submitTurn(session.id, { text: "delegate" });
+	assert.equal((await host.runtime.waitForTurn(session.id)).turn?.status, "completed");
+	const child = (await host.runtime.listSessions({ includeSubagents: true })).sessions.find(
+		(entry) => entry.kind === "subagent",
+	);
+	assert(child);
+	await until(async () => host.waiting.has(child.id));
+	const processId = await host.pid(host.workerPid);
+	const observed = await host.runtime.listBackgroundJobs(session.id);
+	const receipt = await host.runtime.cancelBackgroundJob(session.id, {
+		instanceId: observed.instanceId,
+		jobId: child.id,
+		executionId: observed.jobs.find((job) => job.id === child.id)!.executionId,
+	});
+	assert.equal(receipt.job.status, "cancelled");
+	assert.equal((await host.runtime.getSession(child.id)).turn?.status, "cancelled");
+	assert.equal((await host.runtime.listBackgroundJobs(child.id)).jobs[0].status, "cancelled");
+	assert.throws(() => process.kill(processId, 0), { code: "ESRCH" });
+	assert.equal((await host.runtime.getSession(session.id)).turn?.status, "completed");
+	assert.equal(host.requests.get(session.id), 2);
+});
+
 test("cancellation racing with child admission never starts the child's work", { timeout: 15000 }, async (context) => {
 	const host = await fixture(context);
 	let entered = () => {};

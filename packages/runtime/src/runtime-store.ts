@@ -1,4 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { CoordinationStore } from "./coordination.ts";
 import type { DurableJobReference } from "./durable-jobs.ts";
 import type {
 	ActivityRecord,
@@ -44,6 +45,8 @@ export type SessionMetadata = Omit<SavedSession, "messages" | "tree" | "transfer
 export type SessionCursor = { updatedAt: number; id: string };
 export type SessionListOptions = {
 	limit: number;
+	/** false excludes archived sessions before pagination; omitted includes all for internal scans. */
+	includeArchived?: boolean;
 	cursor?: SessionCursor;
 	assistantId?: string;
 	kind?: SessionSummary["kind"];
@@ -51,7 +54,16 @@ export type SessionListOptions = {
 };
 export type SessionPage = { sessions: SessionMetadata[]; nextCursor: SessionCursor | null };
 
-export interface RuntimeStore {
+export type SessionCreationRecord = {
+	creationKey: string;
+	sessionId: string;
+	requestFingerprint: string;
+	createdAt: number;
+};
+
+export type SessionWriteOptions = { creation?: SessionCreationRecord };
+
+export interface RuntimeStore extends Partial<CoordinationStore> {
 	readonly persistence: string;
 	readSession(id: string): Promise<SessionMetadata | undefined>;
 	listSessions(options: SessionListOptions): Promise<SessionPage>;
@@ -59,7 +71,10 @@ export interface RuntimeStore {
 		session: SavedSession,
 		replaceHistory?: boolean,
 		toolExecutions?: readonly ToolExecutionRecord[],
+		options?: SessionWriteOptions,
 	): Promise<SessionMetadata>;
+	/** Opt-in: saveSession must atomically persist options.creation with the new session. Keep keys after deletion. */
+	readSessionCreation?(creationKey: string): Promise<SessionCreationRecord | undefined>;
 	readToolExecutions(id: string, options: ToolExecutionReadOptions): Promise<ToolExecutionPage>;
 	readPath(id: string, leafId?: string | null): Promise<MessageTree>;
 	readTurnPath(id: string, inputEntryId: string, leafId?: string | null): Promise<MessageTree>;

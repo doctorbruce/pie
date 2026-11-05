@@ -24,6 +24,12 @@
 
 ### Added
 
+- Add host `cancelBackgroundJob` for directly owned local Shell/Task jobs, with cleanup acknowledgement, suppressed wakeups and access during storage failure; require instance and per-execution identities to reject stale stops when a Task reuses its job ID.
+
+- Add `archiveSession` and persisted session `archived` state; public session lists hide archived sessions unless `includeArchived` is true. Stores exclude archived sessions before pagination when `SessionListOptions.includeArchived` is false.
+
+- Add optional durable `creationKey` for session creation and `getSessionCreation` reconciliation; persist creation identity atomically with the session, reject conflicting retries, and retain keys after deletion. Stores opt in through `readSessionCreation` and the fourth `saveSession` argument.
+
 - Add opt-in remembered native `bash` and `external_directory` approvals through `InteractionReply.remember`; persist exact permission scopes in the execution session across turns and restarts without inheriting them into new, forked or related sessions.
 
 - Expose `listBackgroundJobs` with instance-scoped, directly owned Shell/Task summaries without history, output or arbitrary details; distinguish Turn settlement from background work and reject parent deletion while a child still owns active local jobs.

@@ -23,7 +23,7 @@
 | `POST /plugins/import` | `{ path: "本地插件目录" }` | `201` + 插件信息；复制并校验 schemaVersion 1 包，不自动安装依赖 |
 | `DELETE /plugins/:id` | 无 | 卸载；存在助手或会话引用时返回 409 |
 | `DELETE /assistants/:id` | 无 | 删除无会话的助手；至少保留一个 |
-| `GET /sessions?assistantId=...&includeSubagents=true` | 查询参数可省略 | `{ sessions: [...] }`，默认只列根会话；includeSubagents=true 时包含子会话 |
+| `GET /sessions?assistantId=...&includeSubagents=true&includeArchived=true` | 查询参数可省略 | `{ sessions: [...] }`，默认只列未归档根会话；includeSubagents=true 包含子会话，includeArchived=true 包含归档 |
 | `GET /models` | 无 | 内置和自定义模型目录、默认选择；不含密钥和 headers |
 | `GET /providers` | 无 | 已配置的提供商名称、协议、地址、模型列表、密钥配置状态和默认选择 |
 | `PUT /providers/config` | `{ id, name, api, baseUrl, apiKey?, models, defaultModel? }` | 按提供商保存；models 为完整列表，返回提供商目录 |
@@ -31,11 +31,14 @@
 | `PUT /models/config` | `{ provider, id, model?, apiKey? }` | 合并配置并持久化，将该模型设为默认，返回模型目录 |
 | `POST /models/reload` | `{}` | 重新读取模型配置文件；失败时保留当前有效配置 |
 | `PUT /host-runtimes` | `{ runtimes: [{ assistantId, assistantRevision, runtime }] }` | 事务性替换宿主 runtime 注册表并持久化；最多 256 个 Assistant，runtime 可引用同一批次中的 Subagent Assistant |
-| `POST /sessions` | `{ assistantId?, title?, mode?, model?: { provider, id } }` | `201` + 会话快照；assistantId 命中宿主注册表时创建宿主会话，否则解析本地助手；mode 默认 faux |
+| `POST /sessions` | `{ creationKey?, assistantId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；assistantId 命中宿主注册表时创建宿主会话，否则解析本地助手；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
+| `GET /session-creations?creationKey=...` | URL 编码的创建键 | `{ creationKey, sessionId, createdAt, sessionExists }`；未创建返回 404，已删除保留原记录 |
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
+| `POST /sessions/:id/archive` | `{ archived: boolean }` | 归档或取消归档根会话，返回含 archived 的快照；保留历史和任务执行，子会话返回 409 |
 | `PUT /sessions/:id/model-override` | `{ modelOverride: { providerId, model } \| null, initializeOnly? }` | 保存会话模型选择；null 跟随默认模型。initializeOnly 仅补入尚未初始化的历史会话，保留已存在的选择或 null |
 | `GET /sessions/:id` | 可选 `?limit=50` | 会话快照，含消息、当前部分消息、最近一次 turn 和 execution；limit 提供有界历史页 |
 | `GET /sessions/:id/jobs` | 无 | `{ instanceId, sessionId, jobs }`；本实例、直接拥有的 Shell/Task 摘要，不读历史或输出正文 |
+| `POST /sessions/:id/jobs/:jobId/cancel` | `{ instanceId, executionId }`，取自 jobs 查询 | `202` + `{ instanceId, sessionId, accepted, durable: false, job }`；直接停止本机作业，等待清理完成，身份过期返回 409 |
 | `GET /events` | 可选重复参数 `?sessionId=A&sessionId=B` | 无参数只发送后续全局事件；指定 1–200 个会话时先发送轻量执行基线，再推送这些会话的新事件 |
 | `GET /sessions/:id/events` | 无 | SSE，第一条是最近 50 条消息与 execution 的快照，然后推送增量 |
 | `GET /sessions/:id/export` | 无 | 导出 canonical `SessionTransfer`；运行中的会话返回 409 |
@@ -50,6 +53,8 @@
 | `POST /sessions/:id/interactions/:interactionId` | `{ approved: boolean, remember?: boolean }` | `202`，答复当前工具交互；以 SSE 的 `interaction.resolved` 为准 |
 | `DELETE /sessions/:id` | 无 | 删除空闲会话并关闭对应事件连接 |
 
+可选 `creationKey` 是宿主为一次创建意图分配的 1–256 字符键，去除首尾空白，不允许空字符。相同参数重试返回同一个会话的当前快照，即使会话已改名或原助手配置已改变；删除会话后保留键，原键重试返回 409。响应丢失可查询创建记录，不传键仍每次新建。键作用域是当前本地数据目录，不提供跨实例仲裁或自动过期清理，详见[嵌入契约](../../docs/runtime-embedding.md#幂等创建与核对)。
+
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
 交互的“允许一次”发送 `{ approved: true }`，“始终允许”发送 `{ approved: true, remember: true }`。后者仅适用于请求携带 `remember: { permission, patterns }` 的原生 `bash/external_directory` 权限，先持久化到实际执行会话，再批准当前工具；匹配范围可跨回合和重启复用，新会话、Fork 及父子会话不互相继承。命令按入口和工作目录分类，外部路径保持准确范围，详见[授权记忆契约](../../docs/runtime-embedding.md#交互授权记忆)。凭据、邮件等业务确认仍逐次回答；拒绝或无范围请求带 `remember: true` 返回 400。
@@ -58,7 +63,9 @@
 
 `SteerReceipt` 另含 `queued/applied/durable` 与 `admission`。新受理时 `queued: true, started/applied: false, durable: false`，`turn.canonicalTurnId/requestId` 仍属旧执行者；消费输入后原子保存 owner、历史和 applied，发布 `turn.applied`。`Turn.steerAdmissions` 保存有序受理记录的 `status: queued|applied|settled`、`applied`、身份、前驱、时间与 `stopReason`，重试可查询对应事实。取消或结算可能早于 HTTP 回执；未消费的受理也逐条 `steer.settled`，不能 guided 旧 owner。排队后保存失败的 503 是未知结果，须读取 admission 核实，不能自动重发。重启丢失队列会结算 interrupted，不重放。命中原始 submit 身份的 steer 重试 `applied: true, queued: false`，不包含 admission。`CancellationReceipt` 的 `cancellationRequested/durable` 不代表外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；在途取消复用操作，终态取消 `accepted: false`，恢复可用只允许预检；宿主权限另行叠加。
 
-`turn.settled` 和 SDK `waitForTurn` 不表示所有后台工作或用户目标完成。正常完成保留后台作业；显式取消活跃 Turn 会停止本轮所属 Shell/Task 及子任务遗留 Shell，并在清理后结算，不唤醒模型。先前正常结束 Turn 的作业需通过 `job_kill` 停止，取消已结算 Turn 是无操作。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。活跃子作业会阻止父删除。
+`turn.settled` 和 SDK `waitForTurn` 不表示所有后台工作或用户目标完成。正常完成保留后台作业；显式取消活跃 Turn 会停止本轮所属 Shell/Task 及子任务遗留 Shell，并在清理后结算，不唤醒模型。先前正常结束 Turn 的作业可由宿主停止接口或模型 `job_kill` 停止，取消已结算 Turn 是无操作。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/executionId/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。活跃子作业会阻止父删除。
+
+宿主停止作业必须提交查询所得的 instanceId 和 executionId；Task 续跑可能复用 jobId，新的 executionId 会让旧停止请求返回 409。该入口绕过普通命令队列，存储故障后仍可停止本机作业；完成前不返回，不触发模型通知或修改已结束 Turn。已终态重复停止 `accepted: false`。它只控制直接归属的当前作业：停止运行中 Task 会等待子执行清理，已完成 Task 遗留的子会话 Shell 则需按实际 owner 单独停止；不代表停止整个助手、工作项或外部持久任务。
 
 存储故障时新操作以 `storage_unavailable` 拒绝。`bestEffort: true` 仅对当前活跃根 Turn 尽力停止本实例 Agent / MCP 和所属本地作业、清空输入和交互，回执 `durable: false`；不持久化取消意图、不调用外部持久执行器取消，也不承诺最终保存为 cancelled。存储正常时仍走普通持久取消。
 

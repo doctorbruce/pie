@@ -104,6 +104,15 @@ export async function createLocalRuntime(options: {
 		get tools() {
 			return runtime.tools;
 		},
+		createInputBatch: (...args: Parameters<PieRuntime["createInputBatch"]>) =>
+			execute(() => runtime.createInputBatch(...args), true),
+		readInputBatch: (...args: Parameters<PieRuntime["readInputBatch"]>) =>
+			execute(() => runtime.readInputBatch(...args), false),
+		acceptInputBatch: (...args: Parameters<PieRuntime["acceptInputBatch"]>) =>
+			execute(() => runtime.acceptInputBatch(...args), true),
+		consumeInputBatch: (...args: Parameters<PieRuntime["consumeInputBatch"]>) =>
+			execute(() => runtime.consumeInputBatch(...args), true),
+		yieldTurn: (...args: Parameters<PieRuntime["yieldTurn"]>) => execute(() => runtime.yieldTurn(...args), true),
 		listAssistants() {
 			return execute(async () => {
 				return structuredClone([...assistants.values()]);
@@ -212,9 +221,15 @@ export async function createLocalRuntime(options: {
 			execute(() => runtime.registerHostRuntimes(...args), true),
 		createSession: (...args: Parameters<PieRuntime["createSession"]>) =>
 			execute(() => runtime.createSession(...args), true),
+		getSessionCreation: (...args: Parameters<PieRuntime["getSessionCreation"]>) =>
+			execute(() => runtime.getSessionCreation(...args), false),
 		getSession: (...args: Parameters<PieRuntime["getSession"]>) => execute(() => runtime.getSession(...args), false),
 		listBackgroundJobs: (...args: Parameters<PieRuntime["listBackgroundJobs"]>) =>
 			execute(() => runtime.listBackgroundJobs(...args), false),
+		cancelBackgroundJob: (...args: Parameters<PieRuntime["cancelBackgroundJob"]>) => {
+			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭", "runtime_closing"));
+			return runtime.cancelBackgroundJob(...args);
+		},
 		exportSession: (...args: Parameters<PieRuntime["exportSession"]>) =>
 			execute(() => runtime.exportSession(...args), false),
 		forkSession: (...args: Parameters<PieRuntime["forkSession"]>) =>
@@ -231,6 +246,8 @@ export async function createLocalRuntime(options: {
 			execute(() => runtime.setModelOverride(...args), true),
 		renameSession: (...args: Parameters<PieRuntime["renameSession"]>) =>
 			execute(() => runtime.renameSession(...args), true),
+		archiveSession: (...args: Parameters<PieRuntime["archiveSession"]>) =>
+			execute(() => runtime.archiveSession(...args), true),
 		cancelTurn: (...args: Parameters<PieRuntime["cancelTurn"]>) => {
 			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭", "runtime_closing"));
 			return runtime.cancelTurn(...args);

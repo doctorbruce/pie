@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { contentText } from "@earendil-works/pi-ai";
@@ -6,9 +6,21 @@ import type { createAgentFactory } from "./agent.ts";
 import type { AssistantSource } from "./capabilities.ts";
 import { checkpointMessage, isContextCheckpoint } from "./compaction.ts";
 import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./config.ts";
+import {
+	CoordinationService,
+	type CoordinationStore,
+	type InputBatchCreate,
+	type YieldRecord,
+} from "./coordination.ts";
 import { DurableJobError, type DurableJobExecutor, durableJobResult, pendingDurableJobs } from "./durable-jobs.ts";
 import { projectSessionAgentEvent } from "./event-projection.ts";
-import { type BackgroundJobInfo, type BackgroundJobList, BackgroundJobs } from "./jobs.ts";
+import {
+	type BackgroundJobCancellationReceipt,
+	type BackgroundJobInfo,
+	type BackgroundJobList,
+	BackgroundJobs,
+	summarizeBackgroundJob,
+} from "./jobs.ts";
 import type {
 	ActionUnavailableReason,
 	ActivityRecord,
@@ -25,6 +37,7 @@ import type {
 	PermissionGrant,
 	SessionAction,
 	SessionActions,
+	SessionCreationReceipt,
 	SessionEvent,
 	SessionExecution,
 	SessionSnapshot,
@@ -38,7 +51,13 @@ import type {
 	Turn,
 	TurnReceipt,
 } from "./protocol.ts";
-import type { RuntimeStore, SavedSession, SessionCursor, SessionMetadata } from "./runtime-store.ts";
+import type {
+	RuntimeStore,
+	SavedSession,
+	SessionCursor,
+	SessionMetadata,
+	SessionWriteOptions,
+} from "./runtime-store.ts";
 import {
 	displayAgentMessages,
 	exportSession,
@@ -108,6 +127,12 @@ function optionalRequestId(body: Record<string, unknown>): string | undefined {
 	if (typeof body.requestId !== "string" || !body.requestId.trim() || body.requestId.length > 256)
 		throw new RuntimeError(400, "requestId 需要 1–256 个字符");
 	return body.requestId.trim();
+}
+
+function sessionCreationKey(value: unknown): string {
+	if (typeof value !== "string" || !value.trim() || value.length > 256 || value.includes("\0"))
+		throw new RuntimeError(400, "creationKey 需要 1–256 个字符，不能包含空字符");
+	return value.trim();
 }
 
 function optionalCanonicalTurnId(body: Record<string, unknown>): string | undefined {
@@ -197,6 +222,7 @@ function optionalMessageIdentity(body: Record<string, unknown>): UserMessageIden
 }
 
 export type CreateSessionInput = {
+	creationKey?: string;
 	assistantId?: string;
 	title?: string;
 	workspacePath?: string;
@@ -341,7 +367,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	const sessions = new Map<string, Session>();
 	// Retain only a watermark after eviction, never Agent state or history.
 	const revisionFloors = new Map<string, number>();
-	const waitingReads = new Set<Promise<SessionSnapshot>>();
+	const pendingWaits = new Set<Promise<unknown>>();
 	let commandActive = false;
 	let queuedCommands = 0;
 	const pendingInteractions = new Map<string, PendingInteraction>();
@@ -603,6 +629,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function summary(session: SessionSummary): SessionSummary {
 		return {
 			id: session.id,
+			archived: session.archived === true,
 			kind: session.kind,
 			forkedFromSessionId: session.forkedFromSessionId,
 			parentSessionId: session.parentSessionId,
@@ -709,6 +736,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		update?: ReturnType<typeof historyUpdate>,
 		toolExecutions: readonly ToolExecutionRecord[] = [],
 		permissionGrants?: PermissionGrant[],
+		writeOptions?: SessionWriteOptions,
 	) {
 		const pending = (session.writePromise ?? Promise.resolve()).then(async () => {
 			assertStorageAvailable();
@@ -737,6 +765,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					},
 					replaceHistory,
 					toolExecutions,
+					writeOptions,
 				);
 			} catch (error) {
 				storageFailed = true;
@@ -1792,6 +1821,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 			leafId: session.tree?.leafId ?? null,
 		};
 	}
+	const coordination =
+		store.createInputBatch && store.readInputBatch && store.updateInputBatch && store.createYield && store.readYield
+			? new CoordinationService(store as CoordinationStore)
+			: undefined;
+	function requireCoordination() {
+		if (!coordination) throw new RuntimeError(405, "当前存储未启用协调事实");
+		return coordination;
+	}
 	return {
 		get info() {
 			return { ...factory.info, persistence: store.persistence };
@@ -1801,6 +1838,44 @@ async function initializeRuntime(options: RuntimeOptions) {
 		},
 		get tools() {
 			return structuredClone(factory.toolCatalog);
+		},
+		createInputBatch(sessionId: string, input: Omit<InputBatchCreate, "sessionId">) {
+			return execute(async () => {
+				await requireSession(sessionId);
+				return requireCoordination().createInputBatch({ ...input, sessionId });
+			}, false);
+		},
+		readInputBatch(batchId: string) {
+			return execute(async () => {
+				const batch = await requireCoordination().readInputBatch(batchId);
+				if (!batch) throw new RuntimeError(404, "输入批次不存在");
+				return structuredClone(batch);
+			}, false);
+		},
+		acceptInputBatch(sessionId: string, batchId: string, turnId: string) {
+			return execute(async () => {
+				const batch = await requireCoordination().readInputBatch(batchId);
+				if (!batch || batch.sessionId !== sessionId) throw new RuntimeError(404, "输入批次不存在");
+				await requireSession(sessionId);
+				return requireCoordination().acceptInputBatch(batchId, turnId);
+			}, false);
+		},
+		consumeInputBatch(sessionId: string, batchId: string, turnId: string) {
+			return execute(async () => {
+				const batch = await requireCoordination().readInputBatch(batchId);
+				if (!batch || batch.sessionId !== sessionId) throw new RuntimeError(404, "输入批次不存在");
+				return requireCoordination().consumeInputBatch(batchId, turnId);
+			}, false);
+		},
+		yieldTurn(
+			sessionId: string,
+			input: Omit<YieldRecord, "sessionId" | "yieldId" | "createdAt" | "status"> & { yieldId?: string },
+		) {
+			return execute(async () => {
+				const session = await requireSession(sessionId);
+				if (session.turn?.id !== input.turnId) throw new RuntimeError(409, "Turn 不存在或已切换");
+				return requireCoordination().yieldTurn({ ...input, sessionId });
+			}, false);
 		},
 		listSessionMetadata() {
 			return execute(async () => {
@@ -1818,7 +1893,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 			}, false);
 		},
 		listSessions(
-			filter: { assistantId?: string; includeSubagents?: boolean; limit?: number; cursor?: SessionCursor } = {},
+			filter: {
+				assistantId?: string;
+				includeSubagents?: boolean;
+				includeArchived?: boolean;
+				limit?: number;
+				cursor?: SessionCursor;
+			} = {},
 		) {
 			return execute(async () => {
 				const { assistantId, includeSubagents, limit = 50, cursor } = filter;
@@ -1836,6 +1917,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					throw new RuntimeError(400, "会话分页需要 1–200 条及有效游标");
 				const page = await store.listSessions({
 					limit,
+					includeArchived: filter.includeArchived === true,
 					cursor,
 					assistantId,
 					kind: includeSubagents ? undefined : "root",
@@ -1872,12 +1954,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 					(typeof body.assistantId !== "string" || !body.assistantId.trim() || body.assistantId.length > 256)
 				)
 					throw new RuntimeError(400, "assistantId 需要 1–256 个字符");
-				const defaultAssistant = options.assistants?.list()[0];
-				const assistantId = (body.assistantId as string | undefined) ?? defaultAssistant?.id;
-				if (!assistantId) throw new RuntimeError(400, "请选择有效助手");
-				const localAssistant = options.assistants?.list().find((assistant) => assistant.id === assistantId);
-				const hostDefinition = hostRuntimes.get(assistantId);
-				if (!hostDefinition && !localAssistant) throw new RuntimeError(400, "请选择有效助手");
 				const title = body.title ?? "新会话";
 				if (typeof title !== "string" || !title.trim() || title.length > 100)
 					throw new RuntimeError(400, "会话标题需要 1–100 个字符");
@@ -1904,6 +1980,35 @@ async function initializeRuntime(options: RuntimeOptions) {
 						throw new RuntimeError(400, "model 需要 provider 和 id");
 					model = { provider: value.provider, id: value.id };
 				}
+				const creationKey = body.creationKey === undefined ? undefined : sessionCreationKey(body.creationKey);
+				const requestFingerprint = createHash("sha256")
+					.update(
+						JSON.stringify({
+							assistantId: body.assistantId,
+							title: title.trim(),
+							workspacePath: body.workspacePath?.trim(),
+							mode,
+							model,
+						}),
+					)
+					.digest("hex");
+				if (creationKey !== undefined) {
+					if (!store.readSessionCreation) throw new RuntimeError(405, "当前存储不支持幂等创建会话");
+					const existing = await store.readSessionCreation(creationKey);
+					if (existing) {
+						if (existing.requestFingerprint !== requestFingerprint)
+							throw new RuntimeError(409, "creationKey 已绑定其他创建参数");
+						if (!(await store.readSession(existing.sessionId)))
+							throw new RuntimeError(409, "creationKey 对应的会话已删除，不能重新创建");
+						return await snapshot(await requireSession(existing.sessionId));
+					}
+				}
+				const defaultAssistant = options.assistants?.list()[0];
+				const assistantId = body.assistantId ?? defaultAssistant?.id;
+				if (!assistantId) throw new RuntimeError(400, "请选择有效助手");
+				const localAssistant = options.assistants?.list().find((assistant) => assistant.id === assistantId);
+				const hostDefinition = hostRuntimes.get(assistantId);
+				if (!hostDefinition && !localAssistant) throw new RuntimeError(400, "请选择有效助手");
 				if (mode === "real" && !model && !factory.info.realModel)
 					throw new RuntimeError(400, factory.info.realModelError ?? "真实模型未配置");
 				const id = randomUUID();
@@ -1961,10 +2066,29 @@ async function initializeRuntime(options: RuntimeOptions) {
 				};
 				// Retain the applied runtime and model selection; local Assistant changes are resolved before the next turn.
 				await attachAgent(session, agent);
-				await persist(session);
+				await persist(session, false, undefined, [], undefined, {
+					creation:
+						creationKey === undefined
+							? undefined
+							: { creationKey, sessionId: id, requestFingerprint, createdAt: session.createdAt },
+				});
 				sessions.set(id, session);
 				return await snapshot(session);
 			}, true);
+		},
+		getSessionCreation(creationKey: string): Promise<SessionCreationReceipt> {
+			return execute(async () => {
+				const key = sessionCreationKey(creationKey);
+				if (!store.readSessionCreation) throw new RuntimeError(405, "当前存储不支持幂等创建会话");
+				const record = await store.readSessionCreation(key);
+				if (!record) throw new RuntimeError(404, "会话创建记录不存在");
+				return {
+					creationKey: record.creationKey,
+					sessionId: record.sessionId,
+					createdAt: record.createdAt,
+					sessionExists: (await store.readSession(record.sessionId)) !== undefined,
+				};
+			}, false);
 		},
 		getSession(sessionId: string, options?: { limit: number }) {
 			return execute(async () => {
@@ -1978,6 +2102,40 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const session = await requireSession(sessionId);
 				return { instanceId, sessionId: session.id, jobs: jobs.listSummaries(session.id) };
 			}, false);
+		},
+		cancelBackgroundJob(
+			sessionId: string,
+			body: { instanceId: string; jobId: string; executionId: string },
+		): Promise<BackgroundJobCancellationReceipt> {
+			const pending = (async (): Promise<BackgroundJobCancellationReceipt> => {
+				if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
+				if (
+					!body ||
+					typeof body.instanceId !== "string" ||
+					typeof body.jobId !== "string" ||
+					!body.jobId ||
+					typeof body.executionId !== "string" ||
+					!body.executionId
+				)
+					throw new RuntimeError(400, "需要 instanceId、jobId 和 executionId");
+				if (body.instanceId !== instanceId) throw new RuntimeError(409, "后台作业不属于当前运行实例");
+				const owned = jobs.get(body.jobId);
+				if (!owned || owned.ownerSessionId !== sessionId) throw new RuntimeError(404, "后台作业不存在");
+				if (owned.executionId !== body.executionId) throw new RuntimeError(409, "后台作业已开始另一次执行");
+				const accepted = owned.status === "running";
+				// Stop local work before any queue/storage wait; terminal receipts wait for actual job cleanup.
+				if (accepted) jobs.cancel(body.jobId, { notify: false });
+				const job = (await jobs.wait(body.jobId))!;
+				return {
+					instanceId,
+					sessionId,
+					accepted,
+					durable: false,
+					job: summarizeBackgroundJob(job),
+				};
+			})();
+			pendingWaits.add(pending);
+			return pending.finally(() => pendingWaits.delete(pending));
 		},
 		exportSession(sessionId: string) {
 			return execute(async () => {
@@ -2150,6 +2308,24 @@ async function initializeRuntime(options: RuntimeOptions) {
 				} catch (error) {
 					Object.assign(session, previous);
 					if (!initialized) delete session.modelOverride;
+					throw error;
+				}
+				await publish(session, "snapshot");
+				return await snapshot(session);
+			}, true);
+		},
+		archiveSession(sessionId: string, body: Record<string, unknown>) {
+			return execute(async () => {
+				if (typeof body.archived !== "boolean") throw new RuntimeError(400, "archived 必须为布尔值");
+				const session = await requireSession(sessionId);
+				if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
+				const previous = { archived: session.archived, updatedAt: session.updatedAt };
+				session.archived = body.archived;
+				session.updatedAt = Date.now();
+				try {
+					await persist(session);
+				} catch (error) {
+					Object.assign(session, previous);
 					throw error;
 				}
 				await publish(session, "snapshot");
@@ -2731,8 +2907,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 					releaseSession(session);
 				}
 			})();
-			waitingReads.add(pending);
-			return pending.finally(() => waitingReads.delete(pending));
+			pendingWaits.add(pending);
+			return pending.finally(() => pendingWaits.delete(pending));
 		},
 		close() {
 			if (closePromise) return closePromise;
@@ -2759,7 +2935,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					session.clients.clear();
 				}
 				await Promise.allSettled(settlements);
-				await Promise.allSettled(waitingReads);
+				await Promise.allSettled(pendingWaits);
 				try {
 					await factory.mcp.close();
 				} finally {

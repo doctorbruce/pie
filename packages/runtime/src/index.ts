@@ -7,8 +7,17 @@ export {
 	type ModelSource,
 	type SkillToolsFactory,
 } from "./capabilities.ts";
+export {
+	CoordinationError,
+	CoordinationService,
+	type CoordinationStore,
+	type InputBatch,
+	type InputBatchCreate,
+	type InputBatchStatus,
+	type YieldRecord,
+} from "./coordination.ts";
 export type { DurableJobExecutor, DurableJobReference, DurableJobSnapshot } from "./durable-jobs.ts";
-export type { BackgroundJobList, BackgroundJobSummary } from "./jobs.ts";
+export type { BackgroundJobCancellationReceipt, BackgroundJobList, BackgroundJobSummary } from "./jobs.ts";
 export type { McpRuntime } from "./mcp.ts";
 export type * from "./protocol.ts";
 export {
@@ -24,10 +33,12 @@ export {
 export type {
 	RuntimeStore,
 	SavedSession,
+	SessionCreationRecord,
 	SessionCursor,
 	SessionListOptions,
 	SessionMetadata,
 	SessionPage,
+	SessionWriteOptions,
 	TurnCheckpoint,
 } from "./runtime-store.ts";
 export type { MessageTree } from "./session-tree.ts";

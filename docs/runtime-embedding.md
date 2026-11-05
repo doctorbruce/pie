@@ -19,6 +19,14 @@
 | `AgentFactoryOptions` 的能力注入与工具契约 | tools-sdk 适配、租户模型配置与凭据解析、文件 / Skill 资源部署 |
 | 不同宿主共用的回归测试 | 真实数据库、SDK / Worker、权限与故障场景的云端验收 |
 
+## 幂等创建与核对
+
+`createSession` 可选传入 `creationKey`，作用域为当前 Runtime 的授权域和存储。同键、相同创建参数返回原会话的当前快照，不创建 Agent 或重新执行；参数不同返回 409。键先去除首尾空白，长度为 1–256，不能含空字符；比较参数包含显式 assistantId、规范化标题/工作目录、mode 和显式 model，不随默认助手或模型配置变化重新计算归属。不传键保持每次新建。
+
+宿主持久存储可选实现 `readSessionCreation(key)`。实现该方法即承诺 `saveSession(session, replaceHistory?, toolExecutions?, { creation? })` 将创建记录和首次会话保存放在同一事务，唯一键冲突回滚整个写入，不能忽略第四参数。SQLite 已接入；旧适配器仍支持普通创建，带键请求和查询返回 405。此契约仍要求每个授权域由单个 Runtime 执行，不提供跨实例创建仲裁。
+
+创建响应丢失时调用 `getSessionCreation(key)`，返回 `{ creationKey, sessionId, createdAt, sessionExists }`；不存在返回 404，不返回内部参数指纹。删除会话保留创建记录，迟到重试返回 409，查询显示 `sessionExists: false`，不能用原键悄悄新建。键应由宿主为单次创建意图分配，不能写入密钥。当前没有创建记录过期清理策略。
+
 ## 最小宿主装配
 
 以下函数可作为 `agent-service` 装配位置的参考；依赖由服务端实现，不是已有云端 SDK 的声明：
@@ -143,6 +151,7 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 - 存储故障时普通新控制操作返回 `storage_unavailable`；显式 `cancelTurn(id, { turnId, bestEffort: true })` 只对当前活跃根 Turn 尽力停止本实例的 Agent / MCP 和所属本地作业、清空队列和交互，回执 `durable: false`。它不保存取消意图，也不请求外部持久执行器取消；终态可能因保存失败为 `failed`，不能当成可靠取消。存储正常时此选项仍执行普通持久取消。
 - 当前单实例按顺序接纳普通控制操作，避免异步存储下重复提交；不同会话的模型执行可并行。活跃取消独立于该队列，其清理仍属于当前回合的生命周期屏障，下一 Turn、会话卸载和关闭不能越过；未激活会话与中断 Turn 的取消继续串行处理。此处不是分布式锁，也不是跨节点调度器。
 - Local 封装直接转交 `cancelTurn`，不经过助手管理和会话读取的外层队列；关闭开始后仍拒绝新的取消请求，Runtime 继续负责取消身份校验、持久化与关闭屏障。
+- 宿主可调用 `cancelBackgroundJob(sessionId, { instanceId, jobId, executionId })` 停止直接归属的本机 Shell/Task；三项身份来自 `listBackgroundJobs`。`executionId` 每次启动重新生成，防止续跑 Task 复用 jobId 时，迟到停止误取消新执行。错误实例/执行返回 409，错误归属或未知作业返回 404。入口绕过 Runtime/Local 普通队列，存储故障后也可使用；抑制完成通知，等待作业清理后返回 `{ instanceId, sessionId, accepted, durable: false, job }`，job 是同源有界摘要。终态重复停止 `accepted: false`，不修改原 Turn 结果、不启动模型。只控制本实例直接作业；已完成 Task 遗留的子 Session Shell 需按实际 owner 分别停止，不代表停止整个 Session、工作项或外部持久任务。关闭会等待已受理的作业停止；进程重启后不能凭旧作业表判断副作用已停止。
 - Steer 受理持久化后发布新 `snapshot`，保留旧 execution owner 与 queued admission；实际应用后发布 `turn.applied`。发布队列入口固定 Turn、执行摘要、历史叶子和载荷，后续投递不读取可变 owner。`turn.settled` 发出时执行清理可能尚未结束，`actions.submit.available` 仍为 false；清理结束后再发布可提交的 `snapshot`，宿主据此发起下一轮。
 - `sessionRetention` 默认 `"retain"`，本地继续复用内存中的 Agent 和工作历史；宿主可显式传入 `"release-after-turn"`，在回合结果提交、事件收尾完成后解除 Agent 和消息引用，下一轮通过 `store.readWorkingPath` 加载 checkpoint 工作窗口并重建。该策略不选择数据库，Redis / SQL 仍由宿主实现 `RuntimeStore`。
 - 卸载不调用 `deleteSession`、不关闭共享 MCP / 存储。没有执行、后台工作、确认、读操作或订阅引用时，从实例缓存移除整个 Session；下一次访问通过 `readSession` 重建元信息。订阅期间保留轻量 Session，但仍回收已提交工作正文。创建、导入、分叉、分支选择和闲置元信息写入遵循同一策略。完整历史浏览和导出仍临时读取持久数据；本地 HTTP 默认完整会话列表由 Local 分页汇总，不因此预载执行对象。

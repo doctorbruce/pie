@@ -58,13 +58,14 @@ function memoryStore() {
 			await delay(2);
 			return structuredClone(sessions.get(id));
 		},
-		async listSessions({ limit, cursor, assistantId, kind, parentSessionId }) {
+		async listSessions({ limit, cursor, assistantId, kind, parentSessionId, includeArchived }) {
 			listReads++;
 			await delay(2);
 			const matches = [...sessions.values()]
 				.filter(
 					(session) =>
 						(assistantId === undefined || session.assistantId === assistantId) &&
+						(includeArchived !== false || !session.archived) &&
 						(kind === undefined || session.kind === kind) &&
 						(parentSessionId === undefined || session.parentSessionId === parentSessionId) &&
 						(!cursor ||
@@ -309,6 +310,39 @@ test("startup reads no session metadata and concurrent access activates only its
 	seedSession(memory, "absent");
 	assert.equal((await runtime.getSession("absent")).id, "absent");
 	assert.equal(memory.metadataReads.filter((id) => id === "absent").length, 2);
+});
+
+test("archived session filtering happens before pagination and internal metadata scans retain archived sessions", async (context) => {
+	const memory = memoryStore();
+	seedSession(memory, "archived", { archived: true, updatedAt: 2 });
+	seedSession(memory, "visible");
+	const runtime = await createRuntime({ store: memory.store, agents: agents("unused") });
+	context.after(() => runtime.close());
+	const page = await runtime.listSessions({ limit: 1 });
+	assert.deepEqual(
+		page.sessions.map((session) => session.id),
+		["visible"],
+	);
+	assert.equal(page.nextCursor, null);
+	const all = await runtime.listSessions({ includeArchived: true });
+	assert.deepEqual(
+		all.sessions.map((session) => session.id),
+		["archived", "visible"],
+	);
+	assert.equal((await runtime.listSessionMetadata()).length, 2);
+});
+
+test("archive rejects child changes and never reports a failed save as archived", async (context) => {
+	const memory = memoryStore();
+	seedSession(memory, "root");
+	seedSession(memory, "child", { kind: "subagent", parentSessionId: "root" });
+	const runtime = await createRuntime({ store: memory.store, agents: agents("unused") });
+	context.after(() => runtime.close());
+	await assert.rejects(runtime.archiveSession("child", { archived: true }), { status: 409 });
+	memory.failWrites();
+	await assert.rejects(runtime.archiveSession("root", { archived: true }), { status: 503 });
+	assert.equal((await runtime.getSession("root")).archived, false);
+	assert.notEqual(memory.sessions.get("root")?.archived, true);
 });
 
 test("session lists page durable metadata without activating sessions and break timestamp ties by ID", async (context) => {

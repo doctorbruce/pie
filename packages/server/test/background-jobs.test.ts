@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import { createAgentFactory, createSqliteRuntimeStore, openStore } from "@pie/local";
 import { createRuntime } from "@pie/runtime";
-import { type BackgroundJobList, BackgroundJobs } from "@pie/runtime/jobs";
+import { type BackgroundJobCancellationReceipt, type BackgroundJobList, BackgroundJobs } from "@pie/runtime/jobs";
 import type { HostRuntimeDefinition } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
@@ -40,9 +40,9 @@ test("job summaries bound display text without truncating the original result", 
 	assert.equal(jobs.get(job.id)?.output, "PRIVATE_OUTPUT");
 });
 
-async function fixture(context: TestContext) {
+async function fixture(context: TestContext, cleanup?: Promise<void>) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-background-observation-"));
-	const controls = new Map<string, { finish: () => void; cancel: () => void }>();
+	const controls = new Map<string, { finish: () => void; cancel: () => void; aborted: () => boolean }>();
 	const agents = createAgentFactory(
 		{ PI_DATA_DIR: directory },
 		{
@@ -53,15 +53,19 @@ async function fixture(context: TestContext) {
 						name: "start_job",
 						label: "Start controlled work",
 						description: "Start work that outlives its Turn.",
-						parameters: toolContext.Type.Object({}),
-						async execute() {
+						parameters: toolContext.Type.Object({ id: toolContext.Type.Optional(toolContext.Type.String()) }),
+						async execute(_callId, params) {
+							const { id } = params as { id?: string };
 							let finish = () => {};
+							let jobSignal: AbortSignal | undefined;
 							const job = toolContext.jobs.start({
+								id,
 								ownerSessionId: toolContext.sessionId,
 								type: "shell",
 								title: "Controlled background work",
 								details: { command: "PRIVATE_COMMAND", output: "PRIVATE_DETAILS" },
 								async run(signal, append) {
+									jobSignal = signal;
 									append("PRIVATE_OUTPUT");
 									let abort = () => {};
 									try {
@@ -74,10 +78,15 @@ async function fixture(context: TestContext) {
 										return { details: { exit: 0 } };
 									} finally {
 										signal.removeEventListener("abort", abort);
+										await cleanup;
 									}
 								},
 							});
-							controls.set(job.id, { finish, cancel: () => toolContext.jobs.cancel(job.id) });
+							controls.set(job.id, {
+								finish,
+								cancel: () => toolContext.jobs.cancel(job.id),
+								aborted: () => jobSignal?.aborted === true,
+							});
 							return { content: [{ type: "text", text: job.id }], details: { background: true, jobId: job.id } };
 						},
 					},
@@ -188,6 +197,137 @@ test("a child background job prevents deleting its otherwise settled parent", as
 	assert.deepEqual(await runtime.deleteSession(parent.id), { deleted: true });
 });
 
+test("host job stop bypasses blocked history and waits for cleanup without blocking other controls", async (context) => {
+	let releaseCleanup = () => {};
+	let releaseRead = () => {};
+	let entered = () => {};
+	const cleanup = new Promise<void>((resolve) => {
+		releaseCleanup = resolve;
+	});
+	const blocked = new Promise<void>((resolve) => {
+		releaseRead = resolve;
+	});
+	const reading = new Promise<void>((resolve) => {
+		entered = resolve;
+	});
+	const { runtime, store, controls } = await fixture(context, cleanup);
+	try {
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		await runtime.submitTurn(session.id, { text: "调用工具 start_job {}" });
+		await runtime.waitForTurn(session.id);
+		const observed = await runtime.listBackgroundJobs(session.id);
+		const job = observed.jobs[0];
+		const readPath = store.readPath;
+		context.mock.method(store, "readPath", async (...args: Parameters<typeof readPath>) => {
+			entered();
+			await blocked;
+			return readPath(...args);
+		});
+		const read = runtime.getSession(session.id);
+		await reading;
+		let settled = false;
+		const stop = runtime
+			.cancelBackgroundJob(session.id, {
+				instanceId: observed.instanceId,
+				jobId: job.id,
+				executionId: job.executionId,
+			})
+			.then((receipt) => {
+				settled = true;
+				return receipt;
+			});
+		assert.equal(controls.get(job.id)!.aborted(), true, "abort is delivered without waiting for history or storage");
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(settled, false, "receipt cannot claim cleanup before the job exits");
+		releaseCleanup();
+		const receipt = await stop;
+		assert.equal(receipt.accepted, true);
+		assert.equal(receipt.durable, false);
+		assert.equal(receipt.job.status, "cancelled");
+		assert.equal(JSON.stringify(receipt).includes("PRIVATE"), false);
+		releaseRead();
+		await read;
+		assert.equal(
+			(
+				await runtime.cancelBackgroundJob(session.id, {
+					instanceId: observed.instanceId,
+					jobId: job.id,
+					executionId: job.executionId,
+				})
+			).accepted,
+			false,
+		);
+	} finally {
+		releaseCleanup();
+		releaseRead();
+	}
+});
+
+test("a late host stop cannot cancel a new execution reusing the same job ID", async (context) => {
+	const { runtime, controls } = await fixture(context);
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	await runtime.submitTurn(session.id, { text: '调用工具 start_job {"id":"continued-task"}' });
+	await runtime.waitForTurn(session.id);
+	const first = (await runtime.listBackgroundJobs(session.id)).jobs[0];
+	controls.get(first.id)!.finish();
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal((await runtime.listBackgroundJobs(session.id)).jobs[0].status, "completed");
+	await runtime.submitTurn(session.id, { text: '调用工具 start_job {"id":"continued-task"}' });
+	await runtime.waitForTurn(session.id);
+	const current = await runtime.listBackgroundJobs(session.id);
+	const next = current.jobs[0];
+	assert.equal(next.id, first.id);
+	assert.notEqual(next.executionId, first.executionId);
+	await assert.rejects(
+		runtime.cancelBackgroundJob(session.id, {
+			instanceId: current.instanceId,
+			jobId: first.id,
+			executionId: first.executionId,
+		}),
+		{ status: 409 },
+	);
+	assert.equal(controls.get(next.id)!.aborted(), false);
+	const stopped = await runtime.cancelBackgroundJob(session.id, {
+		instanceId: current.instanceId,
+		jobId: next.id,
+		executionId: next.executionId,
+	});
+	assert.equal(stopped.job.status, "cancelled");
+});
+
+test("host job stop remains available after persistence failure and cannot stop another session's work", async (context) => {
+	const { runtime, store } = await fixture(context);
+	const session = await runtime.createSession({ assistantId: definition.assistantId });
+	const other = await runtime.createSession({ assistantId: definition.assistantId });
+	await runtime.submitTurn(session.id, { text: "调用工具 start_job {}" });
+	await runtime.waitForTurn(session.id);
+	const observed = await runtime.listBackgroundJobs(session.id);
+	const jobId = observed.jobs[0].id;
+	const executionId = observed.jobs[0].executionId;
+	await assert.rejects(
+		runtime.cancelBackgroundJob(other.id, { instanceId: observed.instanceId, jobId, executionId }),
+		{
+			status: 404,
+		},
+	);
+	await assert.rejects(runtime.cancelBackgroundJob(session.id, { instanceId: "old-instance", jobId, executionId }), {
+		status: 409,
+	});
+	assert.equal((await runtime.listBackgroundJobs(session.id)).jobs[0].status, "running");
+	context.mock.method(store, "saveSession", async () => {
+		throw new Error("disk unavailable");
+	});
+	await assert.rejects(runtime.renameSession(session.id, { title: "failure" }), { status: 503 });
+	assert.equal(runtime.storageAvailable, false);
+	const receipt = await runtime.cancelBackgroundJob(session.id, {
+		instanceId: observed.instanceId,
+		jobId,
+		executionId,
+	});
+	assert.equal(receipt.job.status, "cancelled");
+	assert.equal(receipt.durable, false);
+});
+
 test("HTTP exposes the same lightweight jobs as the SDK and resets observations after restart", async (context) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-background-http-"));
 	let core = createCoreServer({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });
@@ -237,11 +377,45 @@ test("HTTP exposes the same lightweight jobs as the SDK and resets observations 
 	assert(!("output" in observed.jobs[0]));
 	assert.equal((await runtime.cancelTurn(shellSession.id, { turnId: settled.turn!.id })).accepted, false);
 	assert.equal((await runtime.listBackgroundJobs(shellSession.id)).jobs[0].status, "running");
+	const stop = (sessionId: string, instanceId?: string) =>
+		fetch(`${base}/sessions/${sessionId}/jobs/${observed.jobs[0].id}/cancel`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ instanceId, executionId: observed.jobs[0].executionId }),
+		});
+	assert.equal((await stop(shellSession.id)).status, 400);
+	assert.equal((await stop(shellSession.id, "old-instance")).status, 409);
+	assert.equal((await stop(session.id, observed.instanceId)).status, 404);
+	const unavailable = context.mock.getter(runtime, "storageAvailable", () => false);
+	const stopped = await stop(shellSession.id, observed.instanceId);
+	unavailable.mock.restore();
+	assert.equal(stopped.status, 202);
+	const stoppedJob = (await stopped.json()) as BackgroundJobCancellationReceipt;
+	assert.equal(stoppedJob.accepted, true);
+	assert.equal(stoppedJob.job.status, "cancelled");
+	assert.equal(
+		(await runtime.getSession(shellSession.id)).turn?.id,
+		settled.turn?.id,
+		"host stop does not start a Turn",
+	);
+	assert.equal(
+		((await (await stop(shellSession.id, observed.instanceId)).json()) as BackgroundJobCancellationReceipt).accepted,
+		false,
+	);
 	await runtime.submitTurn(shellSession.id, {
-		text: `调用工具 job_kill ${JSON.stringify({ job_id: observed.jobs[0].id })}`,
+		text: `调用工具 bash ${JSON.stringify({ command, description: "Second controlled shell", yieldMs: 0 })}`,
 	});
 	await runtime.waitForTurn(shellSession.id);
-	assert.equal((await runtime.listBackgroundJobs(shellSession.id)).jobs[0].status, "cancelled");
+	const secondJob = (await runtime.listBackgroundJobs(shellSession.id)).jobs.find((job) => job.status === "running");
+	assert(secondJob);
+	await runtime.submitTurn(shellSession.id, {
+		text: `调用工具 job_kill ${JSON.stringify({ job_id: secondJob.id })}`,
+	});
+	await runtime.waitForTurn(shellSession.id);
+	assert.equal(
+		(await runtime.listBackgroundJobs(shellSession.id)).jobs.find((job) => job.id === secondJob.id)?.status,
+		"cancelled",
+	);
 	await core.close();
 	core = createCoreServer({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });
 	base = await listen();
@@ -251,4 +425,5 @@ test("HTTP exposes the same lightweight jobs as the SDK and resets observations 
 	assert.notEqual(restored.instanceId, observed.instanceId);
 	assert.equal(restored.sessionId, shellSession.id);
 	assert.deepEqual(restored.jobs, [], "process-local observations are not durable job history");
+	assert.equal((await stop(shellSession.id, observed.instanceId)).status, 409);
 });

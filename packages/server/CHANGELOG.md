@@ -10,6 +10,8 @@
 
 ### Added
 
+- Register logical Workers from host assistant runtimes, persist coordination facts in Local SQLite, and expose trusted-host inbox and receipt APIs without changing ordinary chat or legacy task execution.
+
 - Expose `GET /sessions/:id/jobs` with the same lightweight, instance-scoped local-job observations as the Runtime SDK; keep Turn settlement distinct from background and descendant completion.
 
 - Bootstrap scoped `/events?sessionId=...` subscriptions with a lightweight execution baseline and align subsequent events for reconnects after silent settlement.

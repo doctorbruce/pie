@@ -27,6 +27,41 @@
 
 创建响应丢失时调用 `getSessionCreation(key)`，返回 `{ creationKey, sessionId, createdAt, sessionExists }`；不存在返回 404，不返回内部参数指纹。删除会话保留创建记录，迟到重试返回 409，查询显示 `sessionExists: false`，不能用原键悄悄新建。键应由宿主为单次创建意图分配，不能写入密钥。当前没有创建记录过期清理策略。
 
+## 可选 Worker 内部调度
+
+`WorkerScheduler` 复用 `createRuntime` 的 Session/Turn API，另注入 `WorkerCoordinationStore`；协调模块不拥有或关闭共享 Runtime。Local HTTP 宿主已自动装配，嵌入宿主可按需启用：
+
+```ts
+import { WorkerScheduler } from "@pie/runtime";
+
+const workers = new WorkerScheduler({ runtime, store: coordinationStore });
+await runtime.registerHostRuntimes(definitions);
+await workers.syncHostRuntimes(definitions);
+const received = await workers.enqueueWorkerMessage({
+  messageId: "stable-host-event-id",
+  workerId: "contract-assistant",
+  sourceWorkerId: "contract-assistant",
+  content: "审查合同甲",
+  newSession: true,
+  workspacePath: "/workspace/contract-a",
+  model: { provider: "configured-provider", id: "configured-model" },
+  mode: "real",
+  productBinding: { astronSessionId: "product-session-a" },
+});
+// 入箱收据不表示执行完成。用 deliveryId 查询，不生成新 ID 重投。
+const delivery = await workers.getWorkerDelivery(received.delivery.deliveryId);
+```
+
+同一 `assistantId` 对应一个逻辑 Worker，注册刷新只更新配置关联，已有 Session 的 Turn 继续遵循 Runtime 配置边界。新工作使用目标 Worker 的默认选择或消息中宿主明确提供的目录/模型，`productBinding` 字符串或对象的 `astronSessionId` 写入 Session 创建身份并随导出保留；不继承来源 Session 的历史、权限或目录。补充传 `workId`（唯一关联）、`targetSessionId` 或合法 `replyTo`；关联不唯一保持 pending，不猜测最近会话。来源身份仅由可信宿主填写，第 3 步才接模型侧受授权通信工具。
+
+Runtime 注册表提交与 Worker 配置同步是两个保存边界；后者失败时不能推断前者回滚，可按同一配置重试或重启核对。移除 runtime 配置保留 Worker 历史，但拒绝它的新执行。
+
+消息先入 SQLite，再后台建立工作/Session 关联。`pending/resolved/dispatched/accepted/consumed/failed` 分别表示待关联、已关联、已尝试派发、Runtime 已受理、Turn 已结算及接纳前失败；`consumed` 不表示业务成功，实际结果仍读对应 `acceptedTurnId` 的 Turn。每个 Session 按入箱顺序串行，不持 Worker 全局锁等待执行。繁忙期间补充保存到收件箱，在当前 Turn 完成清理后启动下一 Turn；可靠模型间隙接纳留在后续通信阶段。
+
+`waitWorkerDelivery` 仅等待当前实例已经安排的投递；pending、关闭或重启后未知记录可能直接返回，不能把它当作持久等待或重启自动恢复。已受理/已派发/已消费/失败的重复消息不重新执行，同 ID 不同正文或选择返回 409。关闭时先 `workers.stop()`，再关闭 Runtime；Runtime 的 store 关闭前 `await workers.drain()`，让在途投递先写完收据。未知派发结果保留可查询事实，不自动重放工具副作用。
+
+调度使用 `waitForTurn(sessionId, { onWait, onSettled })` 的可选同步回调：分别取得等待起点及同一 Turn 结算时的独立副本，完整快照仍可能在异步读取后观察到后续 Turn。嵌入宿主若自行适配这三个 Runtime 方法，必须保留该观察语义。取消截止据准确结算切面固定；取消前排队的补充不能复活，取消后的显式新请求可执行。受理 Turn 在等待登记前已被其他 Turn 替换时，保留 accepted 并明确要求对账。
+
 ## 最小宿主装配
 
 以下函数可作为 `agent-service` 装配位置的参考；依赖由服务端实现，不是已有云端 SDK 的声明：

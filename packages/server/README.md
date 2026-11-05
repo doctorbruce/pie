@@ -31,7 +31,11 @@
 | `PUT /models/config` | `{ provider, id, model?, apiKey? }` | 合并配置并持久化，将该模型设为默认，返回模型目录 |
 | `POST /models/reload` | `{}` | 重新读取模型配置文件；失败时保留当前有效配置 |
 | `PUT /host-runtimes` | `{ runtimes: [{ assistantId, assistantRevision, runtime }] }` | 事务性替换宿主 runtime 注册表并持久化；最多 256 个 Assistant，runtime 可引用同一批次中的 Subagent Assistant |
-| `POST /sessions` | `{ creationKey?, assistantId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；assistantId 命中宿主注册表时创建宿主会话，否则解析本地助手；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
+| `GET /workers` | 无 | `{ workers }`；从宿主 runtime 配置同步的逻辑 Worker，assistantId 与 workerId 一致 |
+| `POST /workers/:workerId/messages` | `{ messageId?, sourceWorkerId, sourceSessionId?, sourceTurnId?, content, kind?, workId?, targetSessionId?, replyTo?, newSession?, title?, workspacePath?, model?, mode?, productBinding? }` | `202` + `{ message, delivery }` 持久入箱收据；后台确定性关联并执行，不等待模型 |
+| `GET /worker-messages/:messageId` | 无 | 保存的原消息；不存在返回 404 |
+| `GET /worker-deliveries/:deliveryId` | 无 | 投递关联、状态和可选 acceptedTurnId/error；不自动重放 |
+| `POST /sessions` | `{ creationKey?, assistantId?, astronSessionId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；assistantId 命中宿主注册表时创建宿主会话，否则解析本地助手；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
 | `GET /session-creations?creationKey=...` | URL 编码的创建键 | `{ creationKey, sessionId, createdAt, sessionExists }`；未创建返回 404，已删除保留原记录 |
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
 | `POST /sessions/:id/archive` | `{ archived: boolean }` | 归档或取消归档根会话，返回含 archived 的快照；保留历史和任务执行，子会话返回 409 |
@@ -54,6 +58,8 @@
 | `DELETE /sessions/:id` | 无 | 删除空闲会话并关闭对应事件连接 |
 
 可选 `creationKey` 是宿主为一次创建意图分配的 1–256 字符键，去除首尾空白，不允许空字符。相同参数重试返回同一个会话的当前快照，即使会话已改名或原助手配置已改变；删除会话后保留键，原键重试返回 409。响应丢失可查询创建记录，不传键仍每次新建。键作用域是当前本地数据目录，不提供跨实例仲裁或自动过期清理，详见[嵌入契约](../../docs/runtime-embedding.md#幂等创建与核对)。
+
+Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿主核对，不能直接作为模型工具开放。`202` 只证明消息和投递意图已保存；确定性关联后按 Session 串行执行，不同 Session 可以并行。Runtime 注册表与 Worker 同步分开保存，同步失败可按原配置重试核对；删除配置保留 Worker 历史并拒绝新执行。投递状态、目标选择、产品绑定与关闭顺序见[Worker 嵌入契约](../../docs/runtime-embedding.md#可选-worker-内部调度)。
 
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 

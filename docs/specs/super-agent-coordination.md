@@ -1,6 +1,6 @@
 # Pie 助手 Worker 与持久协调设计
 
-状态：进行中，第 1 步可靠执行与控制契约。更新：2026-11-05。
+状态：第 2 步 Assistant = Worker 与内部调度（Pie 侧）已完成；后续步骤未实施，Astron 产品联调待内网。更新：2026-11-05。
 
 已获准按步骤实施并汇报进度。首期在本地 Astron Cowork + Pie 实现，端云协同在本地链路验收后推进。前置来源见 [DeepSeek Super-agent 评估](../deepseek-super-agent-assessment.md)；下述助手与 Worker 的对应关系是本次 Pie 讨论确定的模型，不代表 DeepSeek 原型的实现。
 
@@ -52,6 +52,8 @@ flowchart TD
 
 Astron 当前相关入口位于 `E:\Projects\cowork3\engine\servers\astronverse-agent\src\astronverse\agent`：`adapters/pie/runtime_config.py` 将助手投影到 `/host-runtimes`，同目录的 `transport.py` 创建绑定 assistantId 的 Pie Session，`runtime/services/session_service.py` 与 `store/session_bindings.py` 保存产品会话归属。实施时从这些既有入口接入，不建立另一套助手或插件注册表。
 
+本轮只读对照 `/workspace/cowork3-ref/cowork3`：`cloud/tsconfig.pie.json` 直接检查共享 Runtime，`cloud/docs/assistant-config-refresh-validation.md` 约定 Session 固定助手身份、后续 Turn 采用最新注册修订，`cloud/apps/agent-service/src/server/session/session-record.ts` 保留产品会话及模型选择。Pie 据此从现有 `HostRuntimeDefinition.assistantId` 注册同 ID 的逻辑 Worker，不复制 Astron 助手/插件配置；目录、模型与 `productBinding` 由可信宿主为目标工作明确选择。参考树只读，Cowork 变更须在内网完成。
+
 优先复用 Astron 当前管理的本地 Pie 实例，协调状态单独维护 schema。业务 Session 按所属助手进入现有产品绑定；内部 Router 协调 Session 由宿主明确标识和过滤，不污染普通会话列表。未启用新模式的 Session、群聊、事件流与旧 `task` 保持原路径，不自动迁移旧历史。
 
 Agent Core 不识别业务工作项。新模式通过可选的会话工具与执行控制注入提供通信及让出能力；不把 `runSubagent` 改名后继续当作对等通信，也不通过 `parentSessionId` 表达协作关系。
@@ -72,6 +74,8 @@ Agent Core 不识别业务工作项。新模式通过可选的会话工具与执
 Session 使用目标助手的配置、宿主选择的模型与工作目录；不能隐式继承发送方的目录、完整历史或审批记忆。配置和 Skill 刷新沿用现有边界，不冻结为一份永远不更新的 Worker 副本。
 
 每个目标 Session 按接收序号取批。模型/工具批次运行时继续收件，在下一模型调用间隙安全接纳；空闲时启动下一 Turn。工作即将结束时须重新检查待输入，并处理检查与新消息并发，防止最后一条消息落盘后无人唤醒。
+
+第 2 步先交付持久收件与 Session 内 FIFO 执行：繁忙时继续保存消息，前一 Turn 完成生命周期清理后启动下一 Turn；不同 Session 不互相等待。暂不把现有 `durable: false` 的 steer 当成可靠收件，模型调用间隙的持久批次接纳随第 3 步通信/唤醒一起接入。取消或失败会阻止此前已排队补充自动重启；已受理或派发结果未知的记录保持可核对，不因重试盲目再执行。
 
 调度只在认领、关联与保存等短操作中串行，不持有队列锁等待某个 Session 的整个模型或工具执行。等待回复不占执行配额，其他 Session 可以继续。
 
@@ -121,7 +125,7 @@ kind 默认为 request；question/reply/progress/result 必须关联已有请求
 | RouterDecision | 协调 Session、已纳入输入位置、候选动作、提交状态和稳定动作 ID |
 | Subscription / Outbox | 外部讨论到工作会话的明确关联、待发送外部消息与发送收据；不把 SSE 当持久队列 |
 
-`createSession` 已补齐可选持久 `creationKey` 与创建收据查询；可跨 Turn 查询的输入批次收据和安全接纳仍待实施。协调意图与 Runtime 存储可能不在同一事务，必须靠稳定创建键、输入收据与对账跨越窗口，不能假定跨库原子提交。
+`createSession` 已补齐可选持久 `creationKey` 与创建收据查询；第 1 步已有可跨 Turn 查询的输入批次事实，第 2 步补充 Worker 收件与投递收据。输入批次与历史输入同事务接纳仍待实施，不把分开的状态写入冒充原子提交。协调意图与 Runtime 存储可能不在同一事务，必须靠稳定创建键、输入收据与对账跨越窗口，不能假定跨库原子提交。
 
 首期允许持久记录事实但不自动恢复所有执行。已确认接纳的输入不重复提交；模型或工具结果不明时受阻待核对，不承诺未知副作用恰好执行一次。
 
@@ -210,7 +214,7 @@ flowchart LR
 
 ## 实施记录
 
-2026-11-05，第 1 步进行中，已完成基础创建/停止契约及本轮三项协调事实：
+2026-11-05，第 1 步基础已在 `335d47598` 提交，包含创建/停止契约及三项协调事实：
 
 - **已实现：幂等创建与核对。** `createSession({ creationKey, ... })` 同键相同参数返回原会话，冲突拒绝；SQLite 创建记录与会话同事务提交，删除会话保留键。SDK `getSessionCreation` 和 HTTP `GET /session-creations?creationKey=...` 可核对响应丢失。未实现存储能力的旧适配器仍可普通创建，带键请求明确返回 405。
 - **已实现：宿主停止遗留作业。** SDK `cancelBackgroundJob` 与 HTTP `POST /sessions/:id/jobs/:jobId/cancel` 接收 instanceId、executionId，绕过普通队列并等到直接 Shell/Task 清理；不唤醒模型。每次作业启动生成新的 executionId，避免 Task 复用 ID 导致迟到请求误停新执行。该回执 `durable: false`，不伪装持久工作项停止。
@@ -222,4 +226,14 @@ flowchart LR
 - **已实现：结构化让出。** `coordination_yields` 保存 `yieldId`、Session/Turn、`waiting_for_message`/`paused` 原因和 checkpoint；重复提交保持身份，不使用普通文本或永久挂起 Promise 伪装等待。Runtime 提供让出记录入口，并拒绝已切换 Turn。
 - **关键新增文件：** `packages/runtime/src/coordination.ts`、`packages/runtime/test/coordination.test.ts`、`packages/server/test/coordination.test.ts`；SQLite 适配在 `packages/local/src/store.ts`，Runtime/HTTP 入口在 `packages/runtime/src/runtime.ts`、`packages/local/src/runtime.ts`、`packages/server/src/server.ts`。
 - **已验证：** `node --conditions=source --test packages/runtime/test/coordination.test.ts packages/server/test/coordination.test.ts`，3 项通过；覆盖幂等批次、单 Turn 接纳、结构化让出、HTTP 重试与 SQLite 重启读取。`npm run check` 通过。
-- **边界与未完成：** 本轮实现的是第 1 步的持久事实和控制准入，不自动恢复所有执行；批次接纳后的具体 Worker 路由、回复唤醒、模型侧 `send_message/wait_message` 和让出后的自动续跑留在第 2～3 步。尚未做 Astron 客户端验收、构建、部署或提交。
+- **边界与未完成：** 第 1 步提供持久事实和控制准入，不自动恢复所有执行；Worker 路由、回复唤醒、模型侧 `send_message/wait_message` 和让出后的自动续跑留在后续步骤。未做 Astron 客户端验收、构建或部署。
+
+2026-11-05，第 2 步 Pie 侧实施与验收：
+
+- **领域与存储：** `coordination.ts` 定义 Worker、工作项、Session 关联、消息与投递事实；`store.ts` 提供 SQLite 表、唯一关联、持久序号、重启读取和身份冲突校验。Worker 配置修订刷新保持逻辑身份；消息默认 request，明确关联、可信回复链和唯一工作关联优先，歧义保留 pending。
+- **内部调度：** `worker-scheduler.ts` 先入箱后后台关联；稳定创建键幂等创建目标助手根 Session，保存目标目录、模型和产品绑定。每 Session FIFO，不持全局执行锁等待模型；同助手多 Session 并行。派发前保存意图，未知受理结果不盲重放；取消不沿普通工作关系影响其他 Session。`waitForTurn` 的同步观察回调固定准确 Turn 起点和结算，避免异步完整快照混入后续 Turn；取消前补充不复活，取消后显式新请求仍可执行。受理 Turn 在登记等待前已被替换时保留 accepted 待核对。
+- **宿主装配：** Local 从现有 `/host-runtimes` 配置同步 Worker，提供 SDK 收件/查询/等待；Server 增加 `/workers`、Worker 收件及消息/投递查询。`createSession.astronSessionId` 纳入创建身份并沿现有导出保留产品绑定。关闭先停止调度，在 SQLite 关闭前等待收据写入；初始化失败关闭已创建的 Runtime。
+- **验收通过：** 新增 `worker-coordination.test.ts`、`worker-store.test.ts`、`worker-scheduler.test.ts`、`worker-host.test.ts`、`worker-lifecycle.test.ts`，共 37 项通过。真实 Local/Runtime、SQLite、可控本地工具与 faux 模型直接验证一个助手独立并行处理甲乙、补充只到原会话、同 Session 串行及取消甲不影响乙；另覆盖 HTTP/重启收据、身份冲突、保存失败不执行、普通 Turn 竞争、取消前后输入、未知执行不重放和初始化/关闭资源边界。
+- **基线测试收口：** 全量初跑发现 10 项既有失败，在 `335d47598` 的独立源码副本逐项复现。仅修正 7 个测试文件，沿用隐藏能力清单、技能请求上下文、SSE 轻量 execution、持久树节点和恢复序号的现行契约；保存失败夹具先进入准确模型执行窗口。定向 `node --expose-gc --conditions=source --test packages/server/test/{execution-state,fork,plugins,server,tool-progress,turn-recovery,working-history}.test.ts`，79/79 通过。
+- **最终验证：** `npm run check` 通过（Biome、TypeScript、模型目录校验）；`npm run test:server` 发现 57 个文件，覆盖全部 runtime/server 及现有 prompt-viewer 测试，428/428 通过，无跳过；`git diff --check` 通过。只读核对源码并用行为回归收口，未提供 crapper/dryer/mutator 工具，未宣称运行它们。行动日志保存在 `/tmp/pie-superagent-step2-log.md`，关键设计、失败证据与结果已回填本记录。
+- **偏差与后续：** 第 2 步按 Turn 结算边界消费 FIFO，不承诺本轮模型间隙持久批次接纳；该能力与 `send_message/wait_message`、可靠唤醒一起留第 3 步。重启后可查事实，自动恢复与未知结果对账留第 6 步。来源身份及范围由可信宿主保证，此 HTTP 入口不能直接暴露给模型。只读对照 Cowork 配置，未修改参考树；真实 Astron 产品链路须在内网联调，未计为本次完成。未构建、部署或调用真实模型。

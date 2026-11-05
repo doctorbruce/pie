@@ -3,6 +3,7 @@ import { createRuntime, type PieRuntime, RuntimeError } from "@pie/runtime";
 import type { Assistant, SessionSummary } from "@pie/runtime/protocol";
 import type { SessionCursor } from "@pie/runtime/runtime-store";
 import { parseToolIds } from "@pie/runtime/tools";
+import { WorkerScheduler } from "@pie/runtime/worker-scheduler";
 import { createAgentFactory } from "./agent.ts";
 import { createModelSettings } from "./models/settings.ts";
 import { createPlugins, PluginError } from "./plugins.ts";
@@ -55,6 +56,7 @@ export async function createLocalRuntime(options: {
 	}
 
 	const runtimeStore = createSqliteRuntimeStore(store);
+	let workers: WorkerScheduler | undefined;
 	const runtime = await createRuntime({
 		agents: factory,
 		store: {
@@ -65,6 +67,7 @@ export async function createLocalRuntime(options: {
 			},
 			async close() {
 				try {
+					await workers?.drain();
 					await factory.requestRecords?.close();
 				} finally {
 					await runtimeStore.close();
@@ -78,6 +81,15 @@ export async function createLocalRuntime(options: {
 			? (event) => console.error(JSON.stringify({ type: "pie_tool_stream_trace", ...event }))
 			: undefined,
 	});
+	workers = new WorkerScheduler({ runtime, store: runtimeStore });
+	const scheduler = workers;
+	try {
+		await scheduler.syncHostRuntimes(store.hostRuntimes);
+	} catch (error) {
+		scheduler.stop();
+		await runtime.close();
+		throw error;
+	}
 	let commands = Promise.resolve();
 	let closing = false;
 	let closePromise: Promise<void> | undefined;
@@ -104,6 +116,17 @@ export async function createLocalRuntime(options: {
 		get tools() {
 			return runtime.tools;
 		},
+		listWorkers: () => execute(() => scheduler.listWorkers(), false),
+		createWorkItem: (...args: Parameters<WorkerScheduler["createWorkItem"]>) =>
+			execute(() => scheduler.createWorkItem(...args), true),
+		enqueueWorkerMessage: (...args: Parameters<WorkerScheduler["enqueueWorkerMessage"]>) =>
+			execute(() => scheduler.enqueueWorkerMessage(...args), true),
+		getWorkerMessage: (...args: Parameters<WorkerScheduler["getWorkerMessage"]>) =>
+			execute(() => scheduler.getWorkerMessage(...args), false),
+		getWorkerDelivery: (...args: Parameters<WorkerScheduler["getWorkerDelivery"]>) =>
+			execute(() => scheduler.getWorkerDelivery(...args), false),
+		waitWorkerDelivery: (...args: Parameters<WorkerScheduler["waitWorkerDelivery"]>) =>
+			scheduler.waitWorkerDelivery(...args),
 		createInputBatch: (...args: Parameters<PieRuntime["createInputBatch"]>) =>
 			execute(() => runtime.createInputBatch(...args), true),
 		readInputBatch: (...args: Parameters<PieRuntime["readInputBatch"]>) =>
@@ -218,7 +241,11 @@ export async function createLocalRuntime(options: {
 			}, false);
 		},
 		registerHostRuntimes: (...args: Parameters<PieRuntime["registerHostRuntimes"]>) =>
-			execute(() => runtime.registerHostRuntimes(...args), true),
+			execute(async () => {
+				const result = await runtime.registerHostRuntimes(...args);
+				await scheduler.syncHostRuntimes(args[0]);
+				return result;
+			}, true),
 		createSession: (...args: Parameters<PieRuntime["createSession"]>) =>
 			execute(() => runtime.createSession(...args), true),
 		getSessionCreation: (...args: Parameters<PieRuntime["getSessionCreation"]>) =>
@@ -266,6 +293,7 @@ export async function createLocalRuntime(options: {
 		close() {
 			if (closePromise) return closePromise;
 			closing = true;
+			scheduler.stop();
 			closePromise = commands.then(() => runtime.close());
 			return closePromise;
 		},

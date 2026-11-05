@@ -9,6 +9,7 @@ import {
 	type PieRuntime,
 	RuntimeError,
 	type TurnInput,
+	type WorkerMessageCreate,
 } from "@pie/runtime";
 import { ModelSettingsError } from "@pie/runtime/capabilities";
 import { SkillConfigError } from "@pie/runtime/config";
@@ -247,6 +248,24 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				if (!Array.isArray(body.runtimes)) throw new RuntimeError(400, "runtimes 需要数组");
 				return json(200, await runtime.registerHostRuntimes(body.runtimes as HostRuntimeDefinition[]));
 			}
+			if (path === "/workers" && req.method === "GET") return json(200, { workers: await runtime.listWorkers() });
+			const workerInbox = /^\/workers\/([^/]+)\/messages$/.exec(path);
+			if (workerInbox && req.method === "POST") {
+				const body = await readJson(req);
+				return json(
+					202,
+					await runtime.enqueueWorkerMessage({
+						...body,
+						workerId: decodeURIComponent(workerInbox[1]),
+					} as WorkerMessageCreate),
+				);
+			}
+			const workerMessage = /^\/worker-messages\/([^/]+)$/.exec(path);
+			if (workerMessage && req.method === "GET")
+				return json(200, await runtime.getWorkerMessage(decodeURIComponent(workerMessage[1])));
+			const workerDelivery = /^\/worker-deliveries\/([^/]+)$/.exec(path);
+			if (workerDelivery && req.method === "GET")
+				return json(200, await runtime.getWorkerDelivery(decodeURIComponent(workerDelivery[1])));
 			if (path === "/models" && req.method === "GET") return json(200, settings.catalog());
 			if (path === "/providers" && req.method === "GET") return json(200, settings.providers());
 			if (path === "/providers/config" && req.method === "PUT") {

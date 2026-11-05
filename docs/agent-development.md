@@ -42,6 +42,8 @@ packages/ai：模型目录、协议适配、流式响应和凭据解析
 
 Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以把其他 Assistant 作为 Subagent 绑定交给当前 Session；模型通过普通 `task` 工具派发，服务再为目标角色创建新的 Session 和 Agent。
 
+SuperAgent 第 2 步新增可选 `WorkerScheduler`：Astron 通过现有 `/host-runtimes` 注册的每个 assistant 映射同 ID 的逻辑 Worker；Worker 收件、工作项、Session 关联和投递收据独立保存到 Local SQLite。同一 Worker 的不同根 Session 可以并行，同 Session 按入箱顺序等待前一 Turn 结算后执行；补充根据工作/明确 Session/可信回复链关联，不调用额外模型猜路由。目录、模型和产品绑定来自宿主对目标工作的选择。当前入口供可信 SDK/HTTP 宿主使用，旧聊天和 `task` 保持原路径；模型侧对等通信、可靠模型间隙接纳和重启对账属于后续步骤。API 与关闭顺序见[嵌入接入](runtime-embedding.md#可选-worker-内部调度)。
+
 停止由共享 Agent loop 中断模型流、工具执行和钩子的异步等待；底层 Promise 不响应 `AbortSignal` 时也不阻塞本轮结束。中断时保留助手已输出的文本，为已启动的工具记录中断错误，并丢弃迟到的进度与结果；Runtime 仍等待终态事件和持久化完成后放行下一轮。取消不能撤销工具已经产生的外部副作用，工具仍须响应信号释放连接、进程等资源；同线程同步阻塞也不能由异步取消抢占。
 
 真实模型的瞬时错误（包括空正文 HTTP 503 和 `Upstream API error: 530`）在 Runtime 模型流入口自动重试，默认最多 5 次、2 秒起指数退避并增加最多 25% 抖动、30 秒封顶，等待可取消。仅重试尚未转发内容或工具事件且无有效响应内容的请求，保留原 Turn 与已完成工具结果；已输出的模型流不会自动重放。SDK 重试关闭，上下文超限仍走压缩恢复。独立模式沿用 `settings.retry`，宿主压缩配置继续隔离本地设置文件，详见[配置与重试边界](compaction-integration.md#配置)。

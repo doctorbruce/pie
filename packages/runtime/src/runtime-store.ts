@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { CoordinationStore } from "./coordination.ts";
+import type { CoordinationStore, WorkerCoordinationStore } from "./coordination.ts";
 import type { DurableJobReference } from "./durable-jobs.ts";
 import type {
 	ActivityRecord,
@@ -63,7 +63,7 @@ export type SessionCreationRecord = {
 
 export type SessionWriteOptions = { creation?: SessionCreationRecord };
 
-export interface RuntimeStore extends Partial<CoordinationStore> {
+export interface RuntimeStore extends Partial<CoordinationStore>, Partial<WorkerCoordinationStore> {
 	readonly persistence: string;
 	readSession(id: string): Promise<SessionMetadata | undefined>;
 	listSessions(options: SessionListOptions): Promise<SessionPage>;

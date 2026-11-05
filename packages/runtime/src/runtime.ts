@@ -224,6 +224,8 @@ function optionalMessageIdentity(body: Record<string, unknown>): UserMessageIden
 export type CreateSessionInput = {
 	creationKey?: string;
 	assistantId?: string;
+	/** Product-owned session identity supplied by the host (for example Astron). */
+	astronSessionId?: string;
 	title?: string;
 	workspacePath?: string;
 	mode?: "faux" | "real";
@@ -1957,6 +1959,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const title = body.title ?? "新会话";
 				if (typeof title !== "string" || !title.trim() || title.length > 100)
 					throw new RuntimeError(400, "会话标题需要 1–100 个字符");
+				const astronSessionId = body.astronSessionId;
+				if (
+					astronSessionId !== undefined &&
+					(typeof astronSessionId !== "string" || !astronSessionId.trim() || astronSessionId.length > 256)
+				)
+					throw new RuntimeError(400, "astronSessionId 需要 1–256 个字符");
 				if (
 					body.workspacePath !== undefined &&
 					(typeof body.workspacePath !== "string" ||
@@ -1985,6 +1993,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					.update(
 						JSON.stringify({
 							assistantId: body.assistantId,
+							astronSessionId,
 							title: title.trim(),
 							workspacePath: body.workspacePath?.trim(),
 							mode,
@@ -2048,6 +2057,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					mode,
 					assistantId,
 					assistantRevision,
+					astronSessionId,
 					runtimeSource: hostDefinition ? "host" : "local",
 					assistant: localAssistant && !hostDefinition ? structuredClone(localAssistant) : undefined,
 					title: title.trim(),
@@ -2888,7 +2898,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 				}
 			}, false);
 		},
-		waitForTurn(sessionId: string) {
+		waitForTurn(
+			sessionId: string,
+			options?: {
+				onWait?(turn: Turn | undefined): void;
+				onSettled?(turn: Turn | undefined): void;
+			},
+		) {
 			const pending = (async () => {
 				if (closing) throw new RuntimeError(503, "运行时正在关闭");
 				let session = sessions.get(sessionId);
@@ -2900,7 +2916,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 						return loaded;
 					}, false);
 				try {
-					await session.runPromise;
+					const turn = session.turn;
+					const running = session.runPromise;
+					// Capture one Turn before yielding; snapshot() may observe a later Turn.
+					options?.onWait?.(turn && structuredClone(turn));
+					await running;
+					options?.onSettled?.(turn && structuredClone(turn));
 					return await snapshot(session);
 				} finally {
 					session.waiters = (session.waiters ?? 1) - 1;

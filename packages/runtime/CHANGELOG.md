@@ -24,6 +24,8 @@
 
 ### Added
 
+- Add opt-in logical Workers, durable work/session/message/delivery facts and a deterministic `WorkerScheduler`; queue input per Session while different Sessions execute independently, preserve creation and dispatch identities, and accept a host product-session binding during session creation. Optional `waitForTurn` observers capture one Turn's wait and settlement boundaries independently of asynchronous snapshot reads.
+
 - Add host `cancelBackgroundJob` for directly owned local Shell/Task jobs, with cleanup acknowledgement, suppressed wakeups and access during storage failure; require instance and per-execution identities to reject stale stops when a Task reuses its job ID.
 
 - Add `archiveSession` and persisted session `archived` state; public session lists hide archived sessions unless `includeArchived` is true. Stores exclude archived sessions before pagination when `SessionListOptions.includeArchived` is false.

@@ -8,12 +8,35 @@ export {
 	type SkillToolsFactory,
 } from "./capabilities.ts";
 export {
+	type Assignment,
+	type AssignmentCreate,
+	type AssignmentRecord,
+	type AssignmentStatus,
 	CoordinationError,
 	CoordinationService,
 	type CoordinationStore,
 	type InputBatch,
 	type InputBatchCreate,
 	type InputBatchStatus,
+	WorkerCoordinationService,
+	type WorkerCoordinationStore,
+	type WorkerDelivery,
+	type WorkerDeliveryCreate,
+	type WorkerDeliveryStatus,
+	type WorkerEnqueueResult,
+	type WorkerMessage,
+	type WorkerMessageCreate,
+	type WorkerMessageKind,
+	type WorkerMessageStatus,
+	type WorkerModelSelection,
+	type WorkerProductBinding,
+	type WorkerRecord,
+	type WorkerRegistration,
+	type WorkerResolution,
+	type WorkerStatus,
+	type WorkItem,
+	type WorkItemCreate,
+	type WorkItemStatus,
 	type YieldRecord,
 } from "./coordination.ts";
 export type { DurableJobExecutor, DurableJobReference, DurableJobSnapshot } from "./durable-jobs.ts";
@@ -51,3 +74,4 @@ export type {
 } from "./tool-execution.ts";
 export type { ExternalTool, ToolContext, ToolRuntime } from "./tools.ts";
 export { recoverInterruptedTurn } from "./turn-recovery.ts";
+export { WorkerScheduler, type WorkerSchedulerRuntime } from "./worker-scheduler.ts";

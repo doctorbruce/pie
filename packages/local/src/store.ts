@@ -2,8 +2,19 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { InputBatch, YieldRecord } from "@pie/runtime/coordination";
+import {
+	type AssignmentRecord,
+	CoordinationError,
+	type InputBatch,
+	type WorkerCoordinationStore,
+	type WorkerDelivery,
+	type WorkerMessage,
+	type WorkerRecord,
+	type WorkItem,
+	type YieldRecord,
+} from "@pie/runtime/coordination";
 import type { Assistant, ContextCompaction, HostRuntimeDefinition } from "@pie/runtime/protocol";
 import type {
 	RuntimeStore,
@@ -42,6 +53,48 @@ export function openStore(env: NodeJS.ProcessEnv) {
 			CREATE TABLE IF NOT EXISTS session_creations (creation_key TEXT PRIMARY KEY, payload TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS coordination_input_batches (batch_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL);
 			CREATE TABLE IF NOT EXISTS coordination_yields (yield_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS workers (worker_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS work_items (work_id TEXT PRIMARY KEY, payload TEXT NOT NULL);
+			CREATE TABLE IF NOT EXISTS assignments (
+				assignment_id TEXT PRIMARY KEY,
+				work_id TEXT NOT NULL,
+				worker_id TEXT NOT NULL,
+				session_id TEXT NOT NULL UNIQUE,
+				created_at INTEGER NOT NULL,
+				payload TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS assignments_work ON assignments (work_id, created_at, assignment_id);
+			CREATE INDEX IF NOT EXISTS assignments_session ON assignments (session_id, created_at, assignment_id);
+			CREATE TABLE IF NOT EXISTS messages (
+				message_id TEXT PRIMARY KEY,
+				worker_id TEXT NOT NULL,
+				source_worker_id TEXT NOT NULL,
+				source_session_id TEXT,
+				work_id TEXT,
+				target_session_id TEXT,
+				sequence INTEGER NOT NULL,
+				payload TEXT NOT NULL,
+				UNIQUE (worker_id, sequence)
+			);
+			CREATE INDEX IF NOT EXISTS messages_worker_sequence ON messages (worker_id, sequence);
+			CREATE INDEX IF NOT EXISTS messages_work ON messages (work_id, sequence);
+			CREATE TABLE IF NOT EXISTS deliveries (
+				delivery_id TEXT PRIMARY KEY,
+				message_id TEXT NOT NULL,
+				worker_id TEXT NOT NULL,
+				assignment_id TEXT,
+				session_id TEXT,
+				status TEXT NOT NULL,
+				created_at INTEGER NOT NULL,
+				updated_at INTEGER NOT NULL,
+				payload TEXT NOT NULL
+			);
+			CREATE INDEX IF NOT EXISTS deliveries_message ON deliveries (message_id, delivery_id);
+			CREATE INDEX IF NOT EXISTS deliveries_worker_status ON deliveries (worker_id, status, updated_at);
+			CREATE TABLE IF NOT EXISTS worker_sequences (
+				worker_id TEXT PRIMARY KEY,
+				next_sequence INTEGER NOT NULL CHECK (next_sequence > 0)
+			);
 		`);
 		if (db.prepare("PRAGMA foreign_key_list(sessions)").all().length > 0) {
 			db.exec("PRAGMA foreign_keys = OFF");
@@ -449,6 +502,226 @@ export function openStore(env: NodeJS.ProcessEnv) {
 				const row = db.prepare("SELECT payload FROM coordination_yields WHERE yield_id = ?").get(yieldId);
 				return row ? (JSON.parse(String(row.payload)) as YieldRecord) : undefined;
 			},
+			async registerWorker(worker: WorkerRecord) {
+				// This synchronous check and write share the single SQLite writer; a
+				// service-level preflight alone races concurrent registrations.
+				if (
+					db
+						.prepare("SELECT 1 FROM workers WHERE worker_id != ? AND json_extract(payload, '$.assistantId') = ?")
+						.get(worker.workerId, worker.assistantId)
+				)
+					throw new CoordinationError(409, "assistantId 已注册其他逻辑 Worker");
+				const existing = db.prepare("SELECT payload FROM workers WHERE worker_id = ?").get(worker.workerId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as WorkerRecord;
+					if (saved.assistantId !== worker.assistantId)
+						throw new CoordinationError(409, "Worker 已绑定其他 assistant");
+					const next = { ...worker, createdAt: saved.createdAt };
+					db.prepare("UPDATE workers SET payload = ? WHERE worker_id = ?").run(
+						JSON.stringify(next),
+						worker.workerId,
+					);
+					return next;
+				}
+				db.prepare("INSERT INTO workers (worker_id, payload) VALUES (?, ?)").run(
+					worker.workerId,
+					JSON.stringify(worker),
+				);
+				return worker;
+			},
+			async readWorker(workerId: string) {
+				const row = db.prepare("SELECT payload FROM workers WHERE worker_id = ?").get(workerId);
+				return row ? (JSON.parse(String(row.payload)) as WorkerRecord) : undefined;
+			},
+			async listWorkers() {
+				return db
+					.prepare("SELECT payload FROM workers ORDER BY worker_id")
+					.all()
+					.map((row) => JSON.parse(String(row.payload)) as WorkerRecord);
+			},
+			async createWorkItem(workItem: WorkItem) {
+				const existing = db.prepare("SELECT payload FROM work_items WHERE work_id = ?").get(workItem.workId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as WorkItem;
+					const { createdAt: _savedCreated, updatedAt: _savedUpdated, ...savedFields } = saved;
+					const { createdAt: _createdAt, updatedAt: _updatedAt, ...fields } = workItem;
+					if (!isDeepStrictEqual(savedFields, fields)) throw new CoordinationError(409, "工作项身份冲突");
+					return saved;
+				}
+				db.prepare("INSERT INTO work_items (work_id, payload) VALUES (?, ?)").run(
+					workItem.workId,
+					JSON.stringify(workItem),
+				);
+				return workItem;
+			},
+			async readWorkItem(workId: string) {
+				const row = db.prepare("SELECT payload FROM work_items WHERE work_id = ?").get(workId);
+				return row ? (JSON.parse(String(row.payload)) as WorkItem) : undefined;
+			},
+			async findAssignmentByWork(workId: string) {
+				return db
+					.prepare("SELECT payload FROM assignments WHERE work_id = ? ORDER BY created_at, assignment_id")
+					.all(workId)
+					.map((row) => JSON.parse(String(row.payload)) as AssignmentRecord);
+			},
+			async findAssignmentBySession(sessionId: string) {
+				const row = db.prepare("SELECT payload FROM assignments WHERE session_id = ?").get(sessionId);
+				return row ? (JSON.parse(String(row.payload)) as AssignmentRecord) : undefined;
+			},
+			async createAssignment(assignment: AssignmentRecord) {
+				const existing = db
+					.prepare("SELECT payload FROM assignments WHERE assignment_id = ?")
+					.get(assignment.assignmentId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as AssignmentRecord;
+					const { createdAt: _savedCreated, updatedAt: _savedUpdated, ...savedFields } = saved;
+					const { createdAt: _createdAt, updatedAt: _updatedAt, ...fields } = assignment;
+					if (!isDeepStrictEqual(savedFields, fields)) throw new CoordinationError(409, "工作会话关联身份冲突");
+					return saved;
+				}
+				if (db.prepare("SELECT 1 FROM assignments WHERE session_id = ?").get(assignment.sessionId))
+					throw new CoordinationError(409, "Session 已关联工作项");
+				db.prepare(
+					"INSERT INTO assignments (assignment_id, work_id, worker_id, session_id, created_at, payload) VALUES (?, ?, ?, ?, ?, ?)",
+				).run(
+					assignment.assignmentId,
+					assignment.workId,
+					assignment.workerId,
+					assignment.sessionId,
+					assignment.createdAt,
+					JSON.stringify(assignment),
+				);
+				return assignment;
+			},
+			async readWorkerMessage(messageId: string) {
+				const row = db.prepare("SELECT payload FROM messages WHERE message_id = ?").get(messageId);
+				return row ? (JSON.parse(String(row.payload)) as WorkerMessage) : undefined;
+			},
+			async createWorkerMessage(message: WorkerMessage) {
+				const existing = db.prepare("SELECT payload FROM messages WHERE message_id = ?").get(message.messageId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as WorkerMessage;
+					const {
+						sequence: _savedSequence,
+						status: _savedStatus,
+						createdAt: _savedCreated,
+						...savedFields
+					} = saved;
+					const { sequence: _sequence, status: _status, createdAt: _createdAt, ...fields } = message;
+					if (!isDeepStrictEqual(savedFields, fields)) throw new CoordinationError(409, "工作消息身份冲突");
+					return saved;
+				}
+				if (!Number.isSafeInteger(message.sequence) || message.sequence < 1)
+					throw new CoordinationError(400, "工作消息序号无效");
+				if (
+					db
+						.prepare("SELECT 1 FROM messages WHERE worker_id = ? AND sequence = ?")
+						.get(message.workerId, message.sequence)
+				)
+					throw new CoordinationError(409, "工作消息序号冲突");
+				db.prepare(
+					`INSERT INTO messages
+					(message_id, worker_id, source_worker_id, source_session_id, work_id, target_session_id, sequence, payload)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+				).run(
+					message.messageId,
+					message.workerId,
+					message.sourceWorkerId,
+					message.sourceSessionId ?? null,
+					message.workId ?? null,
+					message.targetSessionId ?? null,
+					message.sequence,
+					JSON.stringify(message),
+				);
+				return message;
+			},
+			async createWorkerDelivery(delivery: WorkerDelivery) {
+				const existing = db
+					.prepare("SELECT payload FROM deliveries WHERE delivery_id = ?")
+					.get(delivery.deliveryId);
+				if (existing) {
+					const saved = JSON.parse(String(existing.payload)) as WorkerDelivery;
+					if (saved.messageId !== delivery.messageId || saved.workerId !== delivery.workerId)
+						throw new CoordinationError(409, "消息投递身份冲突");
+					return saved;
+				}
+				db.prepare(
+					`INSERT INTO deliveries
+					(delivery_id, message_id, worker_id, assignment_id, session_id, status, created_at, updated_at, payload)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				).run(
+					delivery.deliveryId,
+					delivery.messageId,
+					delivery.workerId,
+					delivery.assignmentId ?? null,
+					delivery.sessionId ?? null,
+					delivery.status,
+					delivery.createdAt,
+					delivery.updatedAt,
+					JSON.stringify(delivery),
+				);
+				return delivery;
+			},
+			async readWorkerDelivery(deliveryId: string) {
+				const row = db.prepare("SELECT payload FROM deliveries WHERE delivery_id = ?").get(deliveryId);
+				return row ? (JSON.parse(String(row.payload)) as WorkerDelivery) : undefined;
+			},
+			async updateWorkerDelivery(
+				deliveryId: string,
+				update: Parameters<WorkerCoordinationStore["updateWorkerDelivery"]>[1],
+			) {
+				const row = db.prepare("SELECT payload FROM deliveries WHERE delivery_id = ?").get(deliveryId);
+				if (!row) throw new CoordinationError(404, "消息投递不存在");
+				const saved = JSON.parse(String(row.payload)) as WorkerDelivery;
+				const next = {
+					...saved,
+					...update,
+					deliveryId: saved.deliveryId,
+					messageId: saved.messageId,
+					workerId: saved.workerId,
+					updatedAt: update.updatedAt ?? Date.now(),
+				};
+				db.prepare(
+					`UPDATE deliveries
+					SET assignment_id = ?, session_id = ?, status = ?, updated_at = ?, payload = ?
+					WHERE delivery_id = ?`,
+				).run(
+					next.assignmentId ?? null,
+					next.sessionId ?? null,
+					next.status,
+					next.updatedAt,
+					JSON.stringify(next),
+					deliveryId,
+				);
+				return next;
+			},
+			async nextWorkerSequence(workerId: string) {
+				db.exec("BEGIN IMMEDIATE");
+				try {
+					const row = db.prepare("SELECT next_sequence FROM worker_sequences WHERE worker_id = ?").get(workerId);
+					const lastMessage = db
+						.prepare("SELECT COALESCE(MAX(sequence), 0) AS sequence FROM messages WHERE worker_id = ?")
+						.get(workerId)!;
+					const sequence = Math.max(row ? Number(row.next_sequence) : 1, Number(lastMessage.sequence) + 1);
+					if (!Number.isSafeInteger(sequence + 1)) throw new CoordinationError(503, "Worker 消息序号已耗尽");
+					if (row) {
+						db.prepare("UPDATE worker_sequences SET next_sequence = ? WHERE worker_id = ?").run(
+							sequence + 1,
+							workerId,
+						);
+					} else {
+						db.prepare("INSERT INTO worker_sequences (worker_id, next_sequence) VALUES (?, ?)").run(
+							workerId,
+							sequence + 1,
+						);
+					}
+					db.exec("COMMIT");
+					return sequence;
+				} catch (error) {
+					db.exec("ROLLBACK");
+					throw error;
+				}
+			},
 			readSessionCreation(creationKey: string): SessionCreationRecord | undefined {
 				const row = db.prepare("SELECT payload FROM session_creations WHERE creation_key = ?").get(creationKey);
 				return row ? (JSON.parse(String(row.payload)) as SessionCreationRecord) : undefined;
@@ -634,7 +907,7 @@ export function openStore(env: NodeJS.ProcessEnv) {
 	}
 }
 
-export function createSqliteRuntimeStore(store: ReturnType<typeof openStore>): RuntimeStore {
+export function createSqliteRuntimeStore(store: ReturnType<typeof openStore>): RuntimeStore & WorkerCoordinationStore {
 	return {
 		persistence: "sqlite",
 		readSession: async (...args) => store.readSession(...args),
@@ -645,6 +918,20 @@ export function createSqliteRuntimeStore(store: ReturnType<typeof openStore>): R
 		updateInputBatch: async (...args) => store.updateInputBatch(...args),
 		createYield: async (...args) => store.createYield(...args),
 		readYield: async (...args) => store.readYield(...args),
+		registerWorker: async (...args) => store.registerWorker(...args),
+		readWorker: async (...args) => store.readWorker(...args),
+		listWorkers: async (...args) => store.listWorkers(...args),
+		createWorkItem: async (...args) => store.createWorkItem(...args),
+		readWorkItem: async (...args) => store.readWorkItem(...args),
+		findAssignmentByWork: async (...args) => store.findAssignmentByWork(...args),
+		findAssignmentBySession: async (...args) => store.findAssignmentBySession(...args),
+		createAssignment: async (...args) => store.createAssignment(...args),
+		readWorkerMessage: async (...args) => store.readWorkerMessage(...args),
+		createWorkerMessage: async (...args) => store.createWorkerMessage(...args),
+		createWorkerDelivery: async (...args) => store.createWorkerDelivery(...args),
+		readWorkerDelivery: async (...args) => store.readWorkerDelivery(...args),
+		updateWorkerDelivery: async (...args) => store.updateWorkerDelivery(...args),
+		nextWorkerSequence: async (...args) => store.nextWorkerSequence(...args),
 		readSessionCreation: async (...args) => store.readSessionCreation(...args),
 		readToolExecutions: async (...args) => store.readToolExecutions(...args),
 		readPath: async (...args) => store.readPath(...args),

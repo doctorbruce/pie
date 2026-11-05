@@ -40,7 +40,8 @@ test("runtime source dependencies stay inside the package and never load local e
 				}
 				if (target.startsWith("node:") || builtins.has(target)) {
 					assert(
-						["crypto", "path", "timers/promises"].includes(target.replace(/^node:/, "")),
+						// util provides pure data equality for durable coordination identities.
+						["crypto", "path", "timers/promises", "util"].includes(target.replace(/^node:/, "")),
 						`${path}: ${target}`,
 					);
 					continue;

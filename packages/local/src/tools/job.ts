@@ -31,8 +31,8 @@ const fileOffsets = new Map<string, number>();
 const fileDecoders = new Map<string, StringDecoder>();
 const delivered = new Set<string>();
 
-function outputPath(job: BackgroundJobInfo): string | undefined {
-	const value = job.details?.outputPath;
+function logPath(job: BackgroundJobInfo): string | undefined {
+	const value = job.details?.logPath;
 	return typeof value === "string" && value ? value : undefined;
 }
 
@@ -103,7 +103,7 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 			signal?.throwIfAborted();
 			const job = runtime.jobs.get(job_id);
 			if (!job) throw unknownJob(runtime, job_id);
-			const path = outputPath(job);
+			const path = logPath(job);
 			const fileDelta = path ? await readFileDelta(path, job.status !== "running") : undefined;
 			if (fileDelta !== undefined) {
 				if (fileDelta)

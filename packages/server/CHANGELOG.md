@@ -43,6 +43,8 @@
 
 ### Fixed
 
+- Use `details.logPath` for native bash and webfetch full-output logs and background job reads, replacing `details.outputPath` so hosts can distinguish logs from declared `details.outputs` artifacts.
+
 - Retain `model.retry` lifecycle payloads in global and scoped HTTP SSE projections so hosts receive the retry identity, status, attempt, message and next-attempt time.
 
 - Preserve the frozen Turn identity on every global HTTP SSE packet and forward `steerAdmission` on `turn.applied` and `steer.settled`, so hosts observe steering application and keep subsequent content on the correct execution owner.

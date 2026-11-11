@@ -94,7 +94,7 @@ test("webfetch approves the requested URL before transport and follows redirects
 		contentType: "text/html; charset=utf-8",
 		format: "markdown",
 		truncated: false,
-		outputPath: undefined,
+		logPath: undefined,
 	});
 	assert.deepEqual(requests, ["/redirect", "/target"]);
 	assert.deepEqual(approvals, [{ permission: "webfetch", resources: [url], url, format: "markdown", timeout: 30 }]);
@@ -434,13 +434,14 @@ test("large output has a bounded model preview and retains the complete result",
 	]) {
 		const result = await createTool().execute("large", { url: `${base}${path}` });
 		assert.equal(result.details.truncated, true);
-		const outputPath = result.details.outputPath;
-		assert(outputPath);
-		const outputDirectory = dirname(outputPath);
+		const logPath = result.details.logPath;
+		assert(logPath);
+		const outputDirectory = dirname(logPath);
 		assert.equal(dirname(outputDirectory), tmpdir());
 		assert(basename(outputDirectory).startsWith("pie-webfetch-"));
 		context.after(() => rm(outputDirectory, { recursive: true, force: true }));
-		assert.equal(await readFile(outputPath, "utf8"), output);
+		assert.equal(Object.hasOwn(result.details, "outputPath"), false);
+		assert.equal(await readFile(logPath, "utf8"), output);
 		assert(result.content[0].type === "text");
 		assert(result.content[0].text.startsWith(`Fetched ${base}${path} (HTTP 200)`));
 		assert.match(result.content[0].text, /\n\nline|\n\n网页/);

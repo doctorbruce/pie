@@ -404,7 +404,10 @@ test("bash reports nonzero exits, output limits, timeout and cancellation of des
 	const node = `${process.platform === "win32" ? "& " : ""}'${process.execPath.replaceAll("'", process.platform === "win32" ? "''" : "'\\''")}'`;
 	await writeFile(join(directory, "flood.mjs"), 'console.log("x".repeat(70000));');
 	const flooded = await shell.execute("limit", { command: `${node} flood.mjs` });
-	assert.match(JSON.stringify(flooded.details), /outputPath/);
+	const details = flooded.details as { logPath?: string };
+	assert(details.logPath);
+	assert.equal(Object.hasOwn(details, "outputPath"), false);
+	assert.equal(await readFile(details.logPath, "utf8"), `${"x".repeat(70000)}\n`);
 	await writeFile(
 		join(directory, "wait.mjs"),
 		'import { writeFileSync } from "node:fs"; console.log("ready"); setTimeout(() => writeFileSync("leaked.txt", "leak"), 2000);',

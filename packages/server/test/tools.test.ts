@@ -334,20 +334,42 @@ test("upstream tool set performs file, listing and search operations", async (t)
 test("bash uses the platform shell and moves long commands to an incremental background job", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-shell-"));
 	t.after(() => rm(directory, { recursive: true, force: true }));
-	const tools = new Map(systemTools({}, directory).map((tool) => [tool.name, tool]));
-	const command =
-		process.platform === "win32"
-			? "Write-Output first; Start-Sleep -Milliseconds 150; Write-Output second"
-			: "printf 'first\\n'; sleep 0.15; printf 'second\\n'";
+	const jobs = new BackgroundJobs();
+	t.after(() => jobs.close());
+	const runtime: ToolRuntime = { sessionId: "shell-log-test", directory, jobs, async ask() {} };
+	const tools = new Map(systemTools({}, directory, runtime).map((tool) => [tool.name, tool]));
+	const fullOutput = `first\n${"x".repeat(70_000)}\nsecond\n`;
+	await writeFile(
+		join(directory, "output.mjs"),
+		`import { writeFileSync } from 'node:fs'; writeFileSync('report.txt', 'report'); process.stdout.write(${JSON.stringify(fullOutput)});`,
+	);
+	const command = `${process.platform === "win32" ? "& " : ""}"${process.execPath}" output.mjs`;
 	const shell = tools.get("bash");
 	const output = tools.get("job_output");
 	assert(shell && output);
-	const started = await shell.execute("shell", { command, yieldMs: 1, timeout: 5_000 });
-	const jobId = (started.details as { jobId?: string }).jobId;
+	const outputs = [{ path: "report.txt", artifactRole: "final" }];
+	const started = await shell.execute("shell", { command, outputs, yieldMs: 0, timeout: 5_000 });
+	const { jobId, logPath } = started.details as { jobId?: string; logPath?: string };
 	assert(jobId);
-	const completed = await output.execute("output", { job_id: jobId, wait_ms: 5_000 });
-	assert.match(JSON.stringify(completed), /second/);
-	assert.match(JSON.stringify(completed.details), /"status":"completed"/);
+	assert(logPath);
+	assert.equal(Object.hasOwn(started.details, "outputPath"), false);
+	assert.deepEqual((started.details as { outputs: unknown[] }).outputs, []);
+	await jobs.wait(jobId, 5_000);
+	assert.equal(jobs.get(jobId)?.details?.logPath, logPath);
+	assert.equal(Object.hasOwn(jobs.get(jobId)?.details ?? {}, "outputPath"), false);
+	assert.deepEqual(jobs.get(jobId)?.details?.outputs, [
+		{ path: join(directory, "report.txt"), artifactRole: "final" },
+	]);
+	assert.equal(await readFile(logPath, "utf8"), fullOutput);
+	let received = "";
+	for (let poll = 0; poll < 10 && received.length < fullOutput.length; poll++) {
+		const completed = await output.execute("output", { job_id: jobId });
+		assert.match(JSON.stringify(completed.details), /"status":"completed"/);
+		const content = completed.content[0];
+		assert(content.type === "text");
+		received += content.text.slice(content.text.indexOf("\n\n") + 2);
+	}
+	assert.equal(received, fullOutput);
 });
 
 test("bash applies permission policy before spawning and job_kill stops an immediate background command", async (t) => {

@@ -43,7 +43,7 @@ type WebFetchDetails = {
 	contentType: string;
 	format: "text" | "markdown" | "html";
 	truncated: boolean;
-	outputPath?: string;
+	logPath?: string;
 };
 
 export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters, WebFetchDetails> {
@@ -209,7 +209,7 @@ export function webFetchTool(runtime: ToolRuntime): AgentTool<typeof parameters,
 						contentType,
 						format,
 						truncated: limited.truncated,
-						outputPath,
+						logPath: outputPath,
 					},
 				};
 			} catch (error) {

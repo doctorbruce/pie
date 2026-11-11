@@ -59,7 +59,7 @@ type ShellDetails = {
 	output?: string;
 	exit?: number | null;
 	truncated?: boolean;
-	outputPath?: string;
+	logPath?: string;
 	outputs: ArtifactOutput[];
 	background?: boolean;
 	jobId?: string;
@@ -129,8 +129,8 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 			if (!(await stat(cwd)).isDirectory()) throw new Error(`工作目录不存在：${cwd}`);
 			const declared = await resolveDeclaredOutputs(outputs, cwd, runtime, signal);
 			const outputDirectory = await mkdtemp(join(tmpdir(), "pie-bash-"));
-			const outputPath = join(outputDirectory, "output.log");
-			const spool = createWriteStream(outputPath);
+			const logPath = join(outputDirectory, "output.log");
+			const spool = createWriteStream(logPath);
 			let spoolError: Error | undefined;
 			spool.on("error", (error) => {
 				spoolError = error;
@@ -169,7 +169,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 				cancellationSignals,
 				type: "shell",
 				title: description?.trim() || command.slice(0, 120),
-				details: { outputPath, command, workdir: cwd, shell: shell.name },
+				details: { logPath, command, workdir: cwd, shell: shell.name },
 				async run(jobSignal, append) {
 					try {
 						const result = await runProcess(shell.executable, shell.args(command), {
@@ -228,7 +228,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 					if (!detached || !runtime.notifyBackground) return;
 					const tail = truncateTail(job.output).content || "(no output)";
 					await runtime.notifyBackground(
-						`<background_job id="${job.id}" type="bash" state="${job.status}">\n${formatJobStatus(job)}\n\n${tail}\n\noutput=${outputPath}\n</background_job>`,
+						`<background_job id="${job.id}" type="bash" state="${job.status}">\n${formatJobStatus(job)}\n\n${tail}\n\noutput=${logPath}\n</background_job>`,
 						job.id,
 					);
 				},
@@ -248,7 +248,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 						"",
 						preview || "(no output yet)",
 						"",
-						`Full output: ${outputPath}`,
+						`Full output: ${logPath}`,
 						"Use job_output to read new output or wait, and job_kill to stop it. Completion is reported automatically.",
 					].join("\n");
 					return {
@@ -259,7 +259,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 							jobId: job.id,
 							status: job.status,
 							output: truncateTail(preview).content,
-							outputPath,
+							logPath,
 							wallTimeMs: Date.now() - startedAt,
 							workdir: cwd,
 							shell: shell.name,
@@ -273,7 +273,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 					? jobDetails.warnings.filter((item): item is string => typeof item === "string")
 					: [];
 				let text = limited.content || "(no output)";
-				if (truncated) text = `...output truncated...\n\nFull output saved to: ${outputPath}\n\n${text}`;
+				if (truncated) text = `...output truncated...\n\nFull output saved to: ${logPath}\n\n${text}`;
 				if (warnings.length) text += `\n\nArtifact warnings:\n${warnings.join("\n")}`;
 				const exit = typeof jobDetails.exit === "number" || jobDetails.exit === null ? jobDetails.exit : undefined;
 				text = `${formatJobStatus(job)}\n\n${text}`;
@@ -285,7 +285,7 @@ export function shellTools(env: NodeJS.ProcessEnv, runtime: ToolRuntime): AgentT
 						output: limited.content,
 						exit,
 						truncated,
-						outputPath: truncated ? outputPath : undefined,
+						logPath: truncated ? logPath : undefined,
 						outputs: Array.isArray(jobDetails.outputs) ? (jobDetails.outputs as ArtifactOutput[]) : [],
 						status: job.status,
 						wallTimeMs: (job.finishedAt ?? Date.now()) - job.startedAt,

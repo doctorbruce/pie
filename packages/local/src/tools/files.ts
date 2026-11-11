@@ -170,8 +170,8 @@ const activityDescription = Type.Optional(
 
 const readParameters = Type.Object(
 	{
-		path: Type.String({ description: "Path to the file or directory to read (relative or absolute)" }),
 		description: activityDescription,
+		path: Type.String({ description: "Path to the file or directory to read (relative or absolute)" }),
 		offset: Type.Optional(
 			Type.Integer({ minimum: 1, description: "Line or directory entry to start at (1-indexed)" }),
 		),
@@ -237,7 +237,7 @@ function createReadTool(runtime: ToolRuntime): AgentTool<typeof readParameters, 
 	return {
 		name: "read",
 		label: "read",
-		description: `Read text files, directory listings, images, and PDF pages. Text output is limited to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB. Always set description to a short user-visible action phrase in the user's language.`,
+		description: `Read text files, directory listings, images, and PDF pages. Text output is limited to ${MAX_LINES} lines or ${MAX_BYTES / 1024}KB. Always set description to a short user-visible action phrase in the user's language. Emit the complete description field first in the JSON arguments, before path and the remaining parameters, so the user sees the activity title as early as possible.`,
 		parameters: readParameters,
 		async execute(_id, { path, offset, limit, pages }, signal) {
 			signal?.throwIfAborted();
@@ -366,8 +366,8 @@ const editItem = Type.Object({
 	newText: Type.String({ description: "Replacement text" }),
 });
 const editParameters = Type.Object({
-	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
 	description: activityDescription,
+	path: Type.String({ description: "Path to the file to edit (relative or absolute)" }),
 	edits: Type.Array(editItem, {
 		minItems: 1,
 		description: "Non-overlapping replacements matched against the original file",
@@ -401,7 +401,7 @@ function createEditTool(runtime: ToolRuntime): AgentTool<typeof editParameters, 
 		name: "edit",
 		label: "edit",
 		description:
-			"Edit one file using exact text replacements and return its diff, diagnostics, and declared artifact. Always set description to a short user-visible action phrase in the user's language.",
+			"Edit one file using exact text replacements and return its diff, diagnostics, and declared artifact. Always set description to a short user-visible action phrase in the user's language. Emit the complete description field first in the JSON arguments, before path and edits, so the user sees the activity title while replacements are streaming.",
 		parameters: editParameters,
 		prepareArguments(input) {
 			if (!input || typeof input !== "object" || Array.isArray(input)) return input as never;
@@ -459,8 +459,8 @@ function createEditTool(runtime: ToolRuntime): AgentTool<typeof editParameters, 
 }
 
 const writeParameters = Type.Object({
-	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
 	description: activityDescription,
+	path: Type.String({ description: "Path to the file to write (relative or absolute)" }),
 	content: Type.String({ description: "Content to write to the file" }),
 	artifactRole,
 });
@@ -470,7 +470,7 @@ function createWriteTool(runtime: ToolRuntime): AgentTool<typeof writeParameters
 		name: "write",
 		label: "write",
 		description:
-			"Write a file and return its diff, diagnostics, and declared artifact. Always set description to a short user-visible action phrase in the user's language.",
+			"Write a file and return its diff, diagnostics, and declared artifact. Always set description to a short user-visible action phrase in the user's language. Emit the complete description field first in the JSON arguments, before path and content, so the user sees the activity title while file content is streaming.",
 		parameters: writeParameters,
 		async execute(_id, { path, content, artifactRole }, signal) {
 			const absolutePath = resolvePath(path, runtime.directory);

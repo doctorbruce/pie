@@ -16,6 +16,53 @@ const definition = {
 	runtime: { systemPrompt: "test", toolIds: [], skills: [], subagents: [] },
 };
 
+test("Local Assistant creates a stable Worker immediately and restores it after restart", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-assistant-worker-"));
+	const env = { PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" };
+	let runtime = await createLocalHost(env).ready;
+	t.after(async () => {
+		await runtime.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	const created = await runtime.saveAssistant({
+		name: "合同助手",
+		systemPrompt: "审查合同",
+		toolIds: [],
+		pluginIds: [],
+		subagentIds: [],
+	});
+	const first = (await runtime.listWorkers()).find((worker) => worker.workerId === created.id);
+	assert(first);
+	assert.equal(first.assistantId, created.id);
+	assert.equal(first.assistantRevision, created.updatedAt);
+	const updated = await runtime.saveAssistant(
+		{
+			name: "合同助手（更新）",
+			systemPrompt: "审查合同并列出风险",
+			toolIds: [],
+			pluginIds: [],
+			subagentIds: [],
+		},
+		created.id,
+	);
+	const refreshed = (await runtime.listWorkers()).find((worker) => worker.workerId === created.id);
+	assert(refreshed);
+	assert.equal(refreshed.workerId, first.workerId);
+	assert.equal(refreshed.createdAt, first.createdAt);
+	assert.equal(refreshed.assistantRevision, updated.updatedAt);
+
+	await runtime.close();
+	runtime = await createLocalHost(env).ready;
+	const restored = (await runtime.listWorkers()).find((worker) => worker.workerId === created.id);
+	assert(restored);
+	assert.equal(restored.createdAt, first.createdAt);
+	await runtime.deleteAssistant(created.id);
+	assert.equal(
+		(await runtime.listWorkers()).some((worker) => worker.workerId === created.id),
+		false,
+	);
+});
+
 test("product session binding is part of durable Session creation identity", async (t) => {
 	const directory = await mkdtemp(join(tmpdir(), "pie-worker-product-"));
 	const host = createLocalHost({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });

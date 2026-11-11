@@ -62,7 +62,7 @@ export async function createLocalRuntime(options: {
 		store: {
 			...runtimeStore,
 			async deleteSession(id) {
-				await runtimeStore.deleteSession(id);
+				store.deleteSession(id);
 				await factory.requestRecords?.deleteSession(id);
 			},
 			async close() {
@@ -77,6 +77,12 @@ export async function createLocalRuntime(options: {
 		hostRuntimes: store.hostRuntimes,
 		saveHostRuntimes: async (definitions) => store.replaceHostRuntimes(definitions),
 		assistants: { list: () => [...assistants.values()], runtime: localRuntime },
+		workers: {
+			send: (...args) => workers!.send(...args),
+			wait: (...args) => workers!.wait(...args),
+			cancel: (...args) => workers!.cancel(...args),
+			inputs: (...args) => workers!.inputs(...args),
+		},
 		toolStreamTrace: traceToolStream
 			? (event) => console.error(JSON.stringify({ type: "pie_tool_stream_trace", ...event }))
 			: undefined,
@@ -85,6 +91,7 @@ export async function createLocalRuntime(options: {
 	const scheduler = workers;
 	try {
 		await scheduler.syncHostRuntimes(store.hostRuntimes);
+		for (const assistant of assistants.values()) await scheduler.syncAssistant(assistant);
 	} catch (error) {
 		scheduler.stop();
 		await runtime.close();
@@ -208,6 +215,7 @@ export async function createLocalRuntime(options: {
 				};
 				await store.saveAssistant(assistant);
 				assistants.set(assistant.id, assistant);
+				await scheduler.syncAssistant(assistant);
 				return assistant;
 			}, true);
 		},
@@ -219,6 +227,7 @@ export async function createLocalRuntime(options: {
 					throw new RuntimeError(409, "请先从其他助手的可调用助手中移除该助手");
 				if ((await runtime.listSessionMetadata()).some((session) => session.assistantId === id))
 					throw new RuntimeError(409, "请先删除该助手的会话");
+				await scheduler.deleteAssistant(id);
 				await store.deleteAssistant(id);
 				assistants.delete(id);
 				return { deleted: true };
@@ -247,7 +256,11 @@ export async function createLocalRuntime(options: {
 				return result;
 			}, true),
 		createSession: (...args: Parameters<PieRuntime["createSession"]>) =>
-			execute(() => runtime.createSession(...args), true),
+			execute(async () => {
+				if (args[0].workerId === undefined) return runtime.createSession(...args);
+				const created = await scheduler.createWorkerSession(args[0]);
+				return runtime.getSession(created.id);
+			}, true),
 		getSessionCreation: (...args: Parameters<PieRuntime["getSessionCreation"]>) =>
 			execute(() => runtime.getSessionCreation(...args), false),
 		getSession: (...args: Parameters<PieRuntime["getSession"]>) => execute(() => runtime.getSession(...args), false),
@@ -285,7 +298,23 @@ export async function createLocalRuntime(options: {
 		submitTurn: (...args: Parameters<PieRuntime["submitTurn"]>) => execute(() => runtime.submitTurn(...args), false),
 		resumeTurn: (...args: Parameters<PieRuntime["resumeTurn"]>) => execute(() => runtime.resumeTurn(...args), false),
 		deleteSession: (...args: Parameters<PieRuntime["deleteSession"]>) =>
-			execute(() => runtime.deleteSession(...args), true),
+			execute(async () => {
+				let result = { deleted: true };
+				try {
+					result = await runtime.deleteSession(...args);
+				} catch (error) {
+					if (!(error instanceof RuntimeError) || error.status !== 404 || store.readSession(args[0])) throw error;
+					const assignment = await store.findAssignmentBySession(args[0]);
+					if (assignment?.status !== "stopped" || !assignment.stopRequested) throw error;
+				}
+				const failed = store.deleteSession(args[0]);
+				try {
+					await scheduler.reportFailedDeliveries(failed);
+				} catch {
+					throw new RuntimeError(503, "会话已删除，失败回信尚未保存，请重试核对");
+				}
+				return result;
+			}, true),
 		subscribe: runtime.subscribe,
 		subscribeAll: runtime.subscribeAll,
 		subscribeExecutions: runtime.subscribeExecutions,

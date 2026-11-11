@@ -263,6 +263,7 @@ export type WorkerEnqueueResult = {
  */
 export interface WorkerCoordinationStore {
 	registerWorker(worker: WorkerRecord): Promise<WorkerRecord>;
+	deleteWorker?(workerId: string): Promise<void>;
 	readWorker(workerId: string): Promise<WorkerRecord | undefined>;
 	listWorkers(): Promise<WorkerRecord[]>;
 	createWorkItem(workItem: WorkItem): Promise<WorkItem>;
@@ -274,6 +275,7 @@ export interface WorkerCoordinationStore {
 	createWorkerMessage(message: WorkerMessage): Promise<WorkerMessage>;
 	createWorkerDelivery(delivery: WorkerDelivery): Promise<WorkerDelivery>;
 	readWorkerDelivery(deliveryId: string): Promise<WorkerDelivery | undefined>;
+	/** Consumed identity stays fixed; matching acceptedTurnId may append a known execution error. */
 	updateWorkerDelivery(
 		deliveryId: string,
 		update: Partial<
@@ -383,6 +385,12 @@ export class WorkerCoordinationService {
 
 	listWorkers() {
 		return this.store.listWorkers();
+	}
+
+	async deleteWorker(workerId: string): Promise<void> {
+		const normalized = requiredCoordinationText(workerId, "workerId");
+		if (!this.store.deleteWorker) throw new CoordinationError(405, "当前存储不支持删除 Worker");
+		await this.store.deleteWorker(normalized);
 	}
 
 	readWorkItem(workId: string) {
@@ -589,6 +597,7 @@ export class WorkerCoordinationService {
 			};
 		let workId = message.workId;
 		let sessionId = message.targetSessionId;
+		let verifiedReplySession = false;
 		if (message.newSession && (delivery?.sessionId || delivery?.assignmentId)) {
 			const binding = delivery.sessionId ? await this.store.findAssignmentBySession(delivery.sessionId) : undefined;
 			if (
@@ -624,6 +633,12 @@ export class WorkerCoordinationService {
 				message.targetSessionId !== original.sourceSessionId
 			)
 				throw new CoordinationError(409, "reply_to 与 targetSessionId 不匹配");
+			verifiedReplySession = Boolean(
+				originalTargetSession &&
+					original.sourceSessionId &&
+					message.sourceSessionId === originalTargetSession &&
+					sessionId === original.sourceSessionId,
+			);
 		}
 		const workItem = workId ? await this.store.readWorkItem(workId) : undefined;
 		if (workItem?.status === "stopped")
@@ -647,8 +662,10 @@ export class WorkerCoordinationService {
 				};
 			if (assignment.workerId !== message.workerId)
 				throw new CoordinationError(409, "targetSession 不属于目标 Worker");
-			if (workId && assignment.workId !== workId) throw new CoordinationError(409, "targetSession 不属于 workId");
-			const assignedWork = workItem ?? (await this.store.readWorkItem(assignment.workId));
+			if (workId && assignment.workId !== workId && !verifiedReplySession)
+				throw new CoordinationError(409, "targetSession 不属于 workId");
+			const assignedWork =
+				workItem?.workId === assignment.workId ? workItem : await this.store.readWorkItem(assignment.workId);
 			if (!assignedWork) throw new CoordinationError(404, "Session 关联的工作项不存在");
 			if (assignedWork.status === "stopped")
 				return {
@@ -750,9 +767,6 @@ export class WorkerCoordinationService {
 			input.mode === undefined ? undefined : coordinationChoice(input.mode, ["faux", "real"] as const, "mode");
 		if (input.newSession !== undefined && typeof input.newSession !== "boolean")
 			throw new CoordinationError(400, "newSession 需要布尔值");
-		const target = await this.store.readWorker(workerId);
-		if (!target) throw new CoordinationError(404, "目标 Worker 不存在");
-		if (!(await this.store.readWorker(sourceWorkerId))) throw new CoordinationError(404, "来源 Worker 不存在");
 		if (kind !== "request" && input.newSession)
 			throw new CoordinationError(400, "只有 request 消息可以要求 newSession");
 		if (input.newSession && (input.targetSessionId || input.replyTo))
@@ -788,6 +802,22 @@ export class WorkerCoordinationService {
 			if (!isDeepStrictEqual(workerMessageRequest(existingMessage), workerMessageRequest(request)))
 				throw new CoordinationError(409, "messageId 已用于不同消息参数");
 			if (existingDelivery) return { message: existingMessage, delivery: existingDelivery };
+		}
+		if (!(await this.store.readWorker(workerId))) throw new CoordinationError(404, "目标 Worker 不存在");
+		const sourceWorker = await this.store.readWorker(sourceWorkerId);
+		if (!sourceWorker) throw new CoordinationError(404, "来源 Worker 不存在");
+		if (!existingMessage && sourceTurnId) {
+			if (sourceWorker.status === "stopped") throw new CoordinationError(409, "来源 Worker 已停止");
+			const sourceAssignment = sourceSessionId
+				? await this.store.findAssignmentBySession(sourceSessionId)
+				: undefined;
+			if (!sourceAssignment || sourceAssignment.workerId !== sourceWorkerId)
+				throw new CoordinationError(403, "来源 Session 不属于当前 Worker");
+			if (sourceAssignment.status === "stopped" || sourceAssignment.stopRequested)
+				throw new CoordinationError(409, "来源 Session 已停止");
+			const sourceWork = await this.store.readWorkItem(sourceAssignment.workId);
+			if (!sourceWork) throw new CoordinationError(404, "来源工作项不存在");
+			if (sourceWork.status === "stopped") throw new CoordinationError(409, "来源工作项已停止");
 		}
 		const sequence = existingMessage?.sequence ?? (await this.store.nextWorkerSequence(workerId));
 		if (!Number.isSafeInteger(sequence) || sequence < 1) throw new CoordinationError(503, "Worker 消息序号无效");

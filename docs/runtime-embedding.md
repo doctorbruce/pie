@@ -32,9 +32,20 @@
 `WorkerScheduler` 复用 `createRuntime` 的 Session/Turn API，另注入 `WorkerCoordinationStore`；协调模块不拥有或关闭共享 Runtime。Local HTTP 宿主已自动装配，嵌入宿主可按需启用：
 
 ```ts
-import { WorkerScheduler } from "@pie/runtime";
+import { createRuntime, WorkerScheduler } from "@pie/runtime";
 
-const workers = new WorkerScheduler({ runtime, store: coordinationStore });
+let workers: WorkerScheduler;
+const runtime = await createRuntime({
+  store: runtimeStore,
+  agents,
+  workers: {
+    send: (...args) => workers.send(...args),
+    wait: (...args) => workers.wait(...args),
+    cancel: (...args) => workers.cancel(...args),
+    inputs: (...args) => workers.inputs(...args),
+  },
+});
+workers = new WorkerScheduler({ runtime, store: coordinationStore });
 await runtime.registerHostRuntimes(definitions);
 await workers.syncHostRuntimes(definitions);
 const received = await workers.enqueueWorkerMessage({
@@ -52,15 +63,41 @@ const received = await workers.enqueueWorkerMessage({
 const delivery = await workers.getWorkerDelivery(received.delivery.deliveryId);
 ```
 
-同一 `assistantId` 对应一个逻辑 Worker，注册刷新只更新配置关联，已有 Session 的 Turn 继续遵循 Runtime 配置边界。新工作使用目标 Worker 的默认选择或消息中宿主明确提供的目录/模型，`productBinding` 字符串或对象的 `astronSessionId` 写入 Session 创建身份并随导出保留；不继承来源 Session 的历史、权限或目录。补充传 `workId`（唯一关联）、`targetSessionId` 或合法 `replyTo`；关联不唯一保持 pending，不猜测最近会话。来源身份仅由可信宿主填写，第 3 步才接模型侧受授权通信工具。
+同一 `assistantId` 对应一个逻辑 Worker，注册刷新只更新配置关联，已有 Session 的 Turn 继续遵循 Runtime 配置边界。Local 助手的创建、更新、删除会同步 Worker 的创建、配置刷新和删除；Local Runtime 启动时也会为已保存助手补齐 Worker。这个 Worker 记录是长期身份，不代表进程或 Session；具体工作仍在首次收件时懒创建或复用 Worker Session。新工作使用目标 Worker 的默认选择或消息中宿主明确提供的目录/模型，`productBinding` 字符串或对象的 `astronSessionId` 写入 Session 创建身份并随导出保留；不继承来源 Session 的历史、权限或目录。补充传 `workId`（唯一关联）、`targetSessionId` 或合法 `replyTo`；关联不唯一保持 pending，不猜测最近会话。HTTP 入口的来源身份仍仅由可信宿主填写，不能把此入口直接作为模型工具。
+
+启用模型通信时，在 `createRuntime` 注入可选 `workers: WorkerCommunication`；Local 已自动装配。上述闭包将调用转给稍后创建的 `WorkerScheduler`，存储需同时实现 `WorkerCommunicationStore`、`SessionWriteOptions.workerInputs` 和 `SessionWriteOptions.workerWait` 的原子提交。Worker 根 Session 持久保存 `workerId === assistantId`；这些 Session 的助手协作工具为 `communicate`，不提供 `task`。普通会话未启用此标记，历史兼容路径保持原状。
+
+Local 的 `createSession({ assistantId, workerId: assistantId, ... })` 经调度器创建空 Worker Session，随后补齐确定性的 WorkItem 和 Assignment；不提交 Turn、不启动模型。共享 Runtime 本身不隐式建立协调关联，嵌入宿主可调用 `workers.createWorkerSession(input)`，再用 Runtime 查询 Session。Session 创建身份、WorkItem 和 Assignment 分步保存；同一 `creationKey`、相同参数重试会复用原 Session 并补齐已中断的关联步骤，不承诺跨步骤事务。省略 `creationKey` 的重试仍可能创建另一个 Session。
+
+`communicate({ to, content, kind?, session_id?, reply_to?, new_session?, wait? })` 的 to 是获准助手的 assistantId。宿主可独立注册 `runtime.workerTargets: [{ assistantId, name, description }]`，不必提供 legacy `subagents` 绑定；仅省略 `workerTargets` 时回退到 `subagents`，显式空数组禁止主动目标。注册时拒绝重复或不在同一注册表的目标。发送时取本 Turn 已装配目录与最新授权的交集：撤销后的目标不能继续发送，新增目标需到下一 Turn 配置应用后才进入目录。来源 Worker/Session/Turn 和稳定工具调用键由 Runtime 注入。保存后立即发布发送回执，request/question 默认继续等待；`wait: false` 仅发送，reply/result/progress 默认仅发送。有效 reply_to 按双方 Worker、Session 与原消息因果链返回准确的来源 Session，不要求反向主动授权。跨工作会话的合法通信不合并工作归属。
+
+`communicate` 的 `wait: { mode?, timeout_ms? }` 控制等待；mode 为 `sync` 或 `async`，默认取宿主 `runtime.workerWaitMode`，再缺省为 `async`。仅等待本 Session 发起消息的有效回应。已有消息可用 `communicate({ message_id, wait? })` 续等，不重复发送。内部 `WorkerCommunication.wait(context, messageId, signal?, { mode?, timeoutMs? })` 使用毫秒驼峰字段。旧 send_message/wait_message 历史及省略 mode 的异步等待记录仍可读取。
+
+`sync` 每段保留当前 Turn 和工具 Promise，等待期间没有模型请求；每段最长 30 秒，或在有待接纳新输入时提前返回。尚无匹配回应时返回 `wait.status: "waiting"` 与 `reason: "interval" | "message"`，不设置 Turn.yield；模型处理进展后可用原 `message_id` 续等。有效 `question/reply/result` 在返回前再次检查并优先领取；progress 不表示 ready 或工作完成，新输入仍经 Runtime 既有模型调用间隙机制与历史同事务消费，不另建消息通路。工具卡心跳只用于展示，不注入模型上下文。
+
+仅用户明确要求时传 `timeout_ms`（1–300000），它限定本次等待调用，到期返回 `wait.status: "timed_out"`；大于 30 秒时先返回 interval，后续等待以新调用重新计时，不是工作整体期限。分段返回与超时均不取消原请求，也不隐式变成 async。已受理目标 Turn 的明确失败保存在 consumed delivery 的 error，同步先领取已有有效回应，否则结束等待并报告失败。目标为当前 Session 的请求拒绝同步等待；跨 Session 互等不建立全局依赖图。取消和迟到消息沿既有边界处理；调用方可显式登记 async 让出。协作主助手约 60 秒保持沟通及 Worker 发送实质阶段 progress 属于模型软规范，运行时不定时生成正文。
+
+同步回应先持久独占，常规 `inputs/admit` 不再投递该回应。返回的 `WorkerWaitResult.receipts` 只描述已独占、尚待提交的 delivery；Runtime 用可信调用上下文保存 `SessionWriteOptions.workerWait: { waitId, toolCallId, responses: [{ deliveryId, messageId }] }`。存储须核对等待、当前 Session/Turn/工具与独占归属，在保存最终 toolResult 和执行账本的同一事务中标记回应 consumed、等待 ready。不得先消费后异步保存历史；保存失败不能将回信另起 Turn 重投。已在普通历史消费的回应可直接返回 ready，无新 receipts。
+
+`async` 保持立即返回等待事实的行为。没有有效回应时保存正常工具结果，再让模型生成面向用户的正常收尾；直到无工具调用的 assistant 消息完成，Agent 的 `shouldStopAfterTurn` 才保存让出并结束执行。Turn 为 completed 且含 `yield: { reason: "waiting_for_message", waitId, messageId }`，执行投影另含 `waitingForMessage`。收尾期间到达的回复和追问持久排队，在当前 Turn 完整清理后于原 Session 新建 Turn，不进入收尾模型上下文；ready 回执继续正常处理，不请求让出。取消或模型失败沿原终态处理。这表示本轮执行让出，不表示工作完成；异步等待不占执行中的工具 Promise，两种模式都不建立父子取消关系。
+
+同一回应只由一个等待领取；再次等待原请求不会重复返回已经处理的追问。明确的接纳前失败会生成稳定 `result` 回原 Session；已受理或派发结果未知时保留原收据，不伪造失败或重放。
+
+取消准确的已让出 Turn 仍是有效操作：持久撤销其等待和自动回复唤醒，状态改为 cancelled。迟到消息保留可查收据，不恢复被取消请求；同助手其他 Session 和对端 Worker 不受影响。服务重启只保留协调事实，不自动恢复待执行消息。
 
 Runtime 注册表提交与 Worker 配置同步是两个保存边界；后者失败时不能推断前者回滚，可按同一配置重试或重启核对。移除 runtime 配置保留 Worker 历史，但拒绝它的新执行。
 
-消息先入 SQLite，再后台建立工作/Session 关联。`pending/resolved/dispatched/accepted/consumed/failed` 分别表示待关联、已关联、已尝试派发、Runtime 已受理、Turn 已结算及接纳前失败；`consumed` 不表示业务成功，实际结果仍读对应 `acceptedTurnId` 的 Turn。每个 Session 按入箱顺序串行，不持 Worker 全局锁等待执行。繁忙期间补充保存到收件箱，在当前 Turn 完成清理后启动下一 Turn；可靠模型间隙接纳留在后续通信阶段。
+消息先入 SQLite，再后台建立工作/Session 关联。`pending/resolved/dispatched/accepted/consumed/failed` 分别表示待关联、已关联、已尝试派发、已受理、已进入持久历史及接纳前失败；真实 Runtime 将历史与 consumed 在同一事务提交，可能直接从 resolved/dispatched 进入 consumed。`consumed` 不表示 Turn 结算或业务成功，实际结果仍读对应 `acceptedTurnId` 的 Turn。每个 Session 按入箱顺序串行，不持 Worker 全局锁等待执行。运行中的已关联消息在下一模型调用间隙批量保存到历史并消费，最终交接后到达的消息仍由队列启动下一 Turn；不使用非持久 steer 冒充可靠输入。
 
 `waitWorkerDelivery` 仅等待当前实例已经安排的投递；pending、关闭或重启后未知记录可能直接返回，不能把它当作持久等待或重启自动恢复。已受理/已派发/已消费/失败的重复消息不重新执行，同 ID 不同正文或选择返回 409。关闭时先 `workers.stop()`，再关闭 Runtime；Runtime 的 store 关闭前 `await workers.drain()`，让在途投递先写完收据。未知派发结果保留可查询事实，不自动重放工具副作用。
 
 调度使用 `waitForTurn(sessionId, { onWait, onSettled })` 的可选同步回调：分别取得等待起点及同一 Turn 结算时的独立副本，完整快照仍可能在异步读取后观察到后续 Turn。嵌入宿主若自行适配这三个 Runtime 方法，必须保留该观察语义。取消截止据准确结算切面固定；取消前排队的补充不能复活，取消后的显式新请求可执行。受理 Turn 在等待登记前已被其他 Turn 替换时，保留 accepted 并明确要求对账。
+
+`WorkerCommunicationStore.recordWorkerTurnCutoff(sessionId, turnId, workerId, sequence)` 按 Session/Turn 固定截止点，返回该 Session 的累计截止序号；`readWorkerTurnCutoff(sessionId)` 读取它。持久适配器须在保存 cancelled/failed/interrupted 终态（含启动恢复）时同事务冻结对应 Worker 的当前收件序号，并在 `workerInputs` 原子接纳时拒绝截止前输入；重复保存或取消重试不能扩大截止点。只有持久 interrupted → 同 Turn running 的显式续跑才重新武装下一终态的冻结，保留原截止点；续跑后再次取消覆盖其间排队输入。SQLite 已实现，普通未启用 Worker 的存储契约不变。
+
+模型外发消息须在保存前核对来源 Worker、Session 关联及其工作项尚未停止，合法因果回信同样校验；已保存同键重试仍返回原收据。暂停仅阻止新执行接纳，不阻止已运行 Session 回信。系统生成的明确失败通知不作为模型外发处理。
+
+SQLite 接纳新 Worker 输入时同事务复核目标 Worker active、关联未停止及工作项未停止；已 consumed 的同 Turn 重写保持幂等。暂停竞争导致的明确拒绝回到 resolved 后退出当前调度，不循环重试或伪装失败。Local 删除会话先停止关联、取消等待及终结未受理投递，再清理 Runtime 缓存并向仍存在的来源回报失败；通知保存失败明确说明会话已删除，重复删除仅凭持久停止关联核对并重报，不复建 Session。自动重报与重启续跑仍未实现。
 
 ## 最小宿主装配
 

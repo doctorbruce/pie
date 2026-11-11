@@ -1,6 +1,10 @@
 # Pie 助手 Worker 与持久协调设计
 
-状态：第 2 步 Assistant = Worker 与内部调度（Pie 侧）已完成；后续步骤未实施，Astron 产品联调待内网。更新：2026-11-05。
+状态：进行中。已有对等通信、同步/异步等待和本地 Cowork 接入；本轮补齐同步等待的 30 秒分段返回、阶段进展唤醒及主助手沟通指引。更新：2026-11-11。
+
+本轮范围：复用 Worker 的 `communicate`、持久消息与模型调用间隙接纳。同步等待每段最长 30 秒；新输入可提前交回模型，`waiting` 不代表工作完成，模型可用原 `message_id` 续等。真实回应仍优先领取并原子消费。主助手按实质信息汇报，约 60 秒保持沟通属于模型软规范；工具卡心跳只用于展示。普通 Session 的 `task`、Amio 链路、异步让出和取消归属保持原行为，不新增工具、配置或消息存储。
+
+2026-11-06，开始接入本地 Cowork Pie adapter：新会话的空 Worker 工作关联、独立协作目录、自主回合产品绑定与事件/权限接续。实现限定 Pie 和 Cowork `adapters/pie`，不修改 Amio、公共 Core contract 或 ACP 主流程；Router、端云和重启自动恢复仍不在本次。验收覆盖真实 Pie 源码进程、SQLite 和 faux 模型，以及现有 Core/Amio 契约回归；客户端人工验证与源码测试分开记录。
 
 已获准按步骤实施并汇报进度。首期在本地 Astron Cowork + Pie 实现，端云协同在本地链路验收后推进。前置来源见 [DeepSeek Super-agent 评估](../deepseek-super-agent-assessment.md)；下述助手与 Worker 的对应关系是本次 Pie 讨论确定的模型，不代表 DeepSeek 原型的实现。
 
@@ -11,6 +15,10 @@
 例如：合同助手同时审合同甲、乙，分别使用 Session A、B。A 向检索助手请求法规，检索助手在 Session C 处理、追问并回复 A；B 同时继续执行，整个往返不需要 Router 转述。
 
 保留现有聊天、模型、工具、Skill、MCP、权限、压缩、历史、产物与停止能力。新协调模式以消息协作替代 `task`；旧路径只承担过渡兼容，不作为新架构的调用协议。
+
+已实现 Local Assistant 与逻辑 Worker 共享生命周期：创建助手立即建立稳定 Worker 身份，更新助手刷新 Worker 配置，删除助手清理 Worker 记录；Worker Session 仍按具体工作懒创建，不为每个助手预建空 Session。
+
+已补齐三个边界：取消/失败后的收件截止点随终态持久化，重启不能复活旧输入；删除 Session 同事务停止其工作关联、取消等待并终结尚未受理投递，保留历史事实及其他 Session；停止的 Worker、工作关联或工作项不能继续从运行中 Turn 新发消息，SQLite 插入前再次校验，幂等重试仍返回原事实。验收覆盖重启、新请求不被旧截止点误伤、删除后不重建和停止/发送竞争；不扩展为重启自动续跑或完整工作项控制 API。
 
 ## 确定的领域关系
 
@@ -75,24 +83,30 @@ Session 使用目标助手的配置、宿主选择的模型与工作目录；不
 
 每个目标 Session 按接收序号取批。模型/工具批次运行时继续收件，在下一模型调用间隙安全接纳；空闲时启动下一 Turn。工作即将结束时须重新检查待输入，并处理检查与新消息并发，防止最后一条消息落盘后无人唤醒。
 
-第 2 步先交付持久收件与 Session 内 FIFO 执行：繁忙时继续保存消息，前一 Turn 完成生命周期清理后启动下一 Turn；不同 Session 不互相等待。暂不把现有 `durable: false` 的 steer 当成可靠收件，模型调用间隙的持久批次接纳随第 3 步通信/唤醒一起接入。取消或失败会阻止此前已排队补充自动重启；已受理或派发结果未知的记录保持可核对，不因重试盲目再执行。
+第 2 步先交付持久收件与 Session 内 FIFO 执行；第 3 步接入模型调用间隙的持久批次接纳和通信唤醒。繁忙时继续保存消息，错过本轮接纳间隙的输入在前一 Turn 完成生命周期清理后启动下一 Turn；不同 Session 不互相等待。不把现有 `durable: false` 的 steer 当成可靠收件。取消或失败会阻止此前已排队补充自动重启；已受理或派发结果未知的记录保持可核对，不因重试盲目再执行。
 
-调度只在认领、关联与保存等短操作中串行，不持有队列锁等待某个 Session 的整个模型或工具执行。等待回复不占执行配额，其他 Session 可以继续。
+调度只在认领、关联与保存等短操作中串行，不持有队列锁等待某个 Session 的整个模型或工具执行。异步等待释放当前执行；同步等待每段占当前 Session 的工具调用，期间不发起模型请求，其他 Session 可以继续。每段最长 30 秒，新输入可提前交回模型；分段返回不终止原请求，仍需结果时以原消息 ID 续等。
 
 ## 对等消息与模型侧接口
 
 新模式不向模型提供 `task`，也不沿用 `task_id/background` 的父子调用协议。助手协作统一使用消息；追问、回复、进度和结果属于不同消息类型，不再另设一套 `worker_report` 通路。
 
-以下为拟定接口名称，TypeScript 声明在实施前定稿：
+第 3 步模型接口及共享 TypeScript 契约已实现：
 
 | 接口 | 行为 |
 | --- | --- |
-| `send_message({ to, content, kind?, session_id?, reply_to?, new_session? })` | 向获准 Worker 发送消息；to 为授权域内助手身份。立即返回 messageId 与已保存收据，后续可查询投递状态；不等待执行结果 |
-| `wait_message({ message_id })` | 等待本 Session 发起消息的有效回应；由待新增的执行控制持久登记等待并让出当前 Turn，收到追问或回复后继续；不是阻塞工具 Promise |
+| `communicate({ to, content, kind?, session_id?, reply_to?, new_session?, wait? })` | 向获准 Worker 发送消息并保存收据；request/question 默认等待回应，`wait: false` 只发送，reply/result/progress 默认只发送 |
+| `communicate({ message_id, wait? })` | 以已有消息 ID 续等，不重复发送；`wait.mode` 取 sync/async，省略时用宿主 `runtime.workerWaitMode`，再缺省为 async |
+
+第 3 步实现范围：Worker 根 Session 持久保存 `workerId`，助手协作工具统一为 `communicate`，旧普通 Session 保留原路径。宿主可通过 `workerTargets` 独立提供主动目标的助手身份、名称与说明，省略时回退到 `subagents`，显式空数组禁止主动目标。合法因果回复允许沿原消息返回，不要求反向主动授权。来源身份和稳定调用键由 Runtime 注入，模型不能传入目录、模型、产品绑定或来源身份。Local 自动装配，嵌入宿主通过可选通信接口注入。
+
+等待登记与回应检查同事务完成，避免工具返回和新 Turn 双重消费。同步等待优先领取匹配回应；每段结束仍为 waiting 时，模型可接纳新输入、向用户汇报并继续等待，不登记 `Turn.yield`。异步等待保存事实后立即返回工具结果；状态为 waiting 时模型正常生成面向用户的收尾，收尾消息及工具结果保存后，Runtime 才以 `Turn.yield` 记录让出并释放执行。异步收尾期间新收件持久排队，不插入当前 Turn，前一 Turn 完整清理后在原 Session 启动新 Turn。其他模型调用间隙仍可批量接纳已关联消息，历史与投递消费同事务保存；取消持久撤销本 Turn 的等待和自动回复唤醒。Router 增量推理、产品界面改造、分层工作项控制及重启自动恢复不在本步。
 
 普通请求默认沿唯一工作关联复用目标 Session，无关联时创建本工作的新 Session；`new_session: true` 明确要求新的独立会话，与 session_id/reply_to 互斥。有多个候选时不得任意选一个；session_id 与 reply_to 同时出现时必须指向同一合法目标。
 
 kind 默认为 request；question/reply/progress/result 必须关联已有请求或会话，不因关联缺失而新建工作。只有新请求可要求 new_session；携带 reply_to 时，to 和目标会话必须符合原消息的合法往返关系，否则拒绝。
+
+可信收件上下文须向模型说明回应方式：有来源 Session 的 request 完成后，用 `communicate` 向来源 Worker 发送 `kind: result` 和原消息 `reply_to`；有实质阶段成果或阻塞时，以相同因果关联发送 `kind: progress, wait: false`；回答 question 使用 `kind: reply`。提供当前消息的准确回信参数，说明普通 assistant 正文只保留在本 Session。收到 reply/result/progress 不要求自动确认，避免循环互答；没有可回复来源的宿主输入不生成回信要求。主助手执行期间约 60 秒保持沟通属于模型软规范，不由运行时定时生成正文；工具卡心跳只展示活动，不作为阶段进展注入模型。
 
 发送方 Worker、Session、Turn、toolCallId、授权域和工作归属来自真实调用上下文，模型不能自行填写或冒充。工具重试使用稳定调用键；同键不同参数拒绝。目标列表包含可联系助手的 ID、名称和用途，按宿主授权提供，不扫描或暴露所有用户的助手。
 
@@ -104,11 +118,39 @@ kind 默认为 request；question/reply/progress/result 必须关联已有请求
 
 ### 等待与唤醒
 
-`wait_message` 登记等待时，必须与“对应回应是否已经到达”一起原子检查：先到的回复立即可消费；后到的回复只登记一次唤醒。若在等待中收到需要处理的新输入，应先恢复处理输入，保留尚未满足的回复关联，不能因只等某一回复而忽略对方追问。
+当前行为（2026-11-11）：同步等待每段最长 30 秒，或在有待接纳新输入时提前返回 `wait.status: waiting`，分别带 `reason: interval/message`。返回前再次原子检查 question/reply/result，已到达的匹配回应优先沿工具结果领取。progress 使模型有机会处理进展，不表示回应 ready 或工作完成；新输入仍由 Runtime 在下一模型调用前与历史同事务消费。`timeout_ms` 仅由用户明确要求时指定，是本次等待调用的上限；大于 30 秒先返回 interval，续等从新调用重新计时，不累计为整项工作期限。原请求、异步让出及取消边界沿用既有机制。
 
-等待需要新增结构化执行控制：协调模块先保存等待意图，Runtime 保存让出执行事实和有效 checkpoint，再正常结束当前 Turn；交接期间到达的回复保留待唤醒记录，不能并发启动第二个 Turn。让出不能留下没有结果的工具调用，也不能只写一条“我在等待”的普通文本或靠轮询、永久挂起 Promise 代替。让出不是取消，Turn 正常结束不等于工作完成。
+2026-11-09 历史范围（同步分段行为已由本轮调整）：同时保留同步与异步等待。Cowork 普通助手的 Pie runtime 默认 sync；其他 Pie 宿主维持 async。同步等待直接占有属于该请求的未消费回应，在保存工具结果的同一事务标记消费和等待 ready；常规收件与下一 Turn 不得重复接纳它。result、question、reply 可结束等待，progress 不结束等待。同步默认持续至匹配回应、明确失败或取消，仅显式 `timeout_ms` 才返回 timed_out，原请求仍存在；提示模型仅在用户要求时设置时限。取消停止本次等待，沿原源 Turn 取消规则处理迟到回复，不沿消息关系取消对端。拒绝等待当前同一 Session；跨 Session 互等默认须由回应或用户取消解除，不增加全局等待图。进程中断后的未知工具结果仍受既有恢复门禁约束，不自动重放。
+
+Cowork Pie adapter 将可信发送调用映射为已有 `tool.subagent` Task 卡和执行详情，按 messageId、delivery 与实际接纳 Turn 限定本次内容；不修改 Worker Session 的独立归属，不发送虚假的父子事件。前端只抑制已有 Task 投影对应的重复往来卡；普通来信隐藏、旧历史和 Amio Task 保持现有行为。本次不新增任务框架、全局互等图、真实提供商调用、构建或部署。验收覆盖同 Turn 收回信、早到回应、追问、超时、取消、重复消费、异步不回归，以及 Cowork 实时/历史投影和 Amio 契约。
+
+登记等待时，必须与“对应回应是否已经到达”一起原子检查：先到的回复立即可消费；后到的回复只登记一次唤醒。若在等待中收到需要处理的新输入，应先恢复处理输入，保留尚未满足的回复关联，不能因只等某一回复而忽略对方追问。
+
+异步等待使用结构化执行控制：协调模块先保存等待意图，Runtime 保存让出执行事实和有效 checkpoint，再正常结束当前 Turn；交接期间到达的回复保留待唤醒记录，不能并发启动第二个 Turn。让出不能留下没有结果的工具调用，也不能只写一条“我在等待”的普通文本或靠轮询、永久挂起 Promise 代替。让出不是取消，Turn 正常结束不等于工作完成。
 
 对端回复后从原 Session 历史继续；已明确停止的请求或会话不被迟到回复自动恢复。发送不产生父子取消权，对方可以按自己的授权处理、追问、拒绝或报告受阻。
+
+### 异步等待轮的模型收尾（源码与自动回归已完成）
+
+问题：此前 waiting 工具结果保存后，Runtime 立即停止 Agent loop，模型没有机会生成正常最终回答，主聊天只剩工具前过程文字。现改为“登记等待 → 模型正常交代 → 保存收尾并结束 Turn → 回信新 Turn”。模型生成真实正文，不在前端补固定回答，不把工具前文字或思考提升为最终回答。
+
+本次仅修改共享 Runtime 的停止时点和 wait 工具指引，复用现有持久等待、输入队列、取消与失败处理，不增加 Agent API、轮询、收尾专用模型或调度服务。等待状态为 ready 时沿原路径继续；waiting 时保持 yieldRequested 阻止收尾间隙接纳来信，直到无工具调用的 assistant 消息完成再正常让出。模型取消/失败按原终态处理，不伪装正常收尾。
+
+验收使用真实 Runtime、Scheduler、SQLite 与 faux 模型：等待后持久正文存在且先于 Turn 结算；无回信时释放执行；收尾期间到达的回信在同一 Session 的新 Turn 仅消费一次；已就绪、取消与失败不回归。运行定向测试、`npm run check`；不调用真实模型、构建、部署或自动提交。Cowork 既有展示消费正常正文，无需改 Amio Core。
+
+## 助手往来展示（历史方案；当前复用 Task 展示）
+
+当前决定（2026-11-09）：来源助手的通信调用复用原 Task 头像、卡片及只读过程；子助手收到 request/question 使用普通消息组件，取消独立往来小卡。以下保留 2026-11-06 初始方案背景，实际现状以本轮实施记录为准。
+
+桌面联调已观察到 Worker 回信进入来源会话，但正文被当作用户消息展示，缺少助手来源与往来入口。模型输入的 `role: user` 不代表真实用户发言，产品展示须根据可信通信来源区分。
+
+- **主聊天：** 本次协作显示可点击的“与代码助手 · 2 条消息往来”，附实际状态，例如“等待回复”“有新消息”“已收到结果”。Worker 收件不占用用户消息气泡；主助手面向用户的正常回复继续展示。`send_message/wait_message` 工具记录可在执行详情查看，保留原始历史。
+- **往来详情：** 标题展示“星小妙 ↔ 代码助手”，按实际发送方展示名称、头像、方向、时间、正文和文件引用；请求、追问、回答、进度和结果按消息顺序呈现。本阶段只读查看双方显式发送的通信消息；跳转工作 Session 待产品绑定与导航入口确认后接入，不按原生 ID 猜测产品会话。
+- **关联与计数：** 详情是已有消息事实的视图，不新建执行 Session、群聊或父子 Task。以原请求因果链及实际两侧 Session 确定本次往来，同一对助手的其他任务不混入；一项工作中涉及第三个助手时可分别查看对应往来。按稳定 messageId 去重计数，投递重试、工具流及普通模型正文不重复计数。
+- **状态：** 等待来自持久 waiting/yield 事实，显示“等待代码助手”，允许用户继续聊天；已让出的 Turn completed 不显示为整项工作完成。收到 result 标记“已收到结果”，失败结果明确展示失败；主助手后续执行、人工确认与最终面向用户的答复仍沿实际生命周期显示。切换会话、刷新和重连须保留同一来源与状态。
+- **数据接口：** Pie 提供结构化消息身份、发送/接收 Worker 与 Session、kind、replyTo 和时间；Pie adapter 映射至产品消息/事件的通信来源，前端据此呈现。来源取自持久消息与投递关联，不解析正文猜测、不改模型角色、不把来信改成主助手自己生成的回复。已有消息按可核对的消息身份补充关联，信息不足时不冒认发送者。
+
+落地顺序：先补齐 Pie 到 Pie adapter 的可信展示数据并保证实时与历史一致，再接 Cowork 主聊天入口和往来详情，最后验收多任务隔离、等待/回信、失败、产物和重连去重。2026-11-06 用户已授权本阶段修改 Cowork 前端；实现范围为 Pie 输入展示元数据、Pie adapter 和聊天组件的显式通信展示，不改变模型角色、普通聊天、旧 Task、Amio 和现有执行控制。测试选择 T2（跨宿主元数据契约）与 T1（分组、去重和界面交互），桌面真实模型人工验收单独记录。
 
 ## 最小持久事实
 
@@ -125,7 +167,7 @@ kind 默认为 request；question/reply/progress/result 必须关联已有请求
 | RouterDecision | 协调 Session、已纳入输入位置、候选动作、提交状态和稳定动作 ID |
 | Subscription / Outbox | 外部讨论到工作会话的明确关联、待发送外部消息与发送收据；不把 SSE 当持久队列 |
 
-`createSession` 已补齐可选持久 `creationKey` 与创建收据查询；第 1 步已有可跨 Turn 查询的输入批次事实，第 2 步补充 Worker 收件与投递收据。输入批次与历史输入同事务接纳仍待实施，不把分开的状态写入冒充原子提交。协调意图与 Runtime 存储可能不在同一事务，必须靠稳定创建键、输入收据与对账跨越窗口，不能假定跨库原子提交。
+`createSession` 已补齐可选持久 `creationKey` 与创建收据查询；第 1 步已有可跨 Turn 查询的输入批次事实，第 2 步补充 Worker 收件与投递收据。第 3 步通过 `SessionWriteOptions.workerInputs` 将 Worker 输入历史与对应投递消费同事务保存；第 1 步通用输入批次接口不自动获得该执行能力。协调意图与 Runtime 存储可能不在同一事务，必须靠稳定创建键、输入收据与对账跨越窗口，不能假定跨库原子提交。
 
 首期允许持久记录事实但不自动恢复所有执行。已确认接纳的输入不重复提交；模型或工具结果不明时受阻待核对，不承诺未知副作用恰好执行一次。
 
@@ -237,3 +279,101 @@ flowchart LR
 - **基线测试收口：** 全量初跑发现 10 项既有失败，在 `335d47598` 的独立源码副本逐项复现。仅修正 7 个测试文件，沿用隐藏能力清单、技能请求上下文、SSE 轻量 execution、持久树节点和恢复序号的现行契约；保存失败夹具先进入准确模型执行窗口。定向 `node --expose-gc --conditions=source --test packages/server/test/{execution-state,fork,plugins,server,tool-progress,turn-recovery,working-history}.test.ts`，79/79 通过。
 - **最终验证：** `npm run check` 通过（Biome、TypeScript、模型目录校验）；`npm run test:server` 发现 57 个文件，覆盖全部 runtime/server 及现有 prompt-viewer 测试，428/428 通过，无跳过；`git diff --check` 通过。只读核对源码并用行为回归收口，未提供 crapper/dryer/mutator 工具，未宣称运行它们。行动日志保存在 `/tmp/pie-superagent-step2-log.md`，关键设计、失败证据与结果已回填本记录。
 - **偏差与后续：** 第 2 步按 Turn 结算边界消费 FIFO，不承诺本轮模型间隙持久批次接纳；该能力与 `send_message/wait_message`、可靠唤醒一起留第 3 步。重启后可查事实，自动恢复与未知结果对账留第 6 步。来源身份及范围由可信宿主保证，此 HTTP 入口不能直接暴露给模型。只读对照 Cowork 配置，未修改参考树；真实 Astron 产品链路须在内网联调，未计为本次完成。未构建、部署或调用真实模型。
+
+2026-11-06，第 3 步 Pie 侧实施与验收：
+
+- **工具与身份：** 新增 `worker-communication.ts` 共享契约。调度器创建的根 Session 持久保存 `workerId === assistantId`；`agent.ts` 在该路径注入 `send_message/wait_message`，不注册 `task`，配置重建和 SQLite 重启后同样生效。普通 Session 和旧 Task 保留原路径；原生工具名称禁止被外部工具覆盖。Local 自动装配，嵌入宿主可选注入。
+- **可信往返：** Runtime 生成来源 Worker/Session/Turn 和稳定工具调用身份；主动目标复用获准助手目录，发送前核对当前授权。消息立即保存，不等待目标执行；合法因果回复可回原 Session，不要求反向主动授权。显式跨工作通信不改变双方工作归属，不继承来源目录、模型、产品绑定、历史或审批记忆。来源与关联元数据随输入历史保存，展示仅含正文。
+- **等待与接纳：** SQLite 将等待登记与已消费回应检查放在同一事务；回应只由一个等待领取，并支持追问、补充、最终结果的因果链。等待工具返回后，Runtime 在整批工具结果保存完成时记录 `Turn.yield` 并释放执行；`execution.waitingForMessage` 与普通完成区分。运行中的已关联消息可在下一模型调用间隙批量进入原 Turn，历史与 `consumed/acceptedTurnId` 同事务提交，队列不重复开启 Turn。
+- **取消与失败：** 取消运行中或已让出的准确 Turn，持久撤销等待及自动回复唤醒；取消后到达的消息保留可查结果，不唤醒已取消请求，不关闭对端 Worker。存储在接纳事务内再次检查取消，冲突回滚历史与全部投递。明确的接纳前失败产生稳定 `result` 回来源，包括目标尚未创建 Session 或显式跨工作目标尚未建立投递关联；已受理或派发结果未知时保留核对状态，不伪造失败或重放。
+- **关键文件：** Runtime 的 `worker-communication.ts`、`worker-scheduler.ts`、`runtime.ts`、`agent.ts`、`protocol.ts`、`runtime-store.ts`、`coordination.ts`、`index.ts`；Local 的 `store.ts`、`runtime.ts`、`agent.ts`。接口说明及包变更记录已同步。
+- **定向验证：** `node --conditions=source --test packages/server/test/worker-communication.test.ts packages/server/test/worker-agent.test.ts packages/server/test/agent.test.ts`，18/18 通过；`worker-communication-store.test.ts`，9/9 通过；最终 `worker-scheduler.test.ts`，28/28 通过。真实 SQLite、Runtime、Agent 与 faux 模型覆盖双向请求/追问/回复、同助手另一 Session 并行、早到回应、同 Turn 批量接纳去重、等待持久化与工具结果交接时的取消/回复竞争、配置重建与重启后工具隔离，以及明确失败回执。未调用真实提供商。
+- **基线测试修正：** 全量首跑 465/466 通过，唯一失败为 Windows 临时目录清理早于 SQLite 关闭，触发 `model-request-retention.test.ts` 的 EBUSY。仅将该测试的 Runtime 关闭移入 `finally`；整文件 13/13、修正后全量 466/466 通过。
+- **最终验证：** 补齐显式跨工作失败回执后，`npm run test:server` 覆盖 61 个文件，467/467 通过，无跳过；`npm run check` 通过 Biome、TypeScript 与模型目录校验；`git diff --check` 通过。全量日志保存在 `%TEMP%/pie-worker-step3-tests-final.log`。
+- **范围与未完成：** 完成本地 Pie 的独立 Worker 通信；Router 增量提交留第 4 步，真实 Astron 产品入口/界面、分层工作项停止留第 5 步，重启自动对账续跑留第 6 步，端云协同留第 7 步。未修改 Astron，未做客户端实测、构建、部署或 Git 提交。
+
+2026-11-06，本地 Cowork Pie adapter 接入，源码与协议阶段完成：
+
+- **空工作会话与目录：** Local 的显式 `createSession({ assistantId, workerId: assistantId, ... })` 经 `WorkerScheduler.createWorkerSession` 补齐 WorkItem/Assignment，不生成用户输入或调用模型。同创建键可修补中途失败的关联，不承诺跨步骤事务。`protocol.ts/config.ts/runtime.ts` 增加独立 `workerTargets`；省略才回退旧 `subagents`，显式空数组关闭主动目标，发送再核验当前授权。支持 34 个助手各 33 个目标，不截断目录或扩大旧 Task 授权。
+- **产品接续：** Cowork 的 `adapters/pie/runtime_config.py/transport.py` 投影目录和新直聊身份；`worker_bridge.py/core.py` 在现有生命周期接口中登记自主回合、绑定实际助手会话、保留等待信息和原权限路由。已有 Pie Core 映射优先复用稳定 Astron ID，拒绝错误助手认领，不重复建产品会话或切换活动 Core。未修改公共 Core contract、ACP 主流程、Amio adapter、前端或共享产品服务。
+- **重连边界：** 用准确产品/Core/原生 Session/Turn 身份恢复快照副本，补齐可核对的旧终态；已登记回合的正文继续按 SSE 顺序处理。独立审核发现并复验了目录人数限制、快速结束后的准入、跨 Core 重复绑定、漏终态后长期 active 四项缺陷。若旧终态完全丢失且原生状态已经推进，缺少核对证据时仍受阻，不猜测结算或自动重放。
+- **验证：** `npm run check` 通过；`npm run test:server` 为 474/474，日志 `%TEMP%/pie-worker-integration-server-tests.log`；后续目录边界修改的 runtime/server 两份 `worker-targets.test.ts` 共 5/5。Cowork 设置 `PIE_TEST_REPO=E:/Projects/pie` 后，19 份定向 pytest 合并 194/194，涵盖真实 Pie 进程、SQLite、faux、独立收发/等待/回复唤醒、产品身份、权限和共享 Core 契约；增强后的重连专项单独 11/11，独立复核再次通过。Ruff、文档和 diff 检查通过；未使用真实提供商。
+- **已知基线与后续：** Cowork 异步边界检查 8 通过、2 失败，剩余 6 处后台任务与 7 处 OpenCode 命名违规均逐文件确认为 HEAD 原基线。事件中心测试曾出现时间戳差 1 ms 的不稳定失败，独立和最终合并回归均通过。聊天停止只控制在途 Turn；Pie/adapter 可精确撤销等待，但已结算工作尚无产品停止入口。桌面验收、来源会话代批、工作项控制、定时启动、重启自动续跑、Router 和端云仍未完成。未构建、部署或提交。完整 Cowork 命令与记录维护在其根 `specs/pie-worker-integration/plan.md`。
+
+2026-11-06，桌面联调的 Worker 回信提示修复（源码验收已完成，更新后的桌面复测待办）：
+
+- **现场事实：** 已切换 Pie；星小妙调用 `send_message/wait_message`，源 Turn 以 `waiting_for_message` 让出。请求投递已 consumed，代码助手自主完成 `adder.py` 的写入与运行验证，但只产生普通最终正文，未调用 `send_message`；源 Session 仍持久等待。界面的 6 秒已完成只对应源 Turn。
+- **本次范围：** 只修 Pie 可信收件与通信工具提示，明确 request/question 的回信参数及消息类型；首次启动和模型间隙批次共用同一提示。保留对等显式通信和普通会话行为，不修改 Cowork、Amio、前端或共享 Core，不自动补发已有会话的结果。
+- **实际改动：** `packages/runtime/src/runtime.ts` 的共用收件头为 request/result、question/reply 提供准确回信参数；`agent.ts` 补充 kind/reply_to 说明。`packages/server/test/worker-communication.test.ts` 捕获实际模型上下文，解析其中参数并通过真实工具链发送回信，验证因果唤醒、初始/间隙接纳、展示纯正文、无来源及普通文本伪元数据隔离、非请求消息不要求自动确认。运行时不自动转发最终文本。
+- **验证结果：** `node --conditions=source --test --test-name-pattern="Worker model tools|two early Worker" packages/server/test/worker-communication.test.ts` 先以缺少具体回信参数红测 2/2；修复后完整 `worker-communication.test.ts` 7/7，`worker-agent.test.ts` 8/8。最后限定提示措辞后首个完整因果流程再次 1/1 通过；最终 `npm run check`（Biome、TypeScript、模型目录）与 `git diff --check` 通过。
+- **边界：** 本轮只读现场已有模型记录，自动回归使用本地 faux，不新增真实提供商调用。提示依赖模型遵从，更新后的真实模型桌面闭环仍待复测；未构建、替换、提交或重启现有服务，已有等待不自动补发结果。
+
+2026-11-06，助手往来展示方案补充（设计记录，未实施）：
+
+- **新反馈：** 用户确认链路已通，并提供回信到达的主聊天截图；当前问题转向来信被渲染为用户气泡，以及缺少助手间通信详情。前次特定请求未回信的现场记录保留，不据此否定本次已到达的结果。
+- **源码核对：** Pie `runtime.ts` 与 `session-transfer.ts` 保留 Worker 消息身份并清洗展示正文；Cowork `adapters/pie/worker_bridge.py` 将自主输入登记为 `userMessage`，`core.py` 的 `_transcript` 沿普通 user 角色投影，尚无完整通信来源供前端渲染。已有通信与执行事实可复用，展示按上述方案单独实现。
+- **验证与范围：** 本轮为截图与源码核对，仅更新本 SPEC；未改执行代码、调用模型、运行构建、替换、重启或提交。前端展示、来源数据贯通及刷新/重连验收尚未实施。
+
+2026-11-06，助手往来展示实施（源码与自动回归已完成，桌面人工验收待办）：
+
+- **来源贯通：** `packages/runtime/src/runtime.ts` 在首次与模型间隙收件时保存安全的 `metadata.workerCommunication`，包括实际来源、目标 Session、消息身份、因果关联与正文；保持模型角色和输入行为。Cowork Pie adapter 为实时、历史和自主回合透传同一事实，名称复用现有助手目录；旧消息只按可信 ID 在有限数量和总时限内补查，补查失败不取消主加载。
+- **实际展示：** Cowork 聊天 Core 校验、去重并按因果链及两侧 Session 分组；React `WorkerCommunication.tsx` 与 `ConversationThread.tsx` 展示“与代码助手 · N条消息往来”和只读详情。来信不再占用户气泡，普通用户消息、主助手正文和旧工具详情保留；只展示实际发送的消息，不读取对方思考或完整会话。虚拟列表、定位与已打开的详情均使用稳定通信身份。
+- **等待和刷新：** 当前等待经可选 `SessionSnapshot.presentation_metadata` 映射到 `snapshot.session.workerWaiting`；显式 null 清除，旧水位不能恢复已清除的等待。公共 canonical 历史只保留白名单展示字段，ACP 在异步快照加载前固定覆盖水位；不改 Core 执行、审批、取消或 Amio adapter。安全间隙来信仅追加展示事实，不创建 Turn；Store 在原生历史到达后替换临时记录并保留附件。普通与旧历史的正文回声匹配排除可信 Worker 输入，防止吞掉同正文用户消息。
+- **验证：** Pie `npm run check`、完整 `worker-communication.test.ts` 7/7 及 diff 检查通过。Cowork 后端展示与共享契约 62/62、设置 `PIE_TEST_REPO=E:/Projects/pie` 的真实 Pie HTTP/SQLite/faux 闭环 1/1，通过；独立审核的 snapshot/resume 定向回归通过。前端组件与投影 205/205、Store 196/196、旧历史合并 82/82，通过；Core/React 类型检查和本次定向 lint 通过。不将重叠测试相加，准确命令与基线问题见 Cowork `specs/pie-worker-integration/plan.md`。
+- **边界与偏差：** 用户已授权前端修改；必要共享接缝仅为展示字段、可选快照载荷与覆盖水位。工作 Session 跳转暂未接入；Router、工作项控制、恢复和端云未计为本阶段完成。未使用真实模型、构建、打包替换、重启或提交，更新后桌面展示与真实模型闭环仍须人工验收。
+
+2026-11-06，等待轮模型正常收尾（源码与自动回归已完成）：
+
+- **实际改动：** `packages/runtime/src/runtime.ts` 只将等待的停止点延后到无工具调用的 assistant 消息完成；`agent.ts` 的 wait 描述要求正常交代后结束，不轮询。原 yieldRequested、模型间隙屏障、Scheduler FIFO 和完整清理边界复用，未修改 Agent API、调度器或存储。`docs/agent-development.md`、`docs/runtime-embedding.md`、Server README 和 Runtime changelog 同步行为。
+- **行为回归：** `worker-communication.test.ts` 先在旧源码 6 通过/4 失败，复现无 final 及无法进入收尾阶段；修复后 10/10。覆盖收尾正文、收尾期间回信新 Turn 单次消费、取消与模型失败，以及 ready、早到回信、原交接窗口、其他 Session 和重启。`worker-agent.test.ts` 8/8，移除模拟旧 Runtime 立即停止的测试钩子；新增测试类型修正后 final 回信专项再次 1/1。
+- **相关验证：** `node --conditions=source --test packages/server/test/worker-communication-store.test.ts packages/server/test/worker-scheduler.test.ts packages/server/test/worker-session.test.ts packages/server/test/agent.test.ts packages/runtime/test/worker-coordination.test.ts`，59/59。最终 `npm run check` 完整通过 Biome、TypeScript 和模型目录校验。Cowork 仅加强 `test_pie_workers.py` 的真实 Pie HTTP/SQLite/faux 跨仓测试，1/1，通过公开 SessionService 与 canonical 投影确认同一 final 进入主正文且不进入过程区；Ruff 通过。无需修改 Cowork、Amio 或前端生产代码。
+- **范围与限制：** 收尾使用原正常模型循环，不增加独立计费流程或强制调用轮数；自然语言交代依赖模型输出。取消/失败不伪装成功 yield；既有失败后迟到消息处理规则不扩展。本轮未运行全量 server 套件、真实模型或客户端人工验收，未构建、部署、重启或提交。
+
+2026-11-07，Local Assistant 与逻辑 Worker 生命周期绑定：
+
+- **实际改动：** `packages/local/src/runtime.ts` 在启动、助手创建和助手更新时幂等同步同 ID Worker；删除助手时删除对应 Worker。`packages/runtime/src/worker-scheduler.ts` 区分 host 与 local Worker 配置集合，避免 Local Worker 被 host 配置门闩误判为已移除；`packages/local/src/store.ts` 增加 Worker 删除持久化。Worker 记录只保存长期身份和配置，不创建空 Session；具体工作仍按 `workId/creationKey` 懒创建或复用 Worker Session。
+- **验证结果：** `npm run check` 通过；`node --conditions=source --test packages/server/test/worker-lifecycle.test.ts packages/server/test/worker-host.test.ts packages/server/test/worker-scheduler.test.ts packages/server/test/worker-store.test.ts`，38/38 通过；`git diff --check` 通过。新增回归覆盖创建即注册、更新保持 `workerId/createdAt`、重启恢复和删除清理。
+- **边界与未完成：** Assistant 与 Worker 的跨表写入仍是顺序操作，不承诺跨步骤原子事务；本轮未构建、部署、调用真实模型或提交。Router 增量提交、重启自动续跑和端云协同仍按原计划未完成。
+
+2026-11-07，Worker 取消、会话删除及停止边界修复（源码与自动回归已完成）：
+
+- **取消持久化：** `worker-communication.ts` 增加按 Turn 固定的收件截止点契约；`store.ts` 与终态/恢复同事务保存，`worker-scheduler.ts` 在接纳和模型间隙读取，原子历史消费再次校验。重复终结不扩大截止点；显式 interrupted → 同 Turn running 续跑保留旧截止点并重新武装下一终态，续跑后取消覆盖其间排队输入。其他 Session 与之后新请求继续执行，截止点保存失败时保持执行门禁。
+- **删除闭环：** `store.ts` 删除 Session 时保留 stopped Assignment，取消等待并终结明确归属的 pending/resolved 投递；failed 保持终态，dispatched/accepted/consumed 保留原事实。`local/src/runtime.ts` 先完成 Runtime 删除和缓存清理，再由 Scheduler 沿稳定消息 ID 向仍存在的来源报告失败，解除其等待。通知保存失败明确返回会话已删除；重复删除只认可持久停止关联并重报，get/submit/rename 仍 404，不复建 Session；已删除来源不再唤醒。
+- **停止竞争：** `coordination.ts` 与 SQLite 插入前核对模型消息来源 Worker/Assignment/WorkItem；新输入原子接纳再次核对目标 active、关联与工作项未停止，冲突回滚历史及投递。paused 允许既有执行回信；明确的暂停准入拒绝恢复 resolved 后退出本次调度，不忙重试或伪造失败。同键发送、已 consumed 同 Turn 重写与系统失败通知保留。
+- **最终验证：** `npm run check` 完整通过 Biome、TypeScript 与模型目录校验，`git diff --check` 通过。`node --conditions=source --test packages/server/test/worker-scheduler.test.ts packages/server/test/worker-communication-store.test.ts packages/server/test/worker-session.test.ts packages/server/test/worker-communication.test.ts packages/runtime/test/worker-coordination.test.ts`，93/93；`store.test.ts`、`session-creation.test.ts` 与 Runtime `runtime.test.ts` 组合 75/75；`worker-source-control.test.ts`、`worker-store.test.ts`、`worker-agent.test.ts`、`worker-host.test.ts`、`worker-lifecycle.test.ts` 组合 34/34。三组共 202 个不同用例通过，无跳过；最终 Local 删除装配调整后，`session-creation.test.ts` 再次 6/6 通过。独立只读审核无阻断。
+- **边界：** 不按启动时最新序号为旧数据库缺少截止点的历史 Turn 盲目回填，以免误伤后来的请求；旧未知输入仍需核对。删除失败通知支持显式重试，不自动重报。本轮不增加自动恢复、完整工作项控制、配置注册事务或端云协议；未跑全量 server 套件、真实模型或桌面复测，未构建、部署或提交。
+
+2026-11-08，同步/异步等待与 Cowork 原 Task 展示复用（源码与自动回归已完成）：
+
+- **等待行为：** `agent.ts/config.ts/protocol.ts/worker-communication.ts` 支持 `wait_message` 的 `mode`、`timeout_ms` 和宿主默认值 `workerWaitMode`。Pie 默认 async；Cowork 普通助手的 Pie adapter 默认 sync。同步等待在当前 Turn 收取 result/question/reply 后让模型继续回答，progress 不结束等待；默认及最大超时为 300000ms，超时保留原请求，迟到消息走正常收件。取消只停止来源等待，不取消对端；拒绝同步等待当前同一 Session，跨 Session 互等由超时收口。
+- **原子消费：** `local/src/store.ts`、`worker-scheduler.ts`、`runtime.ts` 和 `runtime-store.ts` 将未消费回应先独占，再随准确工具结果同事务消费；普通调度排除已独占回应。重复领取、其他请求抢占、完成后错误 receipt、取消截止点、明确删除与中断恢复均有回归。提交冲突保存失败工具结果并结束失败 Turn，不暴露未消费回信，也不继续模型或自动重放。
+- **展示复用：** Cowork `adapters/pie/{runtime_config,worker_tasks,transport,worker_bridge}.py` 将可信发送回执投影到原 Task 卡与执行详情，按消息、实际 Session、接纳 Turn 和因果链隔离内容；展示更新只回填准确既有工具，不准入旧 Turn。前端 `ConversationThread.tsx` 仅抑制已有 Task 投影对应的重复往来卡。未改 Amio adapter、共享 Core contract 或 Worker 平等关系，不建立父子 Session 或伪造执行事件。
+- **Pie 验证：** 最终 `node --conditions=source --test packages/server/test/worker-sync-wait.test.ts packages/server/test/worker-communication.test.ts packages/server/test/worker-agent.test.ts packages/runtime/test/worker-targets.test.ts`，38/38，通过；其中新同步持久层与调度回归 11 项。另已通过 store/scheduler/source-control/session 定向回归。最终 `npm run check` 完整通过 Biome、TypeScript 和模型目录校验，`git diff --check` 通过。
+- **Cowork 验证：** Python 8 文件契约/展示回归为 158 passed、1 skipped；设置 `PIE_TEST_REPO=E:/Projects/pie` 后，真实 Pie HTTP/SQLite/faux 的默认同步与显式异步闭环 2/2，通过。组件 56/56、原 Task ReasoningTimeline 渲染 92/92、React 类型检查、定向 oxlint、Pie adapter Ruff 与文档检查通过。完整命令和证据维护在 Cowork `specs/pie-worker-integration/plan.md`。
+- **限制与偏差：** 为避免混入复用 Session 的其他执行，Task 详情只展示能确认的初始执行段和因果最终结果，不拼接跨追问恢复的所有中间过程。历史缺少普通 user 的逐条 Turn 标签时保守截断；实时当前接纳 Turn 的补充保留。未跑全量 server 套件、真实模型或桌面人工验收，未构建、替换、重启或提交；Router、重启自动续跑和端云仍未完成。
+
+2026-11-08，Worker 模型侧工具收敛为 `communicate`（源码与跨仓回归已完成）：
+
+- **接口：** Worker Session 只注册 `communicate`。发送请求/问题时默认按宿主 `workerWaitMode` 等待；回复、结果和进度默认单向发送；`wait: false` 可显式单向发送；等待模式和超时可覆盖。已有 `message_id` 等待形态仅用于兼容旧测试和历史迁移，不作为新模型提示路径。
+- **执行与兼容：** `packages/runtime/src/agent.ts` 合并模型工具入口，仍调用现有通信 store 的 send/wait；`runtime.ts`、`packages/local/src/store.ts` 保留旧工具名的历史读取校验。普通 Session 的 `task`、Amio Core 和共享 Core 不变。
+- **Cowork adapter：** `adapters/pie/worker_communication.py`、`worker_tasks.py`、`transport.py` 读取 `details.sent` 与 `details.wait`，把一个 `communicate` 调用投影为原 Task 卡；旧 `send_message`/`wait_message` 记录仍可读。
+- **验证：** Pie 合并定向套件 42/42，存储 28/28，调度 33/33，源控制 16/16，`npm run check` 和 `git diff --check` 通过；Cowork adapter 套件 159/159，Ruff 通过；设置 `PIE_TEST_REPO=E:/Projects/pie` 后真实同步/异步及 Task 投影闭环 2/2，扩展合并回归 161/161。未构建、部署、重启或提交，桌面人工和真实模型验收待办。
+
+2026-11-09，communicate 原 Task 展示与同步等待修复（源码与自动回归完成）：
+
+- **复现：** 前端真实组件中，communicate 的 `kind: other` 即使带 subagent 仍显示通用工具；仅改 source.name 也没有 Task 正文。上一轮只验证了子助手快照存在，未覆盖实际渲染条件。
+- **发送与活动状态：** `agent.ts` 保存回执后立即 onUpdate，同步工具继续等待；`runtime.ts/protocol.ts` 仅为 Worker communicate 在 activeTools.partialResult 保留 `{ content: [], details: { sent } }`，支持等待中刷新。工具结束清除活动状态，失败/取消真实工具结果保留 sent；回应事务冲突只保留 sent，移除未交付回应，isError 与错误正文保持。
+- **等待：** `worker-scheduler.ts` 默认不建超时 timer；显式 timeout_ms 仍支持。准确受理 Turn 失败、取消或中断时补记 consumed delivery.error 并通知来源；`local/store.ts` 只允许同 acceptedTurnId 补记 error/updatedAt，不改输入身份。模型间隙接纳的补充请求同样按准确 Turn 观察；未知或已被替换的 Turn 不猜结果。失败判定前再次登记事务优先领取已到回应，之后到达的回应按迟到消息处理；正常 completed 不推断工作完成。
+- **Cowork：** Pie adapter 实时映射 kind task，历史展示副本使用 task 并在 metadata.workerToolName 保留真实工具名；续等按同 Session 的原回执和准确等待 Turn 关联。只在可信 communicate 回执进度增加显示查询，普通 Shell 输出不新增查询。子助手 request/question 恢复普通消息组件，未修改 Amio 或共享 Task 渲染生产逻辑。
+- **已验证：** Pie 工具、执行状态、同步等待、调度、存储、来源控制六文件 105/105，`npm run check` 通过；真实单次 communicate 的回应事务冲突专项 1/1，通过。完整 `worker-communication.test.ts` 15/15，通过，覆盖同步/异步、收尾期间回信和取消竞态；原取消用例的 faux 输出约需 25 秒，测试期限由 20 秒改为 60 秒，未改变产品时限。Cowork 8 文件适配器/共享契约及显式异步进程闭环 170/170，无跳过，包含真实 Pie HTTP/SQLite/faux 的单次同步等待中刷新与最终 Task 恢复；前端三文件 108/108、React typecheck 和定向 oxlint/格式检查通过。
+- **最终取消复核：** 失败决策前的二次登记事务之后同样检查 abort；若事务已领取回信时宿主关闭，仍抛 AbortError、释放 claim，回应保持未消费。回归先红后绿，追加后同步等待文件 22/22，通过。
+- **范围：** 未构建、替换运行中 sidecar、重启、提交或调用真实模型；桌面人工验收待办。更完整的重启恢复、Router、端云和工作项控制不在本轮。
+
+2026-11-11，Worker 分段等待与进展汇报（源码与自动回归已完成，桌面/真实模型验收待办）：
+
+- **问题与目标：** 同步等待默认持续占用工具 Promise，`progress` 只唤醒内部检查，主模型不能及时接纳阶段信息或向用户汇报。让控制权按 30 秒间隔或新输入提前交回，原请求继续执行，进度不冒充结果。
+- **实际改动：** `packages/runtime/src/worker-scheduler.ts` 和 `worker-communication.ts` 支持每段最多 30 秒或新输入提前返回 `wait.status: waiting` 及 `reason: interval/message`；返回前再次登记等待，优先领取已经到达的 question/reply/result，并复查取消。新输入由 `runtime.ts` 既有模型调用间隙机制与历史同事务消费。`agent.ts` 的协作工具和可信 Worker 收件指引要求关键阶段发送 progress，主助手及时汇报并在仍需结果时续等；不将展示心跳写入模型历史。开发说明、嵌入契约、Server README 和 Runtime changelog 已同步。
+- **时限与边界：** `timeout_ms` 仍是用户明确指定的单次等待上限；超过 30 秒先返回 interval，续等以新调用重新计时，不是整项工作的截止时间。分段返回不登记异步让出，不取消请求或对端；取消与迟到输入沿原边界处理。
+- **测试选择：** T1 覆盖 30 秒分段、阶段消息提前返回、重复消息、显式时限、真实回应竞争与取消；T2 使用真实 Runtime/Scheduler/SQLite 和 faux 模型，核对阶段消息进入当前 Turn 的模型上下文且只消费一次、后续结果仍可收取。运行最小相关回归、`npm run check` 与 diff 检查；真实模型沟通表现和桌面验收另列，不调用付费提供商。
+- **验证：** `node --conditions=source --test packages/server/test/worker-sync-wait.test.ts packages/server/test/worker-communication.test.ts packages/server/test/worker-communication-store.test.ts packages/server/test/worker-scheduler.test.ts packages/server/test/worker-source-control.test.ts packages/runtime/test/worker-coordination.test.ts`，136/136 通过，0 失败、0 跳过。`worker-agent.test.ts` 单独 8/8，通过；阶段进展 Runtime 定向场景 2/2，通过，覆盖同 Turn 注入一次及续等 result，不与合并统计重复相加。最终 `npm run check` 完整通过 Biome（478 文件）、TypeScript 与模型目录校验；本轮文档 diff 检查通过。独立审核无阻断。
+- **风险与未完成：** 约 60 秒沟通是模型软规范，真实模型是否及时汇报仍需桌面验收。显式时限只约束单次调用，不是跨续等的总期限。分段续等保留历史同步等待记录，本轮未新增清理策略，长期高频协作的数据容量仍需后续治理。未调用真实模型、构建、替换、部署、重启或提交；整体 Worker 方案其余待办与历史验收状态不变。

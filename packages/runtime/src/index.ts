@@ -74,4 +74,14 @@ export type {
 } from "./tool-execution.ts";
 export type { ExternalTool, ToolContext, ToolRuntime } from "./tools.ts";
 export { recoverInterruptedTurn } from "./turn-recovery.ts";
+export type {
+	WorkerCallContext,
+	WorkerCommunication,
+	WorkerCommunicationStore,
+	WorkerSendInput,
+	WorkerSessionCommunication,
+	WorkerWaitOptions,
+	WorkerWaitRecord,
+	WorkerWaitResult,
+} from "./worker-communication.ts";
 export { WorkerScheduler, type WorkerSchedulerRuntime } from "./worker-scheduler.ts";

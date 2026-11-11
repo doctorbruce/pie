@@ -61,7 +61,17 @@ export type SessionCreationRecord = {
 	createdAt: number;
 };
 
-export type SessionWriteOptions = { creation?: SessionCreationRecord };
+export type SessionWriteOptions = {
+	creation?: SessionCreationRecord;
+	/** Persist the history input and its Worker consumption receipt in the same transaction. */
+	workerInputs?: readonly { deliveryId: string; messageId: string }[];
+	/** Commit a synchronous wait's reserved replies together with its tool result. */
+	workerWait?: {
+		waitId: string;
+		toolCallId: string;
+		responses: readonly { deliveryId: string; messageId: string }[];
+	};
+};
 
 export interface RuntimeStore extends Partial<CoordinationStore>, Partial<WorkerCoordinationStore> {
 	readonly persistence: string;

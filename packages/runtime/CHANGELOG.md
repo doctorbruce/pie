@@ -6,7 +6,14 @@
 
 - Project image history with a configurable `AgentRuntimeConfig.maxHistoryImageBytes` target, defaulting to 16 MiB of encoded image data. Omit older tool images before older user images, preserve the latest real user images and original stored history, and include budgeted images with source markers in vision summaries.
 
+- Collapse Worker model-side sending and waiting into one `communicate` tool; keep `send`/`wait` internals and legacy history parsing compatible.
+
+- Return synchronous Worker waits to the model in at most 30-second slices or when new input is available, preserving the pending request and atomic reply consumption. Explicit `timeout_ms` limits one wait call; continuing the wait starts a new interval. Keep asynchronous yielding and host `workerWaitMode` behavior.
+
+- Guide coordinating assistants to report meaningful progress during long work, and Workers to send causal stage updates; keep tool activity heartbeats out of model history.
+
 - Wait for configured Host Runtime MCP prewarm during runtime registration, reusing the connection readiness promise on the first Turn.
+- Let the model finish its normal user-facing response after registering a Worker wait, then yield the Turn; keep replies received during finalization queued for a new Turn in the same Session.
 - Publish the existing skill index and optional host `capabilityCatalog` as persisted, hidden user context only on first use or change. Append complete replacements, including empty lists, preserve system/history prefixes, and republish after compaction removes the list.
 
 ### Removed
@@ -26,6 +33,14 @@
 - Session subscriptions emit revisioned deltas instead of a complete snapshot on every event; consumers must bootstrap a bounded view and apply increments or reload on gaps. Global subscriptions retain their existing contract.
 
 ### Added
+
+- Bind Local Assistant lifecycle updates to a stable logical Worker identity while keeping Worker Session creation lazy per work item.
+
+- Preserve a safe `metadata.workerCommunication` envelope on incoming Worker messages and display events, so hosts can distinguish peer messages from human input without changing model roles or message bodies.
+
+- Add independent host `workerTargets` with omission-only fallback to legacy subagents, explicit empty-target denial and send-time authorization checks; preserve valid causal replies without reverse proactive permission.
+
+- Add opt-in Worker `send_message` and `wait_message` tools in place of task, with trusted sender identities, authorized targets, causal replies, durable waits and cancellation, structured Turn yields and atomic input/history consumption between model calls.
 
 - Add opt-in logical Workers, durable work/session/message/delivery facts and a deterministic `WorkerScheduler`; queue input per Session while different Sessions execute independently, preserve creation and dispatch identities, and accept a host product-session binding during session creation. Optional `waitForTurn` observers capture one Turn's wait and settlement boundaries independently of asynchronous snapshot reads.
 
@@ -74,6 +89,12 @@
 ### Fixed
 
 - Recover once through compaction from HTTP or streamed 413 payload errors, preserving current user images and ending the Turn if recovery fails again.
+
+- Publish saved `communicate` receipts before waiting so hosts can render an active Task; release synchronous waits on known target execution failure while preserving an already delivered response.
+
+- Persist per-Turn Worker input cancellation cutoffs so queued messages stay cancelled after restart without swallowing later requests; recheck stopped sender identities and work assignments before saving model messages.
+
+- Provide explicit causal response instructions for incoming Worker requests and questions, including the exact sender, message ID and response kind, so models can return results instead of leaving them only in the target Session. Avoid acknowledgement loops for responses and progress messages.
 
 - Cancel local Shell/Task jobs belonging to an explicitly stopped Turn, including descendant background work after a Task returns; wait for their cleanup before Turn settlement and suppress cancellation wakeups. Preserve jobs from normally completed earlier Turns and other sessions.
 

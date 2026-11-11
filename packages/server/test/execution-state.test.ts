@@ -21,6 +21,7 @@ import {
 	type Turn,
 } from "@pie/runtime";
 import { applySessionEvent } from "@pie/runtime/session-events";
+import type { WorkerCommunication } from "@pie/runtime/worker-communication";
 import { createSqliteRuntimeStore, openStore } from "../../local/src/store.ts";
 
 async function until(check: () => boolean) {
@@ -31,13 +32,19 @@ async function until(check: () => boolean) {
 	throw new Error("Timed out waiting for execution state");
 }
 
-async function start(context: TestContext, confirmation = false, sessionRetention?: "release-after-turn") {
+async function start(
+	context: TestContext,
+	confirmation = false,
+	sessionRetention?: "release-after-turn",
+	workers?: WorkerCommunication,
+) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-execution-state-"));
 	const environment = { PI_DATA_DIR: directory };
 	const store = createSqliteRuntimeStore(openStore(environment));
 	const stream = createAssistantMessageEventStream();
 	const message = fauxAssistantMessage([], { stopReason: "pending" });
 	const gates = new Map<string, () => void>();
+	const progress = new Map<string, () => void>();
 	let modelFinished = false;
 	let requests = 0;
 	let pathReads = 0;
@@ -67,7 +74,16 @@ async function start(context: TestContext, confirmation = false, sessionRetentio
 					label: "Controlled tool",
 					description: "A controlled execution for state tests",
 					parameters: Type.Object({}),
-					async execute(toolCallId, _input, signal) {
+					async execute(toolCallId, _input, signal, onUpdate) {
+						progress.set(toolCallId, () =>
+							onUpdate?.({
+								content: [
+									{ type: "text", text: "large shell output".repeat(1000) },
+									{ type: "image", data: "large image".repeat(1000), mimeType: "image/png" },
+								],
+								details: { sent: { unrelated: "not a Worker receipt" } },
+							}),
+						);
 						if (confirmation)
 							await toolContext.ask({ type: "confirmation", title: "Approve", message: "Continue?" }, signal);
 						await new Promise<void>((resolve) => gates.set(toolCallId, resolve));
@@ -90,6 +106,7 @@ async function start(context: TestContext, confirmation = false, sessionRetentio
 	const runtime = await createRuntime({
 		store,
 		sessionRetention,
+		workers,
 		agents: {
 			...factory,
 			create(...args: Parameters<typeof factory.create>) {
@@ -117,7 +134,18 @@ async function start(context: TestContext, confirmation = false, sessionRetentio
 		await runtime.close();
 		await rm(directory, { recursive: true, force: true });
 	});
-	const session = await runtime.createSession({ assistantId: "assistant" });
+	if (workers)
+		await store.registerWorker({
+			workerId: "assistant",
+			assistantId: "assistant",
+			status: "active",
+			createdAt: 1,
+			updatedAt: 1,
+		});
+	const session = await runtime.createSession({
+		assistantId: "assistant",
+		...(workers ? { workerId: "assistant" } : {}),
+	});
 	const events: SessionEvent[] = [];
 	const global: GlobalSessionEvent[] = [];
 	await runtime.subscribe(session.id, (packet) => events.push(packet));
@@ -134,6 +162,7 @@ async function start(context: TestContext, confirmation = false, sessionRetentio
 		events,
 		global,
 		gates,
+		progress,
 		finishModel,
 		get pathReads() {
 			return pathReads;
@@ -144,16 +173,133 @@ async function start(context: TestContext, confirmation = false, sessionRetentio
 		get requests() {
 			return requests;
 		},
-		call(id: string) {
-			const toolCall = fauxToolCall("controlled", {}, { id });
+		call(id: string, name = "controlled", input: Record<string, unknown> = {}) {
+			const toolCall = fauxToolCall(name, input, { id });
 			const contentIndex = message.content.length;
 			message.content.push(toolCall);
 			stream.push({ type: "toolcall_start", contentIndex, partial: structuredClone(message) });
-			stream.push({ type: "toolcall_delta", contentIndex, delta: "{}", partial: structuredClone(message) });
+			stream.push({
+				type: "toolcall_delta",
+				contentIndex,
+				delta: JSON.stringify(input),
+				partial: structuredClone(message),
+			});
 			stream.push({ type: "toolcall_end", contentIndex, toolCall, partial: structuredClone(message) });
 		},
 	};
 }
+
+for (const outcome of ["ready", "failed", "cancelled"] as const)
+	test(`active Worker communicate receipts survive refresh and ${outcome} settlement`, async (context) => {
+		let release = () => {};
+		let waiting = false;
+		const sent = {
+			message: {
+				messageId: "message",
+				deliveryId: "delivery",
+				workerId: "peer",
+				sourceWorkerId: "assistant",
+				kind: "request" as const,
+				content: "review",
+				sequence: 1,
+				status: "queued" as const,
+				createdAt: 1,
+			},
+			delivery: {
+				deliveryId: "delivery",
+				messageId: "message",
+				workerId: "peer",
+				status: "pending" as const,
+				createdAt: 1,
+				updatedAt: 1,
+			},
+		};
+		context.after(() => release());
+		const host = await start(context, false, undefined, {
+			async send() {
+				return sent;
+			},
+			async wait(source, messageId, signal) {
+				waiting = true;
+				let onAbort = () => {};
+				try {
+					await new Promise<void>((resolve, reject) => {
+						release = () => (outcome === "failed" ? reject(new Error("Peer failed")) : resolve());
+						onAbort = () => reject(signal?.reason);
+						signal?.addEventListener("abort", onAbort, { once: true });
+					});
+				} finally {
+					signal?.removeEventListener("abort", onAbort);
+				}
+				return {
+					wait: {
+						...source,
+						waitId: "wait",
+						messageId,
+						mode: "sync",
+						status: "ready",
+						createdAt: 1,
+						updatedAt: 1,
+					},
+					messages: [],
+				};
+			},
+			async cancel() {},
+			async inputs() {
+				return [];
+			},
+		});
+		host.call("communicate-call", "communicate", { to: "peer", content: "review", wait: { mode: "sync" } });
+		host.finishModel();
+		await until(() => waiting || host.events.some((packet) => packet.event?.type === "tool_execution_end"));
+		assert.equal(waiting, true);
+		await until(() => host.events.some((packet) => packet.event?.type === "tool_execution_update"));
+		const active = [
+			{
+				toolCallId: "communicate-call",
+				toolName: "communicate",
+				partialResult: { content: [], details: { sent } },
+			},
+		];
+		const snapshot = await host.runtime.getSession(host.session.id, { limit: 50 });
+		assert.deepEqual(snapshot.execution.activeTools, active);
+		assert.equal(
+			snapshot.messages.some((message) => message.role === "toolResult"),
+			false,
+		);
+		const frames: ExecutionStreamEvent[] = [];
+		const unsubscribe = await host.runtime.subscribeExecutions([host.session.id], (packet) => frames.push(packet));
+		context.after(unsubscribe);
+		assert.deepEqual(frames[0].type === "execution.baseline" && frames[0].sessions[0].execution.activeTools, active);
+		assert.equal("execution" in (await host.store.readSession(host.session.id))!, false);
+		if (outcome === "cancelled") await host.runtime.cancelTurn(host.session.id, { turnId: host.accepted.turnId });
+		else release();
+		await host.runtime.waitForTurn(host.session.id);
+		const ended = host.events.find((packet) => packet.event?.type === "tool_execution_end");
+		assert.deepEqual(ended?.execution?.activeTools, []);
+		const settled = await host.runtime.getSession(host.session.id, { limit: 50 });
+		assert.deepEqual(settled.execution.activeTools, []);
+		const result = settled.messages.find((message) => message.role === "toolResult");
+		assert(result?.role === "toolResult");
+		assert.equal(result.isError, outcome !== "ready");
+		assert.deepEqual(result.details && Reflect.get(result.details, "sent"), sent);
+		if (outcome === "failed") assert.deepEqual(result.content, [{ type: "text", text: "Peer failed" }]);
+		if (outcome === "cancelled") assert.equal(settled.turn?.status, "cancelled");
+	});
+
+test("generic tool progress is excluded from lightweight active execution snapshots", async (context) => {
+	const host = await start(context);
+	host.call("controlled-call");
+	await until(() => host.progress.has("controlled-call"));
+	host.progress.get("controlled-call")!();
+	await until(() => host.events.some((packet) => packet.event?.type === "tool_execution_update"));
+	assert.deepEqual((await host.runtime.getSession(host.session.id, { limit: 50 })).execution.activeTools, [
+		{ toolCallId: "controlled-call", toolName: "controlled" },
+	]);
+	host.gates.get("controlled-call")!();
+	host.finishModel();
+	await host.runtime.waitForTurn(host.session.id);
+});
 
 test(
 	"execution snapshots and deltas retain overlapping model/tools and parallel tool identity",

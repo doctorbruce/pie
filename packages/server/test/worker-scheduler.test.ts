@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createSqliteRuntimeStore, openStore } from "@pie/local/store";
 import { type CreateSessionInput, RuntimeError, type TurnInput } from "@pie/runtime";
+import { CoordinationError, WorkerCoordinationService } from "@pie/runtime/coordination";
 import type { Turn, TurnReceipt } from "@pie/runtime/protocol";
+import type { WorkerCallContext } from "@pie/runtime/worker-communication";
 import { WorkerScheduler } from "@pie/runtime/worker-scheduler";
 
 function deferred() {
@@ -60,12 +62,19 @@ function controlledRuntime() {
 		get maxActive() {
 			return maxActive;
 		},
-		settle(sessionId: string, status: "completed" | "cancelled" = "completed") {
+		settle(sessionId: string, status: "completed" | "cancelled" | "failed" | "interrupted" = "completed") {
 			const current = turns.get(sessionId);
 			assert(current && current.turn.status === "running");
 			current.turn.status = status;
 			active--;
 			current.done.resolve();
+		},
+		resume(sessionId: string) {
+			const current = turns.get(sessionId);
+			assert(current?.turn.status === "interrupted");
+			current.turn.status = "running";
+			current.done = deferred();
+			active++;
 		},
 	};
 }
@@ -169,6 +178,198 @@ test("one assistant runs independent work Sessions while supplements serialize a
 	});
 	assert.equal(duplicate.delivery.status, "consumed");
 	assert.equal(runtime.submissions.length, 3, "idempotent retry must not execute a second Turn");
+});
+
+for (const outcome of ["cancelled", "failed", "interrupted"] as const) {
+	test(`a ${outcome} Turn's queued messages stay cancelled after restart without blocking new input or other Sessions`, async (t) => {
+		const directory = await mkdtemp(join(tmpdir(), "pie-worker-durable-cutoff-"));
+		let storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+		const runtime = controlledRuntime();
+		let scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+		t.after(async () => {
+			scheduler.stop();
+			await storage.close();
+			await rm(directory, { recursive: true, force: true });
+		});
+		await scheduler.syncHostRuntimes([
+			{
+				assistantId: "worker",
+				assistantRevision: "1",
+				runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+			},
+		]);
+		await scheduler.enqueueWorkerMessage({ workerId: "worker", sourceWorkerId: "worker", content: "first" });
+		await scheduler.enqueueWorkerMessage({ workerId: "worker", sourceWorkerId: "worker", content: "second" });
+		await until(() => runtime.submissions.length === 2);
+		const [a, b] = runtime.submissions.map((submission) => submission.sessionId);
+		assert(a && b);
+		const oldInput = {
+			messageId: "old-a",
+			workerId: "worker",
+			sourceWorkerId: "worker",
+			targetSessionId: a,
+			content: "queued before settlement",
+		};
+		const queued = await scheduler.enqueueWorkerMessage(oldInput);
+		const gap = await scheduler.enqueueWorkerMessage({ ...oldInput, messageId: "old-model-gap" });
+		const otherInput = { ...oldInput, messageId: "old-b", targetSessionId: b };
+		const other = await scheduler.enqueueWorkerMessage(otherInput);
+		scheduler.stop();
+		runtime.settle(a, outcome);
+		runtime.settle(b);
+		await scheduler.drain();
+		assert.equal((await storage.readWorkerDelivery(queued.delivery.deliveryId))?.status, "resolved");
+		assert.equal(await storage.readWorkerTurnCutoff(a), other.message.sequence);
+		await storage.close();
+		storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+		scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+		await scheduler.enqueueWorkerMessage(oldInput);
+		assert.equal((await scheduler.waitWorkerDelivery(queued.delivery.deliveryId)).status, "failed");
+		assert.deepEqual(await scheduler.inputs(a), []);
+		assert.equal((await storage.readWorkerDelivery(gap.delivery.deliveryId))?.status, "failed");
+		assert.equal(runtime.submissions.length, 2);
+		await scheduler.enqueueWorkerMessage(otherInput);
+		const next = await scheduler.enqueueWorkerMessage({ ...oldInput, messageId: "new-a", content: "new request" });
+		await until(() => runtime.submissions.length === 4);
+		assert.equal(
+			await storage.recordWorkerTurnCutoff(a, "turn-1", "worker", next.message.sequence),
+			other.message.sequence,
+		);
+		runtime.settle(a);
+		runtime.settle(b);
+		assert.equal((await scheduler.waitWorkerDelivery(next.delivery.deliveryId)).status, "consumed");
+		assert.equal((await scheduler.waitWorkerDelivery(other.delivery.deliveryId)).status, "consumed");
+	});
+}
+
+test("a failed cancellation cutoff write prevents queued dispatch and model-gap admission", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-cutoff-write-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({
+		runtime: runtime.host,
+		store: {
+			...storage,
+			async recordWorkerTurnCutoff() {
+				throw new Error("cutoff storage failure");
+			},
+		},
+	});
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes([
+		{
+			assistantId: "worker",
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		},
+	]);
+	const first = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		content: "first",
+	});
+	await until(() => runtime.submissions.length === 1);
+	const sessionId = runtime.submissions[0]!.sessionId;
+	const queued = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		targetSessionId: sessionId,
+		content: "queued",
+	});
+	runtime.settle(sessionId, "cancelled");
+	await scheduler.waitWorkerDelivery(first.delivery.deliveryId);
+	const rejected = await scheduler.waitWorkerDelivery(queued.delivery.deliveryId);
+	assert.equal(rejected.status, "failed");
+	assert.match(rejected.error ?? "", /cutoff storage failure/);
+	await assert.rejects(scheduler.inputs(sessionId), /cutoff storage failure/);
+	assert.equal(runtime.submissions.length, 1);
+});
+
+test("cancelling a resumed interrupted Turn advances its cutoff once for the same Turn identity", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-resumed-cutoff-"));
+	const local = openStore({ PI_DATA_DIR: directory });
+	const storage = createSqliteRuntimeStore(local);
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes([
+		{
+			assistantId: "worker",
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Work", toolIds: [], skills: [], subagents: [] },
+		},
+	]);
+	const first = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		content: "first",
+	});
+	await until(() => runtime.submissions.length === 1);
+	const sessionId = runtime.submissions[0]!.sessionId;
+	const session = {
+		id: sessionId,
+		assistantId: "worker",
+		workerId: "worker",
+		kind: "root" as const,
+		runtimeSource: "host" as const,
+		title: "Work",
+		mode: "faux" as const,
+		model: "faux",
+		createdAt: 1,
+		updatedAt: 1,
+		revision: 0,
+		messages: [],
+	};
+	local.saveSession({ ...session, turn: { id: "turn-1", status: "running" } });
+	const before = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		targetSessionId: sessionId,
+		content: "before interruption",
+	});
+	runtime.settle(sessionId, "interrupted");
+	await scheduler.waitWorkerDelivery(first.delivery.deliveryId);
+	assert.equal((await scheduler.waitWorkerDelivery(before.delivery.deliveryId)).status, "failed");
+	local.saveSession({ ...session, turn: { id: "turn-1", status: "interrupted" } });
+	local.saveSession({ ...session, turn: { id: "turn-1", status: "running" } });
+	runtime.resume(sessionId);
+	const resumed = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		targetSessionId: sessionId,
+		content: "during resumed execution",
+	});
+	assert.equal(
+		await storage.readWorkerTurnCutoff(sessionId),
+		before.message.sequence,
+		"resume retains the earlier cutoff",
+	);
+	// Let admission observe the resumed running Turn before it settles again.
+	await new Promise((resolve) => setTimeout(resolve, 10));
+	runtime.settle(sessionId, "cancelled");
+	assert.equal((await scheduler.waitWorkerDelivery(resumed.delivery.deliveryId)).status, "failed");
+	assert.equal(await storage.readWorkerTurnCutoff(sessionId), resumed.message.sequence);
+	assert.equal(runtime.submissions.length, 1);
+	local.saveSession({ ...session, turn: { id: "turn-1", status: "cancelled" } });
+	const next = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		targetSessionId: sessionId,
+		content: "new request",
+	});
+	local.saveSession({ ...session, turn: { id: "turn-1", status: "cancelled" } });
+	await until(() => runtime.submissions.length === 2);
+	assert.equal(await storage.readWorkerTurnCutoff(sessionId), resumed.message.sequence);
+	runtime.settle(sessionId);
+	assert.equal((await scheduler.waitWorkerDelivery(next.delivery.deliveryId)).status, "consumed");
 });
 
 test("receipts persist before a blocked Session creation and concurrent messages share one work Session in order", async (t) => {
@@ -278,12 +479,17 @@ test("failed dispatch persistence never starts a model and restart never replays
 	assert.equal(failed.status, "failed");
 	assert.match(failed.error ?? "", /storage failure/);
 	assert.equal(runtime.submissions.length, 0);
-	await storage.updateWorkerDelivery(failed.deliveryId, { status: "accepted", acceptedTurnId: "known-turn" });
+	const acceptedInput = { ...input, messageId: "accepted-once", workId: received.message.workId };
+	const accepted = await new WorkerCoordinationService(storage).enqueueMessage(acceptedInput);
+	await storage.updateWorkerDelivery(accepted.delivery.deliveryId, {
+		status: "accepted",
+		acceptedTurnId: "known-turn",
+	});
 	await storage.close();
 	local = openStore({ PI_DATA_DIR: directory });
 	storage = createSqliteRuntimeStore(local);
 	const restarted = new WorkerScheduler({ store: storage, runtime: runtime.host });
-	const duplicate = await restarted.enqueueWorkerMessage(input);
+	const duplicate = await restarted.enqueueWorkerMessage(acceptedInput);
 	assert.equal(duplicate.delivery.status, "accepted");
 	assert.equal(duplicate.delivery.acceptedTurnId, "known-turn");
 	await restarted.drain();
@@ -744,3 +950,656 @@ for (const error of [
 		assert.equal(attempts, 1);
 	});
 }
+
+test("Worker communication derives its source, isolates target configuration and permits causal replies", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-communication-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({ store: storage, runtime: runtime.host });
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes(
+		["contract", "search"].map((assistantId) => ({
+			assistantId,
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		})),
+	);
+	const initial = await scheduler.enqueueWorkerMessage({
+		workerId: "contract",
+		sourceWorkerId: "contract",
+		content: "review contract",
+		workspacePath: "/private/contracts",
+		model: { provider: "host", id: "private-model" },
+		productBinding: "private-product-session",
+	});
+	await until(() => runtime.submissions.length === 1);
+	const sourceSessionId = runtime.submissions[0]!.sessionId;
+	const context: WorkerCallContext = {
+		workerId: "contract",
+		sessionId: sourceSessionId,
+		turnId: "turn-1",
+		toolCallId: "send-laws",
+		targets: [{ assistantId: "search", name: "Search", description: "Research laws" }],
+		mode: "faux",
+	};
+	await assert.rejects(scheduler.send({ ...context, workerId: "search" }, { to: "search", content: "forged" }), {
+		status: 403,
+	});
+	await assert.rejects(scheduler.send(context, { to: "contract", content: "unauthorized" }), { status: 403 });
+	const sent = await scheduler.send(context, { to: "search", content: "find laws" });
+	const duplicate = await scheduler.send(context, { to: "search", content: "find laws" });
+	assert.equal(duplicate.message.messageId, sent.message.messageId);
+	await assert.rejects(scheduler.send(context, { to: "search", content: "changed request" }), { status: 409 });
+	await until(() => runtime.submissions.length === 2);
+	const targetSessionId = runtime.submissions[1]!.sessionId;
+	assert.equal(sent.message.workId, initial.message.workId);
+	assert.equal(sent.message.sourceSessionId, sourceSessionId);
+	assert.equal(sent.message.sourceTurnId, "turn-1");
+	assert.equal(runtime.creations[1]?.input.workerId, "search");
+	assert.equal(runtime.creations[1]?.input.workspacePath, undefined);
+	assert.equal(runtime.creations[1]?.input.model, undefined);
+	assert.equal(runtime.creations[1]?.input.astronSessionId, undefined);
+	assert.equal(runtime.submissions[1]?.input.text, "find laws");
+	assert.equal(runtime.submissions[1]?.input.workerDeliveryId, sent.delivery.deliveryId);
+	assert.equal(
+		runtime.submissions[1]?.input.systemPrompt,
+		undefined,
+		"Runtime persists transport metadata in history",
+	);
+	const waitingContext = { ...context, toolCallId: "wait-laws" };
+	const waiting = await scheduler.wait(waitingContext, sent.message.messageId);
+	assert.equal(waiting.wait.status, "waiting", "waiting must return while the target still executes");
+	assert.deepEqual(waiting.messages, []);
+	const replyContext: WorkerCallContext = {
+		workerId: "search",
+		sessionId: targetSessionId,
+		turnId: "turn-2",
+		toolCallId: "reply-laws",
+		targets: [],
+		mode: "faux",
+	};
+	await assert.rejects(
+		scheduler.send(replyContext, {
+			to: "contract",
+			content: "wrong session",
+			kind: "reply",
+			reply_to: sent.message.messageId,
+			session_id: targetSessionId,
+		}),
+		{ status: 403 },
+	);
+	const reply = await scheduler.send(replyContext, {
+		to: "contract",
+		content: "laws found",
+		kind: "reply",
+		reply_to: sent.message.messageId,
+	});
+	await assert.rejects(scheduler.wait(replyContext, sent.message.messageId), { status: 403 });
+	assert.equal((await scheduler.wait(waitingContext, sent.message.messageId)).wait.status, "waiting");
+	assert.deepEqual(
+		(await scheduler.inputs(sourceSessionId)).map((input) => input.message.messageId),
+		[reply.message.messageId],
+	);
+	runtime.settle(sourceSessionId);
+	await until(() => runtime.submissions.length === 3);
+	assert.equal(runtime.submissions[2]?.sessionId, sourceSessionId);
+	assert.equal(runtime.submissions[2]?.input.text, "laws found");
+	runtime.settle(sourceSessionId);
+	runtime.settle(targetSessionId);
+	await Promise.all([initial, sent, reply].map((result) => scheduler.waitWorkerDelivery(result.delivery.deliveryId)));
+	const ready = await scheduler.wait(
+		{ ...context, turnId: "turn-3", toolCallId: "wait-after-arrival" },
+		sent.message.messageId,
+	);
+	assert.equal(ready.wait.status, "ready");
+	assert.deepEqual(
+		ready.messages.map((message) => message.messageId),
+		[reply.message.messageId],
+	);
+	assert.deepEqual(await scheduler.inputs(sourceSessionId), []);
+});
+
+for (const failure of ["creation", "configuration", "admission"] as const) {
+	test(`a confirmed target ${failure} failure replies to a waiting source without retrying execution`, async (t) => {
+		const directory = await mkdtemp(join(tmpdir(), "pie-worker-failure-reply-"));
+		const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+		const runtime = controlledRuntime();
+		const blocked = deferred();
+		const release = deferred();
+		let targetSessionId: string | undefined;
+		let targetAdmissions = 0;
+		const scheduler = new WorkerScheduler({
+			store: storage,
+			runtime: {
+				...runtime.host,
+				async createSession(input) {
+					if (input.assistantId === "search" && failure === "creation") {
+						blocked.resolve();
+						await release.promise;
+						throw new Error("target Session creation failed");
+					}
+					const created = await runtime.host.createSession(input);
+					if (input.assistantId === "search") targetSessionId = created.id;
+					return created;
+				},
+				async waitForTurn(sessionId, options) {
+					if (sessionId === targetSessionId) {
+						blocked.resolve();
+						await release.promise;
+					}
+					return runtime.host.waitForTurn(sessionId, options);
+				},
+				async submitTurn(sessionId, input) {
+					if (sessionId === targetSessionId) {
+						targetAdmissions++;
+						if (failure === "admission") throw new CoordinationError(409, "target input invalidated");
+					}
+					return runtime.host.submitTurn(sessionId, input);
+				},
+			},
+		});
+		t.after(async () => {
+			scheduler.stop();
+			await storage.close();
+			await rm(directory, { recursive: true, force: true });
+		});
+		const definitions = ["contract", "search"].map((assistantId) => ({
+			assistantId,
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		}));
+		await scheduler.syncHostRuntimes(definitions);
+		const initial = await scheduler.enqueueWorkerMessage({
+			workerId: "contract",
+			sourceWorkerId: "contract",
+			content: "start",
+		});
+		await until(() => runtime.submissions.length === 1);
+		const sourceSessionId = runtime.submissions[0]!.sessionId;
+		const context: WorkerCallContext = {
+			workerId: "contract",
+			sessionId: sourceSessionId,
+			turnId: "turn-1",
+			toolCallId: "send",
+			targets: [{ assistantId: "search", name: "Search", description: "Research" }],
+			mode: "faux",
+		};
+		const sent = await scheduler.send(context, { to: "search", content: "find laws" });
+		await blocked.promise;
+		const waitingContext = { ...context, toolCallId: "wait" };
+		assert.equal((await scheduler.wait(waitingContext, sent.message.messageId)).wait.status, "waiting");
+		runtime.settle(sourceSessionId);
+		await scheduler.waitWorkerDelivery(initial.delivery.deliveryId);
+		if (failure === "configuration") await scheduler.syncHostRuntimes(definitions.slice(0, 1));
+		release.resolve();
+		assert.equal((await scheduler.waitWorkerDelivery(sent.delivery.deliveryId)).status, "failed");
+		await until(() => runtime.submissions.length === 2);
+		assert.equal(runtime.submissions[1]?.sessionId, sourceSessionId);
+		assert.match(runtime.submissions[1]?.input.text ?? "", /Worker 消息未执行/);
+		assert.equal(targetAdmissions, failure === "admission" ? 1 : 0);
+		runtime.settle(sourceSessionId);
+		await scheduler.drain();
+		const ready = await scheduler.wait(waitingContext, sent.message.messageId);
+		assert.equal(ready.wait.status, "ready");
+		assert.equal(ready.messages.length, 1);
+		assert.equal(ready.messages[0]?.replyTo, sent.message.messageId);
+		assert.equal(ready.messages[0]?.sourceSessionId, targetSessionId);
+		assert.equal(ready.messages[0]?.kind, "result");
+		assert.equal((await scheduler.send(context, { to: "search", content: "find laws" })).delivery.status, "failed");
+		await scheduler.drain();
+		assert.equal(runtime.submissions.length, 2, "failed request and receipt retries must not create more Turns");
+	});
+}
+
+test("a reply to a durably cancelled request cannot wake its source Session", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-reply-cancel-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes(
+		["contract", "search"].map((assistantId) => ({
+			assistantId,
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		})),
+	);
+	const initial = await scheduler.enqueueWorkerMessage({
+		workerId: "contract",
+		sourceWorkerId: "contract",
+		content: "start",
+	});
+	await until(() => runtime.submissions.length === 1);
+	const sourceSessionId = runtime.submissions[0]!.sessionId;
+	const context: WorkerCallContext = {
+		workerId: "contract",
+		sessionId: sourceSessionId,
+		turnId: "turn-1",
+		toolCallId: "request",
+		targets: [{ assistantId: "search", name: "Search", description: "Find laws" }],
+		mode: "faux",
+	};
+	const sent = await scheduler.send(context, { to: "search", content: "request" });
+	await until(() => runtime.submissions.length === 2);
+	const targetSessionId = runtime.submissions[1]!.sessionId;
+	await scheduler.cancel(sourceSessionId, "turn-1");
+	assert.equal(await storage.isWorkerTurnCancelled(sourceSessionId, "turn-1"), true);
+	await assert.rejects(scheduler.wait({ ...context, toolCallId: "cancelled-wait" }, sent.message.messageId), {
+		status: 409,
+	});
+	await assert.rejects(scheduler.send({ ...context, toolCallId: "late-send" }, { to: "search", content: "late" }), {
+		status: 409,
+	});
+	const reply = await scheduler.send(
+		{
+			workerId: "search",
+			sessionId: targetSessionId,
+			turnId: "turn-2",
+			toolCallId: "late-reply",
+			targets: [],
+			mode: "faux",
+		},
+		{ to: "contract", content: "late result", kind: "result", reply_to: sent.message.messageId },
+	);
+	runtime.settle(sourceSessionId);
+	const failed = await scheduler.waitWorkerDelivery(reply.delivery.deliveryId);
+	assert.equal(failed.status, "failed");
+	assert.match(failed.error ?? "", /取消/);
+	assert.equal(runtime.submissions.length, 2);
+	runtime.settle(targetSessionId);
+	await Promise.all([initial, sent].map((result) => scheduler.waitWorkerDelivery(result.delivery.deliveryId)));
+});
+
+test("cancelling a later waiting Turn revokes the original message and its queued replies", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-cross-turn-cancel-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes(
+		["contract", "search"].map((assistantId) => ({
+			assistantId,
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		})),
+	);
+	const initial = await scheduler.enqueueWorkerMessage({
+		workerId: "contract",
+		sourceWorkerId: "contract",
+		content: "start",
+	});
+	await until(() => runtime.submissions.length === 1);
+	const sourceSessionId = runtime.submissions[0]!.sessionId;
+	const context: WorkerCallContext = {
+		workerId: "contract",
+		sessionId: sourceSessionId,
+		turnId: "turn-1",
+		toolCallId: "request",
+		targets: [{ assistantId: "search", name: "Search", description: "Find laws" }],
+		mode: "faux",
+	};
+	const sent = await scheduler.send(context, { to: "search", content: "request" });
+	await until(() => runtime.submissions.length === 2);
+	const targetSessionId = runtime.submissions[1]!.sessionId;
+	runtime.settle(sourceSessionId);
+	await scheduler.waitWorkerDelivery(initial.delivery.deliveryId);
+	await runtime.host.submitTurn(sourceSessionId, { text: "wait in a later Turn" });
+	const waitingContext = { ...context, turnId: "turn-3", toolCallId: "later-wait" };
+	assert.equal((await scheduler.wait(waitingContext, sent.message.messageId)).wait.status, "waiting");
+	const reply = await scheduler.send(
+		{
+			workerId: "search",
+			sessionId: targetSessionId,
+			turnId: "turn-2",
+			toolCallId: "queued-reply",
+			targets: [],
+			mode: "faux",
+		},
+		{ to: "contract", content: "late result", kind: "result", reply_to: sent.message.messageId },
+	);
+	await scheduler.cancel(sourceSessionId, "turn-3");
+	assert.equal(await storage.isWorkerTurnCancelled(sourceSessionId, "turn-1"), false);
+	assert.equal(await storage.isWorkerMessageCancelled(sent.message.messageId), true);
+	await assert.rejects(scheduler.send(context, { to: "search", content: "request" }), { status: 409 });
+	await assert.rejects(
+		scheduler.wait({ ...context, turnId: "turn-4", toolCallId: "retry-wait" }, sent.message.messageId),
+		{ status: 409 },
+	);
+	assert.deepEqual(await scheduler.inputs(sourceSessionId), []);
+	assert.equal((await scheduler.getWorkerDelivery(reply.delivery.deliveryId)).status, "failed");
+	runtime.settle(sourceSessionId);
+	const failed = await scheduler.waitWorkerDelivery(reply.delivery.deliveryId);
+	assert.equal(failed.status, "failed");
+	assert.match(failed.error ?? "", /取消/);
+	assert.equal(runtime.submissions.length, 3, "a reply cannot start another Turn after its wait was cancelled");
+	runtime.settle(targetSessionId);
+	await scheduler.waitWorkerDelivery(sent.delivery.deliveryId);
+});
+
+test("a transactional input conflict fails delivery without retrying rejected execution", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-input-conflict-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	let attempts = 0;
+	const scheduler = new WorkerScheduler({
+		store: storage,
+		runtime: {
+			...runtime.host,
+			async submitTurn() {
+				attempts++;
+				throw new CoordinationError(409, "Worker 回复关联的请求已取消");
+			},
+		},
+	});
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes([
+		{
+			assistantId: "worker",
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		},
+	]);
+	const input = { messageId: "cancelled-at-commit", workerId: "worker", sourceWorkerId: "worker", content: "work" };
+	const received = await scheduler.enqueueWorkerMessage(input);
+	const failed = await scheduler.waitWorkerDelivery(received.delivery.deliveryId);
+	assert.equal(failed.status, "failed");
+	assert.match(failed.error ?? "", /取消/);
+	assert.equal((await scheduler.enqueueWorkerMessage(input)).delivery.status, "failed");
+	assert.equal(attempts, 1);
+	assert.equal(runtime.submissions.length, 0);
+});
+
+test("Runtime consumption while a delivery waits prevents another Turn and is never downgraded", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-consumed-input-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({
+		store: storage,
+		runtime: {
+			...runtime.host,
+			async submitTurn(sessionId, input) {
+				const receipt = await runtime.host.submitTurn(sessionId, input);
+				assert(input.workerDeliveryId);
+				await storage.updateWorkerDelivery(input.workerDeliveryId, {
+					status: "consumed",
+					acceptedTurnId: receipt.turnId,
+					consumedAt: Date.now(),
+				});
+				return receipt;
+			},
+		},
+	});
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes([
+		{
+			assistantId: "worker",
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		},
+	]);
+	const first = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		content: "first",
+	});
+	await until(() => runtime.submissions.length === 1);
+	const sessionId = runtime.submissions[0]!.sessionId;
+	assert.equal((await scheduler.getWorkerDelivery(first.delivery.deliveryId)).status, "consumed");
+	const supplement = await scheduler.enqueueWorkerMessage({
+		workerId: "worker",
+		sourceWorkerId: "worker",
+		targetSessionId: sessionId,
+		content: "consume at model gap",
+	});
+	await storage.updateWorkerDelivery(supplement.delivery.deliveryId, {
+		status: "consumed",
+		acceptedTurnId: "turn-1",
+		consumedAt: Date.now(),
+	});
+	runtime.settle(sessionId);
+	await scheduler.waitWorkerDelivery(first.delivery.deliveryId);
+	assert.equal((await scheduler.waitWorkerDelivery(supplement.delivery.deliveryId)).status, "consumed");
+	assert.equal(runtime.submissions.length, 1);
+});
+
+for (const stop of ["paused", "worker", "assignment", "work", "configuration"] as const) {
+	test(`model-gap input respects ${stop} control`, async (t) => {
+		const directory = await mkdtemp(join(tmpdir(), "pie-worker-input-stop-"));
+		const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+		const runtime = controlledRuntime();
+		let stopped = false;
+		const scheduler = new WorkerScheduler({
+			runtime: runtime.host,
+			store: {
+				...storage,
+				async findAssignmentBySession(sessionId) {
+					const assignment = await storage.findAssignmentBySession(sessionId);
+					return assignment && stopped && stop === "assignment"
+						? { ...assignment, stopRequested: true }
+						: assignment;
+				},
+				async readWorkItem(workId) {
+					const work = await storage.readWorkItem(workId);
+					return work && stopped && stop === "work" ? { ...work, status: "stopped" } : work;
+				},
+			},
+		});
+		t.after(async () => {
+			scheduler.stop();
+			await storage.close();
+			await rm(directory, { recursive: true, force: true });
+		});
+		await scheduler.syncHostRuntimes([
+			{
+				assistantId: "worker",
+				assistantRevision: "1",
+				runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+			},
+		]);
+		const first = await scheduler.enqueueWorkerMessage({
+			workerId: "worker",
+			sourceWorkerId: "worker",
+			content: "running work",
+		});
+		await until(() => runtime.submissions.length === 1);
+		const sessionId = runtime.submissions[0]!.sessionId;
+		const supplement = await scheduler.enqueueWorkerMessage({
+			workerId: "worker",
+			sourceWorkerId: "worker",
+			targetSessionId: sessionId,
+			content: "queued input",
+		});
+		stopped = true;
+		if (stop === "paused" || stop === "worker") {
+			const worker = await storage.readWorker("worker");
+			assert(worker);
+			await storage.registerWorker({ ...worker, status: stop === "paused" ? "paused" : "stopped" });
+		} else if (stop === "configuration") {
+			await scheduler.syncHostRuntimes([]);
+		}
+		assert.deepEqual(await scheduler.inputs(sessionId), []);
+		assert.equal(
+			(await scheduler.getWorkerDelivery(supplement.delivery.deliveryId)).status,
+			stop === "paused" ? "resolved" : "failed",
+		);
+		runtime.settle(sessionId);
+		await scheduler.waitWorkerDelivery(first.delivery.deliveryId);
+		await scheduler.waitWorkerDelivery(supplement.delivery.deliveryId);
+		assert.equal(runtime.submissions.length, 1);
+	});
+}
+
+test("explicit authorized cross-work messaging preserves both Session assignments", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-cross-work-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	await scheduler.syncHostRuntimes(
+		["contract", "search"].map((assistantId) => ({
+			assistantId,
+			assistantRevision: "1",
+			runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+		})),
+	);
+	const source = await scheduler.enqueueWorkerMessage({
+		workerId: "contract",
+		sourceWorkerId: "contract",
+		content: "work A",
+	});
+	const target = await scheduler.enqueueWorkerMessage({
+		workerId: "search",
+		sourceWorkerId: "search",
+		content: "work B",
+	});
+	await until(() => runtime.submissions.length === 2);
+	const sourceSessionId = runtime.submissions[0]!.sessionId;
+	const targetSessionId = runtime.submissions[1]!.sessionId;
+	const context: WorkerCallContext = {
+		workerId: "contract",
+		sessionId: sourceSessionId,
+		turnId: "turn-1",
+		toolCallId: "cross-work-request",
+		targets: [{ assistantId: "search", name: "Search", description: "Research" }],
+		mode: "faux",
+	};
+	await assert.rejects(
+		scheduler.send(context, { to: "search", session_id: sourceSessionId, content: "wrong owner" }),
+		{ status: 403 },
+	);
+	const sent = await scheduler.send(context, {
+		to: "search",
+		session_id: targetSessionId,
+		content: "cross-work request",
+	});
+	assert.equal(sent.message.workId, target.message.workId);
+	assert.notEqual(sent.message.workId, source.message.workId);
+	assert.equal((await storage.findAssignmentBySession(sourceSessionId))?.workId, source.message.workId);
+	assert.equal((await storage.findAssignmentBySession(targetSessionId))?.workId, target.message.workId);
+	runtime.settle(targetSessionId);
+	await until(() => runtime.submissions.length === 3);
+	const reply = await scheduler.send(
+		{
+			workerId: "search",
+			sessionId: targetSessionId,
+			turnId: "turn-3",
+			toolCallId: "cross-work-reply",
+			targets: [],
+			mode: "faux",
+		},
+		{ to: "contract", kind: "reply", reply_to: sent.message.messageId, content: "cross-work answer" },
+	);
+	runtime.settle(sourceSessionId);
+	await until(() => runtime.submissions.length === 4);
+	assert.equal(runtime.submissions[3]?.sessionId, sourceSessionId);
+	assert.equal(runtime.submissions[3]?.input.text, "cross-work answer");
+	runtime.settle(sourceSessionId);
+	runtime.settle(targetSessionId);
+	await Promise.all(
+		[source, target, sent, reply].map((result) => scheduler.waitWorkerDelivery(result.delivery.deliveryId)),
+	);
+	assert.equal((await storage.findAssignmentBySession(sourceSessionId))?.workId, source.message.workId);
+	assert.equal((await storage.findAssignmentBySession(targetSessionId))?.workId, target.message.workId);
+});
+
+test("an unassociated explicit cross-work request reports configuration failure from its verified target Session", async (t) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-worker-cross-work-failure-"));
+	const storage = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
+	const runtime = controlledRuntime();
+	const scheduler = new WorkerScheduler({ runtime: runtime.host, store: storage });
+	t.after(async () => {
+		scheduler.stop();
+		await storage.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	const definitions = ["contract", "search"].map((assistantId) => ({
+		assistantId,
+		assistantRevision: "1",
+		runtime: { systemPrompt: "Do work.", toolIds: [], skills: [], subagents: [] },
+	}));
+	await scheduler.syncHostRuntimes(definitions);
+	const source = await scheduler.enqueueWorkerMessage({
+		workerId: "contract",
+		sourceWorkerId: "contract",
+		content: "work A",
+	});
+	const target = await scheduler.enqueueWorkerMessage({
+		workerId: "search",
+		sourceWorkerId: "search",
+		content: "work B",
+	});
+	await until(() => runtime.submissions.length === 2);
+	const sourceSessionId = runtime.submissions[0]!.sessionId;
+	const targetSessionId = runtime.submissions[1]!.sessionId;
+	runtime.settle(targetSessionId);
+	await scheduler.waitWorkerDelivery(target.delivery.deliveryId);
+	const targetWorker = await storage.readWorker("search");
+	assert(targetWorker);
+	await storage.registerWorker({ ...targetWorker, status: "paused" });
+	await scheduler.syncHostRuntimes(definitions.slice(0, 1));
+	const context: WorkerCallContext = {
+		workerId: "contract",
+		sessionId: sourceSessionId,
+		turnId: "turn-1",
+		toolCallId: "send",
+		targets: [{ assistantId: "search", name: "Search", description: "Research" }],
+		mode: "faux",
+	};
+	await assert.rejects(
+		scheduler.send(context, {
+			to: "search",
+			session_id: sourceSessionId,
+			content: "wrong owner",
+		}),
+		{ status: 403 },
+	);
+	const sent = await scheduler.send(context, {
+		to: "search",
+		session_id: targetSessionId,
+		content: "cross-work request",
+	});
+	assert.equal(sent.delivery.sessionId, undefined, "paused target has not associated the receipt");
+	assert.equal(sent.message.workId, target.message.workId);
+	const waitingContext = { ...context, toolCallId: "wait" };
+	assert.equal((await scheduler.wait(waitingContext, sent.message.messageId)).wait.status, "waiting");
+	assert.equal((await scheduler.waitWorkerDelivery(sent.delivery.deliveryId)).status, "failed");
+	runtime.settle(sourceSessionId);
+	await scheduler.waitWorkerDelivery(source.delivery.deliveryId);
+	await until(() => runtime.submissions.length === 3);
+	assert.equal(runtime.submissions[2]?.sessionId, sourceSessionId);
+	assert.match(runtime.submissions[2]?.input.text ?? "", /Worker 消息未执行.*配置已移除/);
+	runtime.settle(sourceSessionId);
+	await scheduler.drain();
+	const ready = await scheduler.wait(waitingContext, sent.message.messageId);
+	assert.equal(ready.wait.status, "ready");
+	assert.equal(ready.messages.length, 1);
+	assert.equal(ready.messages[0]?.sourceWorkerId, "search");
+	assert.equal(ready.messages[0]?.sourceSessionId, targetSessionId);
+	assert.equal(ready.messages[0]?.targetSessionId, sourceSessionId);
+	assert.equal((await storage.findAssignmentBySession(sourceSessionId))?.workId, source.message.workId);
+	assert.equal((await storage.findAssignmentBySession(targetSessionId))?.workId, target.message.workId);
+});

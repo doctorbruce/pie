@@ -39,6 +39,7 @@ import { withToolProgress } from "./tool-progress.ts";
 import { toolRepetitionReminder } from "./tool-repetition.ts";
 import { createToolSearch } from "./tool-search.ts";
 import { applyPermissionPolicy, parseToolIds, ToolConfigError, type ToolRuntime } from "./tools.ts";
+import type { WorkerSessionCommunication } from "./worker-communication.ts";
 
 const SKILL_DESCRIPTION_LIMIT = 160;
 
@@ -59,7 +60,9 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 	const toolIds = toolCatalog.map((tool) => tool.id);
 	if (
 		new Set(toolIds).size !== toolIds.length ||
-		toolIds.some((id) => ["skill", "skill_search", "task", "tool_search"].includes(id))
+		toolIds.some((id) =>
+			["skill", "skill_search", "task", "tool_search", "communicate", "send_message", "wait_message"].includes(id),
+		)
 	)
 		throw new ToolConfigError("工具 ID 重复或使用了保留名称");
 	const composeSystemPrompt = (runtime: RuntimeConfig, turnSystemPrompt?: string) => {
@@ -148,6 +151,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			},
 			native?: Pick<ToolRuntime, "directory" | "jobs" | "cancellationSignals" | "notifyBackground" | "runJob">,
 			report?: (event: ModelRetryEvent) => unknown,
+			communication?: WorkerSessionCommunication,
 		) {
 			const runtime = structuredClone(configInput);
 			parseToolIds(runtime.toolIds, toolIds);
@@ -196,7 +200,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 						}
 				  >
 				| undefined =
-				delegate && runtime.subagents.length
+				!communication && delegate && runtime.subagents.length
 					? {
 							name: "task",
 							label: "调用助手",
@@ -231,6 +235,157 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							},
 						}
 					: undefined;
+			const communicationTools: AgentTool[] = [];
+			if (communication) {
+				const targets = JSON.stringify(
+					communication.targets.map(({ assistantId, name, description }) => ({
+						id: assistantId,
+						name,
+						description,
+					})),
+				);
+				const messageParameters = {
+					to: Type.String({
+						minLength: 1,
+						maxLength: 256,
+						description: `Exact authorized assistant ID. Available targets: ${targets}. A reply_to may authorize a return reply to the original sender.`,
+					}),
+					content: Type.String({
+						minLength: 1,
+						maxLength: 16000,
+						description: "Complete message for the target assistant.",
+					}),
+					kind: Type.Optional(
+						Type.Union(
+							[
+								Type.Literal("request"),
+								Type.Literal("question"),
+								Type.Literal("reply"),
+								Type.Literal("progress"),
+								Type.Literal("result"),
+							],
+							{
+								description:
+									"Defaults to request for new work. Set result for a request's final outcome, including failure; progress for a substantive stage or blocker; reply for an answer to a question; question only for needed clarification. Use reply_to for these causal responses. Progress does not complete the request. Receiving reply, result or progress alone does not require an acknowledgement.",
+							},
+						),
+					),
+					session_id: Type.Optional(
+						Type.String({
+							minLength: 1,
+							maxLength: 256,
+							description: "An explicitly known target Session; do not guess another work's Session.",
+						}),
+					),
+					reply_to: Type.Optional(
+						Type.String({
+							minLength: 1,
+							maxLength: 256,
+							description:
+								"The received message's messageId: use the request ID for its progress or result, or the question ID for its answer. Return replies follow its trusted Session association, even without the sender in available targets.",
+						}),
+					),
+					new_session: Type.Optional(
+						Type.Boolean({
+							description:
+								"Create an independent target Session for a new request; cannot be combined with session_id or reply_to.",
+						}),
+					),
+				};
+				const waitOptions = Type.Object(
+					{
+						mode: Type.Optional(
+							Type.Union([Type.Literal("sync"), Type.Literal("async")], {
+								description: `Defaults to ${runtime.workerWaitMode ?? "async"}. sync returns control in this Turn on new messages or after about 30 seconds; async parks after your normal final answer and resumes in a later Turn.`,
+							}),
+						),
+						timeout_ms: Type.Optional(
+							Type.Integer({
+								minimum: 1,
+								maximum: 300000,
+								description:
+									"Optional user-requested timeout for this sync wait call. Omit unless the user requests a time limit. Sync also returns after about 30 seconds or on new messages with status waiting; that is not a timeout. A timeout leaves the original work running.",
+							}),
+						),
+					},
+					{ additionalProperties: false },
+				);
+				const communicateParameters = Type.Object(
+					{
+						...messageParameters,
+						wait: Type.Optional(
+							Type.Union([
+								Type.Literal(false, { description: "Save the message and continue without waiting." }),
+								waitOptions,
+							]),
+						),
+					},
+					{ additionalProperties: false },
+				);
+				const waitOnlyParameters = Type.Object(
+					{
+						message_id: Type.String({
+							minLength: 1,
+							maxLength: 256,
+							description:
+								"An already-sent message ID; use this to wait after a one-way send or continue a pending wait without resending the request.",
+						}),
+						mode: Type.Optional(Type.Union([Type.Literal("sync"), Type.Literal("async")])),
+						timeout_ms: Type.Optional(Type.Integer({ minimum: 1, maximum: 300000 })),
+						wait: Type.Optional(waitOptions),
+					},
+					{ additionalProperties: false },
+				);
+				const communicateSchema = Type.Union([communicateParameters, waitOnlyParameters]);
+				const communicateTool: AgentTool<typeof communicateSchema> = {
+					name: "communicate",
+					label: "联系助手",
+					description: `Send to an authorized assistant and, for a new request or question, wait in the same operation. Available targets: ${targets}. When you have non-overlapping work, send with wait=false and continue that work; when blocked, wait using the returned message_id. Set wait.mode to override the default ${runtime.workerWaitMode ?? "async"}. Sync returns on a response, failure, cancellation, new inbox messages or after about 30 seconds. A waiting status means the original work is still pending: read new messages, report useful progress, and continue waiting with the same message_id until the needed response arrives. Do not resend the request or finish the user's task just because a wait interval ended. Omit wait.timeout_ms unless the user explicitly requests a time limit for that wait call. Replies, results and progress default to one-way messages. During active collaboration, promptly tell the user substantive progress and aim to keep them informed about every 60 seconds; use actual findings, blockers or waiting state, without inventing progress or repeating tool heartbeats. Sending and waiting do not cancel the peer or confirm business completion. Sender identity, work ownership and the response message ID are managed by the current Session and Turn.`,
+					parameters: communicateSchema,
+					executionMode: "sequential",
+					async execute(toolCallId, input, signal, onUpdate) {
+						if ("message_id" in input) {
+							const waitResult = await communication.wait(toolCallId, input.message_id, signal, {
+								mode: input.wait?.mode ?? input.mode ?? runtime.workerWaitMode ?? "async",
+								...((input.wait?.timeout_ms ?? input.timeout_ms) !== undefined
+									? { timeoutMs: input.wait?.timeout_ms ?? input.timeout_ms }
+									: {}),
+							});
+							return {
+								content: [{ type: "text", text: JSON.stringify(waitResult) }],
+								details: waitResult,
+							};
+						}
+						const { wait: requestedWait, ...message } = input;
+						const saved = await communication.send(toolCallId, message, signal);
+						onUpdate?.({ content: [], details: { sent: saved } });
+						const waitConfig = requestedWait === false ? undefined : requestedWait;
+						const shouldWait =
+							requestedWait !== false &&
+							(requestedWait !== undefined ||
+								message.kind === undefined ||
+								message.kind === "request" ||
+								message.kind === "question");
+						const waitResult = shouldWait
+							? await communication.wait(toolCallId, saved.message.messageId, signal, {
+									mode: waitConfig?.mode ?? runtime.workerWaitMode ?? "async",
+									...(waitConfig?.timeout_ms !== undefined ? { timeoutMs: waitConfig.timeout_ms } : {}),
+								})
+							: undefined;
+						const details = waitResult ? { sent: saved, wait: waitResult } : { sent: saved };
+						return {
+							content: [
+								{
+									type: "text",
+									text: JSON.stringify(details),
+								},
+							],
+							details,
+						};
+					},
+				};
+				communicationTools.push(communicateTool);
+			}
 			const { models, headers, selected: defaultModel } = settings.current;
 			const choice = selected ?? defaultModel;
 			const realModel = choice ? models.getModel(choice.provider, choice.id) : undefined;
@@ -250,6 +405,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				...skillTools.tools,
 				...(runtime.skills.length ? [createSkillSearch(runtime)] : []),
 				...(taskTool ? [taskTool] : []),
+				...communicationTools,
 			].filter(toolAvailable);
 			const deferredToolNames = [
 				...tools.filter((tool) => "exposure" in tool && tool.exposure === "deferred").map((tool) => tool.name),
@@ -406,7 +562,12 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							),
 						]);
 					} else {
-						const input = last?.role === "user" ? contentText(last.content) : "";
+						const input =
+							last?.role === "user"
+								? typeof Reflect.get(last, "workerMessageId") === "string" && Array.isArray(last.content)
+									? (last.content.filter((part) => part.type === "text").at(-1)?.text ?? "")
+									: contentText(last.content)
+								: "";
 						const toolRequest = /^调用工具\s+(\S+)\s+([\s\S]+)$/.exec(input.trim());
 						if (toolRequest) {
 							try {

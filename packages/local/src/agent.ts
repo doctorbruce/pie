@@ -29,6 +29,9 @@ export function createAgentFactory(
 				"skill_search",
 				"task",
 				"tool_search",
+				"communicate",
+				"send_message",
+				"wait_message",
 			]);
 	const requestRecords = options.recordModelRequest ? undefined : createModelRequestRecorder(env);
 	const agents = createRuntimeAgentFactory({

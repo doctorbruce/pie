@@ -35,7 +35,7 @@
 | `POST /workers/:workerId/messages` | `{ messageId?, sourceWorkerId, sourceSessionId?, sourceTurnId?, content, kind?, workId?, targetSessionId?, replyTo?, newSession?, title?, workspacePath?, model?, mode?, productBinding? }` | `202` + `{ message, delivery }` 持久入箱收据；后台确定性关联并执行，不等待模型 |
 | `GET /worker-messages/:messageId` | 无 | 保存的原消息；不存在返回 404 |
 | `GET /worker-deliveries/:deliveryId` | 无 | 投递关联、状态和可选 acceptedTurnId/error；不自动重放 |
-| `POST /sessions` | `{ creationKey?, assistantId?, astronSessionId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；assistantId 命中宿主注册表时创建宿主会话，否则解析本地助手；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
+| `POST /sessions` | `{ creationKey?, assistantId?, workerId?, astronSessionId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；workerId 仅供协调装配使用，须等于已注册 assistantId；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
 | `GET /session-creations?creationKey=...` | URL 编码的创建键 | `{ creationKey, sessionId, createdAt, sessionExists }`；未创建返回 404，已删除保留原记录 |
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
 | `POST /sessions/:id/archive` | `{ archived: boolean }` | 归档或取消归档根会话，返回含 archived 的快照；保留历史和任务执行，子会话返回 409 |
@@ -61,6 +61,8 @@
 
 Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿主核对，不能直接作为模型工具开放。`202` 只证明消息和投递意图已保存；确定性关联后按 Session 串行执行，不同 Session 可以并行。Runtime 注册表与 Worker 同步分开保存，同步失败可按原配置重试核对；删除配置保留 Worker 历史并拒绝新执行。投递状态、目标选择、产品绑定与关闭顺序见[Worker 嵌入契约](../../docs/runtime-embedding.md#可选-worker-内部调度)。
 
+通过 Worker 收件入口创建的工作 Session 保存 `workerId`，模型使用 `communicate` 对等协作，不提供 `task`。主动目标来自宿主 `workerTargets`，省略时回退到 subagents；来源与调用键由 Runtime 注入，reply_to 沿可信消息链回原 Session。一次调用发送并按 `wait` 选择等待：`async` 保存等待，模型正常收尾后让出，回信在原 Turn 完整清理后启动新 Turn；`sync` 每段最多等待 30 秒，新输入可提前返回，已到达的 result/question/reply 优先与工具结果原子消费；`wait: false` 仅发送。默认 async，宿主可用 `runtime.workerWaitMode: "sync"` 改变默认。同步分段未取得回应时返回 `wait.status: waiting` 和 `reason: interval/message`，模型接纳阶段进展后可用原 `message_id` 续等；progress 不表示工作完成。仅用户明确要求时传 `wait.timeout_ms`（1–300000 毫秒），它是单次等待上限，到期返回 timed_out；大于 30 秒时先返回 interval，续等按新调用重新计时，原请求继续。分段返回不登记异步让出；禁止等待当前同一 Session，不沿通信关系取消对端。异步等待的 completed 带 `yield`，执行投影带 `waitingForMessage`，不表示业务完成。取消准确 Turn 会撤销等待，迟到回复不自动恢复执行；普通会话的 task 路径不变。持久存储与模型沟通边界见 [Worker 嵌入接入](../../docs/runtime-embedding.md#可选-worker-内部调度)。
+
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
 交互的“允许一次”发送 `{ approved: true }`，“始终允许”发送 `{ approved: true, remember: true }`。后者仅适用于请求携带 `remember: { permission, patterns }` 的原生 `bash/external_directory` 权限，先持久化到实际执行会话，再批准当前工具；匹配范围可跨回合和重启复用，新会话、Fork 及父子会话不互相继承。命令按入口和工作目录分类，外部路径保持准确范围，详见[授权记忆契约](../../docs/runtime-embedding.md#交互授权记忆)。凭据、邮件等业务确认仍逐次回答；拒绝或无范围请求带 `remember: true` 返回 400。
@@ -79,7 +81,7 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 
 助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill_search` 和 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
-这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或 `task` 时自动向 Agent 加入 `job_output/job_kill`。`skill_search/skill` 和 `task` 也由 Pie 提供，但分别只在当前 runtime 有 Skill 或 Subagent 绑定时加入 Agent。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
+这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或旧 `task` 时自动向 Agent 加入 `job_output/job_kill`。`skill_search/skill` 按 Skill 绑定加入，普通会话的 `task` 按 Subagent 绑定加入；协调 Worker 会话改为 `communicate`，这些原生工具不属于可配置 toolIds。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
 
 会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。完整配置在 Turn 准入时应用，保留已有消息并按需重建 Agent。运行中 Skill 绑定在当前工具批次结束、下一次模型调用前单独刷新，保留 Turn 与 Agent；当前集合以 `runtime.skills` 为准，`assistantRevision` 仍代表准入时完整应用的版本。
 
@@ -97,7 +99,7 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 npm run serve -- --tools-dir E:/Projects/pie/examples/tools
 ```
 
-也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill_search、skill、task 或 tool_search 冲突会报错。
+也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill_search、skill、task、send_message、wait_message 或 tool_search 冲突会报错。
 
 例如保存为 `hello.ts`：
 
@@ -248,6 +250,8 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - `turn.settled`：先持久化输入，再等待 `agent.continue()` 完成、Agent 空闲后发送。状态为 `completed`、`cancelled` 或 `failed`，会话增量中的失败原因在 `turn.error`。
 
 不带参数的全局 `/events` 不发送启动快照。每个包携带同源的 `instanceId / revision / execution` 和最小 `snapshot: { turn, execution }`，保留事件发布时的 canonical/request owner；`turn.applied / steer.settled` 同时保留顶层 `steerAdmission`。Agent 原始内容不公开时仍保留状态包，交互结束也不会被过滤；不携带完整历史或 assistant partial。同一版本的全局摘要、会话增量与 HTTP 快照一致；模型流与活动工具可以同时存在，结算后的瞬时活动归零。
+
+Worker `communicate` 已保存消息、仍在等待时，`execution.activeTools[]` 可含 `partialResult: { content: [], details: { sent: { message, delivery } } }`，用于刷新恢复同一调用的展示。只保留真实发送回执，不缓存普通工具输出或图片；工具结束后从活动投影清除。失败或取消的真实工具结果保留已发回执及原错误；回应提交冲突时只保留 sent，不暴露尚未消费的回信。此展示事实不代表目标完成，也不提供进程重启自动续跑。
 
 指定 `GET /events?sessionId=A&sessionId=B` 时，首包为 `{ type: "execution.baseline", instanceId, sessions: [{ sessionId, revision, turn?, execution }] }`。后续只推送指定会话高于各自基线水位的事件；即使断线期间已经结算且重连后没有新事件，也能立即恢复终态。不读取历史、不扫描全部会话、不持久重放；不存在的会话返回 404，空 ID 或超过 200 个返回 400。调用方先按自己的权限确定会话范围。
 

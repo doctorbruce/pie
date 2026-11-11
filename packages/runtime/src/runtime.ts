@@ -7,9 +7,11 @@ import type { AssistantSource } from "./capabilities.ts";
 import { checkpointMessage, isContextCheckpoint } from "./compaction.ts";
 import { hydrateHostRuntime, parseHostRuntimeDefinition, SkillConfigError } from "./config.ts";
 import {
+	CoordinationError,
 	CoordinationService,
 	type CoordinationStore,
 	type InputBatchCreate,
+	type WorkerMessage,
 	type YieldRecord,
 } from "./coordination.ts";
 import { DurableJobError, type DurableJobExecutor, durableJobResult, pendingDurableJobs } from "./durable-jobs.ts";
@@ -75,6 +77,7 @@ import {
 	validateToolExecutionRecord,
 } from "./tool-execution.ts";
 import { recoverInterruptedTurn } from "./turn-recovery.ts";
+import type { WorkerCallContext, WorkerCommunication, WorkerSessionCommunication } from "./worker-communication.ts";
 
 export class RuntimeError extends Error {
 	status: number;
@@ -209,6 +212,59 @@ type UserMessageIdentity = {
 
 const USER_MESSAGE_IDENTITY_KEYS = ["clientMessageId", "userMessageId", "triggerTaskId"] as const;
 
+function workerInputMessage(
+	message: WorkerMessage,
+	targetSessionId: string,
+): Extract<AgentMessage, { role: "user" }> & {
+	workerMessageId: string;
+	displayContent: string;
+	metadata: { workerCommunication: Record<string, unknown> };
+} {
+	const replyKind = message.kind === "request" ? "result" : message.kind === "question" ? "reply" : undefined;
+	const replyGuidance =
+		message.sourceSessionId && replyKind
+			? [
+					message.kind === "request"
+						? "Complete this Worker request, then send its result once to the sender. If unable to complete, explain the failure in the result. Ask a question only when you need information from the sender."
+						: "Answer this Worker question by sending a reply to the sender, or explain why you cannot answer.",
+					`Call communicate ${JSON.stringify({ to: message.sourceWorkerId, reply_to: message.messageId, kind: replyKind, content: replyKind === "result" ? "<result or failure explanation>" : "<answer or inability to answer>", wait: false })}`,
+					`For this ${replyKind} call, replace content with your response; keep the supplied to, reply_to and kind. Plain final text stays in this Session and does not deliver a reply.`,
+					...(message.kind === "request"
+						? [
+								`For a substantive stage or blocker, send an update using communicate ${JSON.stringify({ to: message.sourceWorkerId, reply_to: message.messageId, kind: "progress", content: "<findings, completed stage or blocker>", wait: false })}. Progress does not complete the request; continue the work and send its result once when finished. Avoid empty status reports and tool heartbeats.`,
+							]
+						: []),
+				].join("\n")
+			: "";
+	return {
+		role: "user",
+		content: [
+			{
+				type: "text",
+				text: `Worker message ${JSON.stringify({ messageId: message.messageId, from: message.sourceWorkerId, sourceSessionId: message.sourceSessionId, workId: message.workId, replyTo: message.replyTo, kind: message.kind })}${replyGuidance ? `\n${replyGuidance}` : ""}`,
+			},
+			{ type: "text", text: message.content },
+		],
+		workerMessageId: message.messageId,
+		displayContent: message.content,
+		metadata: {
+			workerCommunication: {
+				messageId: message.messageId,
+				sourceWorkerId: message.sourceWorkerId,
+				...(message.sourceSessionId ? { sourceSessionId: message.sourceSessionId } : {}),
+				workerId: message.workerId,
+				sessionId: targetSessionId,
+				kind: message.kind,
+				...(message.replyTo ? { replyTo: message.replyTo } : {}),
+				...(message.workId ? { workId: message.workId } : {}),
+				createdAt: message.createdAt,
+				content: message.content,
+			},
+		},
+		timestamp: Date.now(),
+	};
+}
+
 function optionalMessageIdentity(body: Record<string, unknown>): UserMessageIdentity {
 	const identity: UserMessageIdentity = {};
 	for (const key of USER_MESSAGE_IDENTITY_KEYS) {
@@ -224,6 +280,7 @@ function optionalMessageIdentity(body: Record<string, unknown>): UserMessageIden
 export type CreateSessionInput = {
 	creationKey?: string;
 	assistantId?: string;
+	workerId?: string;
 	/** Product-owned session identity supplied by the host (for example Astron). */
 	astronSessionId?: string;
 	title?: string;
@@ -232,6 +289,8 @@ export type CreateSessionInput = {
 	model?: { provider: string; id: string };
 };
 export type TurnInput = {
+	/** Trusted host delivery; admission is saved atomically with its input history. */
+	workerDeliveryId?: string;
 	text?: string;
 	images?: ImagePart[];
 	displayText?: string;
@@ -283,6 +342,7 @@ export type RuntimeOptions = {
 	assistants?: AssistantSource;
 	jobs?: DurableJobExecutor;
 	toolStreamTrace?: (event: ToolStreamTrace) => void;
+	workers?: WorkerCommunication;
 };
 
 async function initializeRuntime(options: RuntimeOptions) {
@@ -311,10 +371,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 				throw new SkillConfigError(`Assistant ID 不可重复：${definition.assistantId}`);
 			registry.set(definition.assistantId, definition);
 		}
-		for (const definition of definitions)
+		for (const definition of definitions) {
 			for (const binding of definition.runtime.subagents)
 				if (!registry.has(binding.assistantId))
 					throw new SkillConfigError(`Subagent Assistant 不存在：${binding.assistantId}`);
+			for (const target of definition.runtime.workerTargets ?? [])
+				if (!registry.has(target.assistantId))
+					throw new SkillConfigError(`Worker Assistant 不存在：${target.assistantId}`);
+		}
 		return registry;
 	}
 	// Persisted host runtimes are validated against the tool catalog. A registry that no
@@ -339,6 +403,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 	factory.mcp.configure([...hostRuntimes.values()].map((definition) => definition.runtime.mcp ?? {}));
 	type Session = SavedSession & {
+		yieldRequested?: NonNullable<Turn["yield"]>;
+		workerWaitResults?: Map<string, NonNullable<SessionWriteOptions["workerWait"]>>;
 		historyLoaded?: boolean;
 		waiters?: number;
 		executionObservers?: number;
@@ -347,7 +413,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
 		modelStreaming?: boolean;
-		activeTools?: Map<string, string>;
+		activeTools?: Map<string, SessionExecution["activeTools"][number]>;
 		clients: Set<RuntimeSubscriber>;
 		runPromise?: Promise<string | undefined>;
 		cancelPromise?: Promise<CancellationReceipt>;
@@ -504,7 +570,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 								: turnReason,
 						),
 			cancel:
-				status === "running" && !session.cancelRequested
+				(status === "running" && !session.cancelRequested) || Boolean(session.turn?.yield)
 					? available
 					: status === "interrupted"
 						? available
@@ -631,6 +697,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function summary(session: SessionSummary): SessionSummary {
 		return {
 			id: session.id,
+			workerId: session.workerId,
 			archived: session.archived === true,
 			kind: session.kind,
 			forkedFromSessionId: session.forkedFromSessionId,
@@ -770,6 +837,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 					writeOptions,
 				);
 			} catch (error) {
+				if (
+					(writeOptions?.workerInputs || writeOptions?.workerWait) &&
+					error instanceof CoordinationError &&
+					error.status === 409
+				)
+					throw error;
 				storageFailed = true;
 				throw new RuntimeError(503, error instanceof Error ? error.message : String(error), "storage_unavailable");
 			}
@@ -928,6 +1001,60 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function jobCancellationSignals(session: Session): readonly AbortSignal[] {
 		return [...(session.parentJobSignals ?? []), ...(session.mcpAbort ? [session.mcpAbort.signal] : [])];
 	}
+	function workerCommunication(
+		getSession: () => Session,
+		runtime: NonNullable<Session["runtime"]>,
+	): WorkerSessionCommunication {
+		const workers = options.workers;
+		if (!workers) throw new RuntimeError(405, "当前宿主未启用 Worker 通信");
+		const targets = (runtime.workerTargets ?? runtime.subagents).map(({ assistantId, name, description }) => ({
+			assistantId,
+			name,
+			description,
+		}));
+		function context(toolCallId: string, signal?: AbortSignal): WorkerCallContext {
+			signal?.throwIfAborted();
+			assertStorageAvailable();
+			const session = getSession();
+			if (closing || !session.workerId || session.turn?.status !== "running" || session.cancelRequested)
+				throw new RuntimeError(409, "当前 Turn 不接受 Worker 通信");
+			const currentRuntime = resolveTurnConfiguration(session, {}).runtime;
+			const current = currentRuntime.workerTargets ?? currentRuntime.subagents;
+			return {
+				workerId: session.workerId,
+				sessionId: session.id,
+				turnId: session.turn.id,
+				toolCallId,
+				targets: targets.filter((target) => current.some((binding) => binding.assistantId === target.assistantId)),
+				mode: session.mode,
+			};
+		}
+		return {
+			targets,
+			async send(toolCallId, input, signal) {
+				const source = context(toolCallId, signal);
+				return workers.send(source, input, signal);
+			},
+			async wait(toolCallId, messageId, signal, waitOptions) {
+				const source = context(toolCallId, signal);
+				const result = await workers.wait(source, messageId, signal, waitOptions);
+				const current = context(toolCallId, signal);
+				if (current.turnId !== source.turnId) throw new RuntimeError(409, "Worker 等待所属 Turn 已切换");
+				const session = getSession();
+				if (result.wait.mode === "sync" && result.receipts?.length) {
+					session.workerWaitResults ??= new Map();
+					session.workerWaitResults.set(toolCallId, {
+						waitId: result.wait.waitId,
+						toolCallId,
+						responses: structuredClone(result.receipts),
+					});
+				}
+				if (result.wait.mode !== "sync" && result.wait.status === "waiting")
+					getSession().yieldRequested = { reason: "waiting_for_message", waitId: result.wait.waitId, messageId };
+				return result;
+			},
+		};
+	}
 	function createSessionAgent(
 		session: Session,
 		runtime: NonNullable<Session["runtime"]>,
@@ -965,6 +1092,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 			},
 			async (event) => await publish(session, event.type, event),
+			session.workerId ? workerCommunication(() => session, runtime) : undefined,
 		);
 	}
 	async function runJob(session: Session, toolCallId: string, signal?: AbortSignal) {
@@ -1088,7 +1216,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 		session.cancelRequested = true;
 		if (session.turnCheckpoint) session.turnCheckpoint.cancelRequested = true;
 		if (session.turnCheckpoint?.jobs?.length) session.jobInterruption = "外部任务取消已请求";
-		const cancellation = Promise.all([persist(session), pendingJobs(session)]).then(async ([, pending]) => {
+		const cancellation = Promise.all([
+			persist(session),
+			pendingJobs(session),
+			session.workerId ? options.workers?.cancel(session.id, session.turn!.id) : undefined,
+		]).then(async ([, pending]) => {
 			await cancellationPublished;
 			if (pending.length && !options.jobs)
 				throw new RuntimeError(409, "宿主未配置外部任务执行器，无法请求取消", "external_executor_unavailable");
@@ -1146,6 +1278,16 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function bindAgent(session: Session, agent: ReturnType<typeof factory.create>) {
 		session.agent = agent;
 		agent.followUpMode = "all";
+		const shouldStopAfterTurn = agent.shouldStopAfterTurn;
+		agent.shouldStopAfterTurn = async (context, signal) => {
+			if (!session.yieldRequested || session.cancelRequested || session.turn?.status !== "running")
+				return (await shouldStopAfterTurn?.(context, signal)) ?? false;
+			// Let the model close its response before parking this Turn for a later Worker reply.
+			if (context.message.content.some((part) => part.type === "toolCall")) return false;
+			session.turn.yield = session.yieldRequested;
+			await persist(session);
+			return true;
+		};
 		const transformContext = agent.transformContext!;
 		agent.transformContext = async (messages, signal) => {
 			const count = agent.state.messages.length;
@@ -1157,12 +1299,35 @@ async function initializeRuntime(options: RuntimeOptions) {
 		agent.prepareNextTurnWithContext = async ({ context }, signal) => {
 			assertStorageAvailable();
 			signal?.throwIfAborted();
+			if (session.workerId && !session.cancelRequested && !session.yieldRequested && options.workers) {
+				const inputs = await options.workers.inputs(session.id);
+				signal?.throwIfAborted();
+				if (inputs.length) {
+					const previous = [...agent.state.messages];
+					const messages = inputs.map(({ message }) => workerInputMessage(message, session.id));
+					agent.state.messages.push(...messages);
+					try {
+						await persist(session, false, undefined, [], undefined, {
+							workerInputs: inputs.map(({ message, delivery }) => ({
+								deliveryId: delivery.deliveryId,
+								messageId: message.messageId,
+							})),
+						});
+						for (const message of messages)
+							await publish(session, "snapshot", projectSessionAgentEvent({ type: "message_end", message }));
+					} catch (error) {
+						agent.state.messages = previous;
+						if (!(error instanceof CoordinationError) || error.status !== 409) throw error;
+					}
+					context = { ...context, messages: agent.state.messages };
+				}
+			}
 			const latest = resolveTurnConfiguration(session, {}).runtime;
 			if (
 				JSON.stringify(latest.skills) === JSON.stringify(session.runtime!.skills) &&
 				latest.capabilityCatalog === session.runtime!.capabilityCatalog
 			)
-				return;
+				return { context };
 			const runtime = {
 				...session.runtime!,
 				skills: structuredClone(latest.skills),
@@ -1205,8 +1370,40 @@ async function initializeRuntime(options: RuntimeOptions) {
 			if (event.type === "message_start" && event.message.role === "assistant") session.modelStreaming = true;
 			if ((event.type === "message_end" && event.message.role === "assistant") || event.type === "agent_end")
 				session.modelStreaming = false;
-			if (event.type === "tool_execution_start") session.activeTools!.set(event.toolCallId, event.toolName);
-			if (event.type === "tool_execution_end") session.activeTools!.delete(event.toolCallId);
+			if (event.type === "tool_execution_start")
+				session.activeTools!.set(event.toolCallId, { toolCallId: event.toolCallId, toolName: event.toolName });
+			if (session.workerId && event.type === "tool_execution_update" && event.toolName === "communicate") {
+				const active = session.activeTools!.get(event.toolCallId);
+				const details: unknown = event.partialResult.details;
+				const sent =
+					details && typeof details === "object" && !Array.isArray(details)
+						? Reflect.get(details, "sent")
+						: undefined;
+				if (active?.toolName === "communicate" && sent && typeof sent === "object" && !Array.isArray(sent))
+					session.activeTools!.set(event.toolCallId, {
+						...active,
+						partialResult: { content: [], details: { sent: structuredClone(sent) } },
+					});
+			}
+			if (event.type === "tool_execution_end") {
+				const receipt = session.activeTools!.get(event.toolCallId)?.partialResult?.details;
+				if (
+					session.workerId &&
+					event.toolName === "communicate" &&
+					event.isError &&
+					receipt &&
+					typeof receipt === "object" &&
+					!Array.isArray(receipt)
+				) {
+					const details: unknown = event.result.details;
+					// The loop builds its real tool result from this same result after listeners settle.
+					event.result.details = {
+						...(details && typeof details === "object" && !Array.isArray(details) ? details : {}),
+						...receipt,
+					};
+				}
+				session.activeTools!.delete(event.toolCallId);
+			}
 			if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_end") {
 				traceToolStream(session, {
 					phase: "toolcall_end",
@@ -1286,7 +1483,39 @@ async function initializeRuntime(options: RuntimeOptions) {
 								),
 							]
 						: [];
-				await persist(session, false, undefined, records);
+				const workerWait =
+					message.role === "toolResult" &&
+					["wait_message", "communicate"].includes(message.toolName) &&
+					!message.isError
+						? session.workerWaitResults?.get(message.toolCallId)
+						: undefined;
+				try {
+					await persist(session, false, undefined, records, undefined, workerWait ? { workerWait } : undefined);
+				} catch (error) {
+					if (
+						workerWait &&
+						message.role === "toolResult" &&
+						error instanceof CoordinationError &&
+						error.status === 409
+					) {
+						// The Agent already appended this result; do not save an unconsumed reply during failure settlement.
+						message.isError = true;
+						message.content = [{ type: "text", text: `Worker 回应未交付：${error.message}` }];
+						const sent: unknown =
+							message.toolName === "communicate" && message.details && typeof message.details === "object"
+								? Reflect.get(message.details, "sent")
+								: undefined;
+						if (sent && typeof sent === "object" && !Array.isArray(sent)) message.details = { sent };
+						else delete message.details;
+						session.workerWaitResults?.delete(message.toolCallId);
+						await persist(session, false, undefined, [
+							executionRecord(session, message.toolCallId, message.toolName, "failed", error.message),
+						]);
+					}
+					throw error;
+				}
+				if (message.role === "toolResult" && ["wait_message", "communicate"].includes(message.toolName))
+					session.workerWaitResults?.delete(message.toolCallId);
 				if (admission) await publish(session, "turn.applied", undefined, undefined, undefined, admission);
 			}
 			if (event.type === "tool_execution_end")
@@ -1346,10 +1575,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 		const running = session.turn?.status === "running";
 		return {
 			actions: actionAvailability(session),
+			...(session.turn?.yield && session.turn.status === "completed"
+				? { waitingForMessage: { waitId: session.turn.yield.waitId, messageId: session.turn.yield.messageId } }
+				: {}),
 			modelStreaming: running && session.modelStreaming === true,
-			activeTools: running
-				? [...(session.activeTools ?? [])].map(([toolCallId, toolName]) => ({ toolCallId, toolName }))
-				: [],
+			activeTools: running ? [...(session.activeTools?.values() ?? [])] : [],
 			waitingForInteraction: [...pendingInteractions.values()].some((pending) => pending.sessionId === session.id),
 			cancellationRequested: running && session.cancelRequested,
 			...(session.turn?.status === "interrupted" && session.turnCheckpoint?.blockedReason
@@ -1663,12 +1893,15 @@ async function initializeRuntime(options: RuntimeOptions) {
 				agent.hasQueuedMessages() &&
 				!agent.state.errorMessage &&
 				!session.cancelRequested &&
+				!session.yieldRequested &&
 				!session.jobInterruption
 			);
 			turn.error = agent.state.errorMessage;
 			turn.status = session.cancelRequested ? "cancelled" : turn.error ? "failed" : "completed";
+			if (turn.status !== "completed") delete turn.yield;
 		} catch (error) {
 			turn.status = session.cancelRequested ? "cancelled" : "failed";
+			delete turn.yield;
 			turn.error = error instanceof Error ? error.message : String(error);
 		} finally {
 			if (mcpAbort.signal.aborted) await jobs.cancelScope(mcpAbort.signal);
@@ -1676,6 +1909,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			session.mcpAbort = undefined;
 			session.modelStreaming = false;
 			session.activeTools?.clear();
+			session.workerWaitResults?.clear();
 			try {
 				await rejectSessionInteractions(session.id, new Error("回合已结束"));
 			} catch {
@@ -1990,10 +2224,19 @@ async function initializeRuntime(options: RuntimeOptions) {
 					model = { provider: value.provider, id: value.id };
 				}
 				const creationKey = body.creationKey === undefined ? undefined : sessionCreationKey(body.creationKey);
+				if (body.workerId !== undefined) {
+					if (typeof body.workerId !== "string" || body.workerId !== body.assistantId)
+						throw new RuntimeError(400, "workerId 必须等于显式 assistantId");
+					if (!options.workers || !store.readWorker) throw new RuntimeError(405, "当前宿主未启用 Worker 通信");
+					const worker = await store.readWorker(body.workerId);
+					if (!worker || worker.assistantId !== body.assistantId)
+						throw new RuntimeError(409, "助手尚未注册 Worker");
+				}
 				const requestFingerprint = createHash("sha256")
 					.update(
 						JSON.stringify({
 							assistantId: body.assistantId,
+							workerId: body.workerId,
 							astronSessionId,
 							title: title.trim(),
 							workspacePath: body.workspacePath?.trim(),
@@ -2051,12 +2294,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 						runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 					},
 					async (event) => await publish(session, event.type, event),
+					body.workerId ? workerCommunication(() => session, runtime) : undefined,
 				);
 				session = {
 					id,
 					kind: "root",
 					mode,
 					assistantId,
+					workerId: body.workerId,
 					assistantRevision,
 					astronSessionId,
 					runtimeSource: hostDefinition ? "host" : "local",
@@ -2397,9 +2642,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const session = await requireSession(sessionId);
 				assertAction(session, "cancel", body.turnId, ["turn_terminal"]);
 				const turn = session.turn!;
+				if (session.workerId && (turn.yield || turn.status === "interrupted"))
+					await options.workers?.cancel(session.id, turn.id);
 				if (turn.status === "running") {
 					return await cancelRunningTurn(session);
-				} else if (turn.status === "interrupted") {
+				} else if (turn.status === "interrupted" || turn.yield) {
 					let records: ToolExecutionRecord[] = [];
 					const previous = {
 						turn: session.turn,
@@ -2413,6 +2660,8 @@ async function initializeRuntime(options: RuntimeOptions) {
 						records = await closeCancelledJobs(session);
 					}
 					session.turn = { ...turn, status: "cancelled", error: undefined };
+					delete session.turn.yield;
+					session.yieldRequested = undefined;
 					session.turnCheckpoint = undefined;
 					session.updatedAt = Date.now();
 					try {
@@ -2669,6 +2918,42 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const session = await requireSession(sessionId);
 				const content = turnContent(body);
 				const requestId = optionalRequestId(body);
+				let workerInput: { deliveryId: string; messageId: string } | undefined;
+				let workerMessage: WorkerMessage | undefined;
+				if (body.workerDeliveryId !== undefined) {
+					if (
+						typeof body.workerDeliveryId !== "string" ||
+						!session.workerId ||
+						!store.readWorkerDelivery ||
+						!store.readWorkerMessage
+					)
+						throw new RuntimeError(400, "Worker 输入需要受协调 Session 和有效投递身份");
+					const delivery = await store.readWorkerDelivery(body.workerDeliveryId);
+					const message = delivery && (await store.readWorkerMessage(delivery.messageId));
+					if (
+						!delivery ||
+						!message ||
+						delivery.sessionId !== session.id ||
+						delivery.workerId !== session.workerId ||
+						requestId !== message.messageId ||
+						body.text !== message.content ||
+						body.images?.length
+					)
+						throw new RuntimeError(409, "Worker 投递与输入归属不一致");
+					if (delivery.status === "consumed" && delivery.acceptedTurnId)
+						return {
+							sessionId,
+							turnId: delivery.acceptedTurnId,
+							requestId,
+							accepted: true,
+							started: false,
+							settled: true,
+						};
+					if (delivery.status !== "dispatched" && delivery.status !== "resolved")
+						throw new RuntimeError(409, "Worker 投递不接受重复准入");
+					workerInput = { deliveryId: delivery.deliveryId, messageId: message.messageId };
+					workerMessage = message;
+				}
 				const canonicalTurnId = optionalCanonicalTurnId(body);
 				const retry = session.kind === "root" ? retryTurnReceipt(session, requestId, canonicalTurnId) : undefined;
 				if (retry) return retry;
@@ -2733,11 +3018,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 				const now = Date.now();
 				const userMessage: Extract<AgentMessage, { role: "user" }> & {
 					displayContent?: string;
+					workerMessageId?: string;
 				} & UserMessageIdentity = {
 					role: "user",
 					content,
 					timestamp: now,
 					...messageIdentity,
+					...(workerMessage ? workerInputMessage(workerMessage, session.id) : {}),
 				};
 				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
 				agent.state.messages = [...oldMessages, userMessage];
@@ -2764,8 +3051,16 @@ async function initializeRuntime(options: RuntimeOptions) {
 				};
 				session.updatedAt = now;
 				session.cancelRequested = false;
+				session.yieldRequested = undefined;
 				try {
-					await persist(session, false, update);
+					await persist(
+						session,
+						false,
+						update,
+						[],
+						undefined,
+						workerInput ? { workerInputs: [workerInput] } : undefined,
+					);
 				} catch (error) {
 					agent.state.messages = oldMessages;
 					session.agent = oldAgent;

@@ -187,11 +187,14 @@ test("local deletion removes parent and cold child request records while retaini
 	for (const id of ["parent", "child", "sibling"]) await recorder(id, "turn")({ text: id }, model);
 	const host = createLocalHost({ ...data.env, PI_MODEL_REQUEST_RECORDING: "0", PI_TOOL_STREAM_TRACE: "0" });
 	const runtime = await host.ready;
-	context.after(() => runtime.close());
-	assert.deepEqual(await runtime.deleteSession("parent"), { deleted: true });
-	assert.deepEqual(await readdir(data.sessionDirectory("parent")).catch(() => []), []);
-	assert.deepEqual(await readdir(data.sessionDirectory("child")).catch(() => []), []);
-	assert.equal((await readdir(data.sessionDirectory("sibling"))).length, 1);
+	try {
+		assert.deepEqual(await runtime.deleteSession("parent"), { deleted: true });
+		assert.deepEqual(await readdir(data.sessionDirectory("parent")).catch(() => []), []);
+		assert.deepEqual(await readdir(data.sessionDirectory("child")).catch(() => []), []);
+		assert.equal((await readdir(data.sessionDirectory("sibling"))).length, 1);
+	} finally {
+		await runtime.close();
+	}
 });
 
 for (const target of ["root", "session"]) {

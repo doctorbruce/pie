@@ -10,6 +10,14 @@
 
 ### Added
 
+- Expose the Worker `communicate` tool through host runtimes while preserving ordinary Session `task` and legacy history compatibility.
+
+- Accept host `workerWaitMode` and synchronous Worker waits while preserving asynchronous waiting and ordinary Task execution.
+
+- Accept independent host `workerTargets` and explicit empty Worker Session creation through Local, with deterministic work/assignment repair on same-key retries and no model execution during creation.
+
+- Enable direct Worker messaging in coordinated Sessions with persistent waiting and cancellation; keep legacy task tools exclusive to ordinary Sessions.
+
 - Register logical Workers from host assistant runtimes, persist coordination facts in Local SQLite, and expose trusted-host inbox and receipt APIs without changing ordinary chat or legacy task execution.
 
 - Expose `GET /sessions/:id/jobs` with the same lightweight, instance-scoped local-job observations as the Runtime SDK; keep Turn settlement distinct from background and descendant completion.
@@ -44,6 +52,8 @@
 ### Fixed
 
 - Use `details.logPath` for native bash and webfetch full-output logs and background job reads, replacing `details.outputPath` so hosts can distinguish logs from declared `details.outputs` artifacts.
+
+- Stop deleted Worker Session associations and waits and fail unaccepted deliveries atomically; report failures to waiting peers with retryable receipts after Runtime cache cleanup, preserving message facts, uncertain dispatch receipts and unrelated Sessions.
 
 - Retain `model.retry` lifecycle payloads in global and scoped HTTP SSE projections so hosts receive the retry identity, status, attempt, message and next-attempt time.
 

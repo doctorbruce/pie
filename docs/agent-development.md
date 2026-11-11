@@ -42,7 +42,15 @@ packages/ai：模型目录、协议适配、流式响应和凭据解析
 
 Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以把其他 Assistant 作为 Subagent 绑定交给当前 Session；模型通过普通 `task` 工具派发，服务再为目标角色创建新的 Session 和 Agent。
 
-SuperAgent 第 2 步新增可选 `WorkerScheduler`：Astron 通过现有 `/host-runtimes` 注册的每个 assistant 映射同 ID 的逻辑 Worker；Worker 收件、工作项、Session 关联和投递收据独立保存到 Local SQLite。同一 Worker 的不同根 Session 可以并行，同 Session 按入箱顺序等待前一 Turn 结算后执行；补充根据工作/明确 Session/可信回复链关联，不调用额外模型猜路由。目录、模型和产品绑定来自宿主对目标工作的选择。当前入口供可信 SDK/HTTP 宿主使用，旧聊天和 `task` 保持原路径；模型侧对等通信、可靠模型间隙接纳和重启对账属于后续步骤。API 与关闭顺序见[嵌入接入](runtime-embedding.md#可选-worker-内部调度)。
+SuperAgent 的可选 `WorkerScheduler` 将 `/host-runtimes` 中每个 assistant 映射为同 ID 的逻辑 Worker；Worker 收件、工作项、Session 关联和投递收据保存到 Local SQLite。同一 Worker 的不同根 Session 可以并行，同 Session 串行；确定性关联不额外调用模型。Worker Session 保存 `workerId === assistantId`，注入 `communicate` 并移除 `task`；普通 Session 继续原路径。Local 助手创建、更新、删除时同步创建、刷新、删除同 ID 的逻辑 Worker；运行时启动也会为已有本地助手补齐 Worker。这个同步只建立身份和配置，不创建 Worker Session 或启动模型；Worker Session 仍按具体工作懒创建。宿主可独立配置 `runtime.workerTargets: [{ assistantId, name, description }]` 作为主动通信目录；仅省略该字段时回退到 `subagents`，显式 `[]` 禁止主动目标。注册时校验目标存在于同一宿主注册表，发送时再核验最新授权；撤销立即阻止后续发送，新增目标不会自动进入在途 Turn 已装配的目录。有效 `reply_to` 按双方 Worker 和 Session 的消息因果链返回准确的来源 Session，不要求反向主动授权。来源身份由 Runtime 生成，目录、模型和产品绑定按目标选择，不继承来源历史和审批记忆。
+
+Local 宿主支持显式 `createSession({ assistantId, workerId: assistantId, ... })`：调度器创建空 Session，并补齐确定性 WorkItem 与 Assignment，不提交 Turn 或启动模型。创建记录、工作项和关联分步持久化；带同一 `creationKey` 和相同参数重试会复用 Session 并补齐部分关联，不是跨步骤原子创建。嵌入宿主直接使用共享 Runtime 时需自行调用调度器的 `createWorkerSession` 完成该关联。
+
+`communicate` 同时支持同步与异步等待；宿主通过 `runtime.workerWaitMode` 选择缺省值，省略时仍为 `async`。`sync` 每段保持当前 Turn 的工具等待，期间不发起模型请求；每段最长 30 秒，或在新输入到达时提前返回 `wait.status: waiting` 及 `reason: interval/message`，交回模型处理进展并以原 `message_id` 续等。有效 `question/reply/result` 优先经工具结果交回模型，保持既有原子消费；`progress` 不代表等待 ready 或工作完成，新输入仍在下一模型调用前与历史同事务接纳。只有用户明确要求时才传 `wait.timeout_ms`（1–300000），它是单次等待上限：到期返回 `timed_out`，超过 30 秒先返回 interval，续等按新调用重新计时。分段返回不让出、不取消对端，也不隐式登记异步等待。同步不接受目标为当前 Session 的请求；已受理目标 Turn 的明确失败记录在已消费投递的 error 字段，优先返回已就绪回应，否则报告该失败。
+
+协作主助手及时向用户说明实质进展，长任务约 60 秒保持沟通；仍需其他助手结果时继续等待，不把 waiting 或 progress 当作完成。Worker 收到 request 后，在有实质阶段成果或阻塞时通过 `communicate` 发送关联原请求的 `progress`，完成后发送一次 `result`。这些是模型沟通指引，不保证固定周期生成正文。工具卡的“仍在执行”心跳只用于展示，不进入模型历史。
+
+`async` 保存等待事实后立即返回，让模型正常向用户收尾；无工具调用的收尾消息保存后，Runtime 才以 `Turn.yield` 释放执行。收尾期间来信持久排队，当前 Turn 完整清理后在原 Session 开启新 Turn；只有异步让出才有 `execution.waitingForMessage`。同步回信先持久独占，再与工具结果、执行账本及消费收据同事务保存，避免另起 Turn 重复投递。旧等待记录省略 mode 视为 async。取消准确的活跃或已让出 Turn 会持久撤销等待，迟到回复不复活请求，不沿消息关系停止对端。未登记等待的已关联输入仍可在下一模型调用前接纳；Turn completed 不是业务完成。重启自动对账与 Router 增量提交仍属后续步骤。API 与装配见[嵌入接入](runtime-embedding.md#可选-worker-内部调度)。
 
 停止由共享 Agent loop 中断模型流、工具执行和钩子的异步等待；底层 Promise 不响应 `AbortSignal` 时也不阻塞本轮结束。中断时保留助手已输出的文本，为已启动的工具记录中断错误，并丢弃迟到的进度与结果；Runtime 仍等待终态事件和持久化完成后放行下一轮。取消不能撤销工具已经产生的外部副作用，工具仍须响应信号释放连接、进程等资源；同线程同步阻塞也不能由异步取消抢占。
 
@@ -95,7 +103,7 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 `skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`webfetch`、`job_output`、`job_kill`。命令只暴露一个 `bash` ID，实际 Shell 由平台和配置决定。
 
-这十个工具、按绑定出现的 `skill_search`、`skill` 和 `task` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。`tool_search` 搜索按需曝光的工具，`skill_search` 搜索已挂载的技能，两者不互相替代。
+这十个工具、按绑定出现的 `skill_search`、`skill` 和 `task`，以及受协调 Session 的 `communicate` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。`tool_search` 搜索按需曝光的工具，`skill_search` 搜索已挂载的技能，两者不互相替代。
 
 `webfetch` 适配 Amio/OpenCode 的抓取和格式转换逻辑，不引入其 Effect 运行框架。它接受 HTTP(S) URL，支持 `text/markdown/html`，默认 Markdown；网络请求及响应读取默认超时 30 秒、最大 120 秒，响应上限 5 MiB。抓取前通过 `context.ask()` 请求 `webfetch` 权限，Turn 取消会中断传输和响应读取。模型结果最多预览 2000 行或 50 KiB，完整长结果保存到临时文件供 `read` 续读。图片和其他二进制文件仍与 Amio 一样拒绝。源码及新增转换依赖的许可随 Sidecar 的 `.LICENSES.txt` 发行。
 

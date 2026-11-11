@@ -7,6 +7,7 @@ import type {
 	PermissionPolicy,
 	RuntimeConfig,
 	SkillBinding,
+	WorkerTarget,
 } from "./protocol.ts";
 import { parseToolIds } from "./tools.ts";
 
@@ -157,7 +158,33 @@ export function parseHostRuntimeDefinition(value: unknown, availableToolIds: rea
 	});
 	if (new Set(subagents.map((subagent) => subagent.id)).size !== subagents.length)
 		throw new SkillConfigError("Subagent ID 不可重复");
-	return { assistantId, assistantRevision, runtime: { ...runtime, subagents } };
+	let workerTargets: WorkerTarget[] | undefined;
+	if (input.workerTargets !== undefined) {
+		if (!Array.isArray(input.workerTargets)) throw new SkillConfigError("workerTargets 需要数组");
+		workerTargets = input.workerTargets.map((value) => {
+			const entry = object(value);
+			return {
+				assistantId: text(entry.assistantId, "Worker Assistant ID", 256),
+				name: text(entry.name, "Worker 名称", 200),
+				description: text(entry.description, "Worker 说明", 4096),
+			};
+		});
+		if (new Set(workerTargets.map((target) => target.assistantId)).size !== workerTargets.length)
+			throw new SkillConfigError("Worker Assistant ID 不可重复");
+	}
+	const workerWaitMode = input.workerWaitMode;
+	if (workerWaitMode !== undefined && workerWaitMode !== "async" && workerWaitMode !== "sync")
+		throw new SkillConfigError("workerWaitMode 必须为 async 或 sync");
+	return {
+		assistantId,
+		assistantRevision,
+		runtime: {
+			...runtime,
+			subagents,
+			...(workerTargets !== undefined ? { workerTargets } : {}),
+			...(workerWaitMode !== undefined ? { workerWaitMode } : {}),
+		},
+	};
 }
 
 export function hydrateHostRuntime(

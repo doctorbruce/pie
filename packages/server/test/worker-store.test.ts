@@ -60,6 +60,23 @@ test("SQLite Worker facts and independent work sessions survive close and reopen
 	await store.createWorkItem(workB);
 	await store.createAssignment(assignmentA);
 	await store.createAssignment(assignmentB);
+	const research: WorkerRecord = { ...worker, workerId: "research", assistantId: "research" };
+	await store.registerWorker(research);
+	await store.createWorkItem({
+		workId: "research-work",
+		title: "法规检索",
+		status: "active",
+		createdAt: 1,
+		updatedAt: 1,
+	});
+	await store.createAssignment({
+		assignmentId: "research-assignment",
+		workId: "research-work",
+		workerId: "research",
+		sessionId: "research-a",
+		status: "active",
+		createdAt: 1,
+	});
 	const message: WorkerMessage = {
 		messageId: "message-a",
 		workerId: worker.workerId,
@@ -98,7 +115,7 @@ test("SQLite Worker facts and independent work sessions survive close and reopen
 	await store.close();
 	localStore = openStore({ PI_DATA_DIR: directory });
 	store = createSqliteRuntimeStore(localStore);
-	assert.deepEqual(await store.listWorkers(), [worker]);
+	assert.deepEqual(await store.listWorkers(), [worker, research]);
 	assert.deepEqual(await store.readWorker(worker.workerId), worker);
 	assert.deepEqual(await store.readWorkItem(workA.workId), workA);
 	assert.deepEqual(await store.readWorkItem(workB.workId), workB);

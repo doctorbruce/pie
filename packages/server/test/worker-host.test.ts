@@ -84,7 +84,9 @@ test(
 		];
 		await runtime.registerHostRuntimes(definitions);
 		assert.deepEqual(
-			(await runtime.listWorkers()).map((worker) => worker.workerId),
+			(await runtime.listWorkers())
+				.filter((worker) => worker.workerId === "contract-assistant")
+				.map((worker) => worker.workerId),
 			["contract-assistant"],
 		);
 		const send = (key: string, workId: string, newSession = false) =>
@@ -135,7 +137,7 @@ test(
 		assert.equal((await runtime.getSession(bDelivery.sessionId)).turn?.status, "completed");
 		assert.equal(overlap, false);
 		await runtime.registerHostRuntimes([{ ...definitions[0], assistantRevision: "2" }]);
-		const workers = await runtime.listWorkers();
+		const workers = (await runtime.listWorkers()).filter((worker) => worker.workerId === definitions[0].assistantId);
 		assert.equal(workers.length, 1);
 		assert.equal(workers[0].assistantRevision, "2");
 		assert.equal(calls.length, 3, "deterministic routing must not call extra model/tool work");
@@ -175,7 +177,10 @@ test(
 		};
 		assert.equal((await core.request("/host-runtimes", "PUT", { runtimes: [definition] })).status, 200);
 		const workers = (await (await core.request("/workers")).json()) as { workers: WorkerRecord[] };
-		assert.equal(workers.workers[0].workerId, definition.assistantId);
+		assert.equal(
+			workers.workers.find((worker) => worker.workerId === definition.assistantId)?.workerId,
+			definition.assistantId,
+		);
 		const body = {
 			messageId: "http-message",
 			sourceWorkerId: definition.assistantId,

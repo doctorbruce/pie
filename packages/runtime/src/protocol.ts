@@ -97,7 +97,12 @@ export type HostSubagentBinding = {
 	assistantId: string;
 	model?: ModelSelection;
 };
-export type HostRuntimeConfig = AgentRuntimeConfig & { subagents: HostSubagentBinding[] };
+export type WorkerTarget = { assistantId: string; name: string; description: string };
+export type HostRuntimeConfig = AgentRuntimeConfig & {
+	subagents: HostSubagentBinding[];
+	workerTargets?: WorkerTarget[];
+	workerWaitMode?: "async" | "sync";
+};
 export type HostRuntimeDefinition = {
 	assistantId: string;
 	assistantRevision: string;
@@ -114,6 +119,8 @@ export type SubagentBinding = {
 };
 export type RuntimeConfig = AgentRuntimeConfig & {
 	subagents: SubagentBinding[];
+	workerTargets?: WorkerTarget[];
+	workerWaitMode?: "async" | "sync";
 	toolAvailability?: Record<string, boolean>;
 };
 export type RuntimeSource = "local" | "host";
@@ -149,6 +156,8 @@ export type SessionCreationReceipt = {
 
 export type SessionSummary = {
 	id: string;
+	/** Opt-in logical Worker identity; ordinary chat and legacy tasks omit it. */
+	workerId?: string;
 	archived?: boolean;
 	kind: "root" | "subagent";
 	forkedFromSessionId?: string;
@@ -193,6 +202,8 @@ export type ModelCatalog = {
 };
 export type Turn = {
 	id: string;
+	/** Execution was released; this does not declare the business work complete. */
+	yield?: { reason: "waiting_for_message"; waitId: string; messageId: string };
 	requestId?: string;
 	rootRequestId?: string;
 	canonicalTurnId?: string;
@@ -281,7 +292,13 @@ export type InteractionRequest = {
 export type InteractionReply = { approved: boolean; remember?: boolean };
 export type SessionExecution = {
 	modelStreaming: boolean;
-	activeTools: { toolCallId: string; toolName: string }[];
+	waitingForMessage?: { waitId: string; messageId: string };
+	activeTools: {
+		toolCallId: string;
+		toolName: string;
+		/** Process-local Worker send receipt while communicate is still waiting. */
+		partialResult?: Pick<Extract<WireMessage, { role: "toolResult" }>, "content" | "details">;
+	}[];
 	waitingForInteraction: boolean;
 	cancellationRequested: boolean;
 	recoveryBlockedReason?: string;

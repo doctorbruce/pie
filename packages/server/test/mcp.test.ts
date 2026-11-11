@@ -11,7 +11,15 @@ import type { McpServerConfig, SessionSnapshot } from "@pie/runtime/protocol";
 import { McpManager } from "../../local/src/mcp.ts";
 import { createCoreServer } from "../src/server.ts";
 
-async function httpFixture() {
+async function httpFixture(options: { blockToolsList?: boolean } = {}) {
+	let markToolsListStarted!: () => void;
+	let releaseToolsList!: () => void;
+	const toolsListStarted = new Promise<void>((resolve) => {
+		markToolsListStarted = resolve;
+	});
+	const toolsListGate = new Promise<void>((resolve) => {
+		releaseToolsList = resolve;
+	});
 	const server = createServer(async (request, response) => {
 		if (request.method !== "POST") {
 			response.writeHead(405).end();
@@ -29,13 +37,15 @@ async function httpFixture() {
 			return;
 		}
 		let result: unknown;
-		if (message.method === "initialize")
+		if (message.method === "initialize") {
 			result = {
 				protocolVersion: "2025-06-18",
 				capabilities: { tools: {} },
 				serverInfo: { name: "http-fixture", version: "1" },
 			};
-		else if (message.method === "tools/list")
+		} else if (message.method === "tools/list") {
+			markToolsListStarted();
+			if (options.blockToolsList) await toolsListGate;
 			result = {
 				tools: ["echo", "fail", "wait", "a-b", "a_b"].map((name) => ({
 					name,
@@ -43,7 +53,7 @@ async function httpFixture() {
 					inputSchema: { type: "object", properties: { text: { type: "string" } } },
 				})),
 			};
-		else if (message.method === "tools/call") {
+		} else if (message.method === "tools/call") {
 			if (message.params?.name === "wait") await sleep(500);
 			result = {
 				content: [{ type: "text", text: message.params?.arguments.text ?? "FIXTURE_ERROR" }],
@@ -59,6 +69,8 @@ async function httpFixture() {
 	assert(address && typeof address !== "string");
 	return {
 		url: `http://127.0.0.1:${address.port}/mcp`,
+		toolsListStarted,
+		releaseToolsList,
 		close: () =>
 			new Promise<void>((resolve) => {
 				server.closeAllConnections();
@@ -66,6 +78,54 @@ async function httpFixture() {
 			}),
 	};
 }
+
+test("Host Runtime registration waits for configured MCP prewarm", async (context) => {
+	const directory = await mkdtemp(join(tmpdir(), "pie-mcp-prewarm-"));
+	const http = await httpFixture({ blockToolsList: true });
+	const core = createCoreServer({ PI_DATA_DIR: directory });
+	await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+	const address = core.server.address();
+	assert(address && typeof address !== "string");
+	const base = `http://127.0.0.1:${address.port}`;
+	context.after(async () => {
+		http.releaseToolsList();
+		await core.close();
+		await http.close();
+		await rm(directory, { recursive: true, force: true });
+	});
+	const registration = fetch(`${base}/host-runtimes`, {
+		method: "PUT",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			runtimes: [
+				{
+					assistantId: "prewarm",
+					assistantRevision: "1",
+					runtime: {
+						systemPrompt: "",
+						toolIds: [],
+						skills: [],
+						subagents: [],
+						mcp: { http: { type: "remote", url: http.url, oauth: false } },
+					},
+				},
+			],
+		}),
+	});
+	await http.toolsListStarted;
+	let returned = false;
+	void registration.then(() => {
+		returned = true;
+	});
+	await sleep(20);
+	assert.equal(returned, false);
+	http.releaseToolsList();
+	assert.equal((await registration).status, 200);
+	const status = (await (await fetch(`${base}/mcp`)).json()) as {
+		servers: Record<string, { status: string }>;
+	};
+	assert.equal(status.servers.http.status, "connected");
+});
 
 async function settled(
 	base: string,

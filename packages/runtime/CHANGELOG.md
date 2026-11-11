@@ -4,6 +4,7 @@
 
 ### Changed
 
+- Wait for configured Host Runtime MCP prewarm during runtime registration, reusing the connection readiness promise on the first Turn.
 - Publish the existing skill index and optional host `capabilityCatalog` as persisted, hidden user context only on first use or change. Append complete replacements, including empty lists, preserve system/history prefixes, and republish after compaction removes the list.
 
 ### Removed

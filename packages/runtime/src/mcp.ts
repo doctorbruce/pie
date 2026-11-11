@@ -106,6 +106,8 @@ export function isMcpError(details: unknown): boolean {
 
 export interface McpRuntime {
 	configure(configs: readonly Record<string, McpServerConfig>[]): void;
+	/** Wait for configured MCP connections and tool discovery already started by configure(). */
+	prewarm?(): Promise<void>;
 	status(): { servers: Record<string, Record<string, unknown>> };
 	acquire(
 		configs: Record<string, McpServerConfig>,

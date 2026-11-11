@@ -54,7 +54,7 @@ SuperAgent 第 2 步新增可选 `WorkerScheduler`：Astron 通过现有 `/host-
 
 1. 服务首次启动自动创建“默认助手”，`toolIds`、`pluginIds` 和 `subagentIds` 为空。十个内置工具均已注册，默认启用集合后续再定。
 2. 本地会话保存 `assistantId`、已应用的 Assistant 版本和解析后的 `runtime`（提示词、工具、技能路径、来源绑定和可调用助手）。每次 Turn 准入前重新读取当前 Assistant 及目标 Assistant；版本或 runtime 变化时保留消息并重建 Agent。运行中仅 Skill 绑定在当前工具批次结束、下一次模型调用前刷新；其他配置仍在下一次提交时应用。
-3. 宿主启动 Pie 后用 `PUT /host-runtimes` 注册全部 Assistant runtime，配置刷新时事务性替换注册表。创建 Session 只提供 `assistantId`；每次 Turn 准入时，Pie 从注册表解析该 Assistant 及其 Subagent 的最新版本。Turn 只额外接收时间、记忆、附件等本轮动态 `systemPrompt`，不重复传稳定 runtime。
+3. 宿主启动 Pie 后用 `PUT /host-runtimes` 注册全部 Assistant runtime，配置刷新时事务性替换注册表；注册请求会等待已配置 Host MCP 的后台连接和工具发现完成。创建 Session 只提供 `assistantId`；每次 Turn 准入时，Pie 从注册表解析该 Assistant 及其 Subagent 的最新版本。Turn 只额外接收时间、记忆、附件等本轮动态 `systemPrompt`，不重复传稳定 runtime。
 4. 模型在新建会话时独立选择，省略时使用提供商配置的默认模型。模型选择不放进 Assistant，也不把凭据复制进助手或会话记录。
 5. 已有 Agent 保留创建时的模型调用配置。Assistant/runtime 变化或服务重启导致重建时，使用会话保存的 `provider/model` 从当前 `models.json` 重新解析端点、凭据和模型参数。
 6. 模型被移除或配置失效时，历史仍可查看；继续执行明确报错，不悄悄切换到其他模型。修好配置后可以再次提交。

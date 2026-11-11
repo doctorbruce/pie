@@ -83,6 +83,14 @@ export class McpManager {
 				if (server.enabled !== false) this.entry(name, server, process.cwd());
 	}
 
+	async prewarm(): Promise<void> {
+		await Promise.allSettled(
+			[...this.entries.values()]
+				.filter((entry) => this.fingerprints.has(entry.fingerprint))
+				.map((entry) => entry.ready),
+		);
+	}
+
 	status(): { servers: Record<string, Record<string, unknown>> } {
 		return {
 			servers: Object.fromEntries(

@@ -1939,6 +1939,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				hostRuntimes.clear();
 				for (const [id, definition] of registry) hostRuntimes.set(id, definition);
 				factory.mcp.configure(definitions.map((definition) => definition.runtime.mcp ?? {}));
+				await factory.mcp.prewarm?.();
 				return {
 					runtimes: definitions.map(({ assistantId, assistantRevision }) => ({
 						assistantId,

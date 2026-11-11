@@ -339,3 +339,19 @@ test("zero-output length stops recover once and repeated overflow cannot loop", 
 		assert.equal(compactions, 1);
 	}
 });
+
+test("HTTP and streamed payload-size errors are recoverable without confusing rate limits", () => {
+	for (const errorMessage of [
+		"413: request entity too large",
+		"413 status code (no body)",
+		"Upstream API error: 413",
+		'{"message":"upstream rejected the request","code":413}',
+		"Request body is too large",
+		"Upstream payload too large",
+	]) {
+		assert(isContextOverflow(fauxAssistantMessage("", { stopReason: "error", errorMessage })), errorMessage);
+	}
+	for (const errorMessage of ["429 rate limit: request 413", "Invalid parameter: image 413 is missing"]) {
+		assert(!isContextOverflow(fauxAssistantMessage("", { stopReason: "error", errorMessage })), errorMessage);
+	}
+});

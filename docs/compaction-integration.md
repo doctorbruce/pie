@@ -13,18 +13,26 @@
 
 ## 自动路径
 
-1. 在真实 SDK 调用前，按最终暴露的工具 schema、系统提示和消息估算输入；与有效最近用量取较大值。
+1. 在真实 SDK 调用前，按图片投影后的消息、最终暴露的工具 schema 和系统提示估算输入；消息投影未变时，同时参考有效最近用量。
 2. 达到预算后摘要旧历史，合并旧 checkpoint，保留最近消息；切点不落在 toolResult 前，长工具轮次保留对应 assistant 调用。
-3. 切分当前轮次时，额外保留当前原始 user 消息（包含图片），不为了恢复溢出而偷偷删除媒体。
-4. 保存摘要、边界、生成时原始消息数量、文件列表和摘要用量；后续请求不再相信压缩前捕获的 usage。SQLite 和导出继续保留完整历史。
-5. Provider 仍返回上下文超限，或零输出的提前 length 截断时，只在尚未转发内容事件且响应无有效内容时强制压缩并重试一次。重试不重复提交用户消息，不写入被抑制的错误 assistant，不重放已经执行的工具。
+3. 切分当前轮次时，额外保留最新真实用户的原始消息及全部图片。
+4. 保存摘要、边界、生成时原始消息数量、文件列表和摘要用量；后续请求不再相信压缩前捕获的 usage。SQLite 保留完整原始历史，跨核导出沿用既有用户附件和工具图片占位契约。
+5. Provider 仍返回上下文超限、请求体过大的 HTTP / SSE 413，或零输出的提前 length 截断时，只在尚未转发内容事件且响应无有效内容时强制压缩并重试一次。第二次失败明确结束本轮。重试不重复提交用户消息，不写入被抑制的错误 assistant，不重放已经执行的工具。
 6. 摘要瞬时错误按上游策略重试，额度/计费错误不重试；空摘要、length、工具调用、取消或压缩后仍超预算都不写入 checkpoint。失败明确结束本轮，不再静默发送超预算上下文。
 
-摘要请求本身采用上游文本序列化，不重新发送旧图片像素；已移入摘要的旧图片不再作为图片传入后续调用。当前轮次和保留区内的图片仍原样传入，原始图片始终保留在历史中。
+## 图片上下文
+
+普通模型请求使用 `projectImageHistory` 生成纯投影：先按旧到新省略工具结果中的图片，再按旧到新省略旧用户图片，尽量满足图片编码预算。省略处留下明确的文本占位，保留原有文字、工具调用和结果配对。最新真实用户的全部图片受保护；最新用户只有文字时，更早的用户图片可以省略。能力目录、checkpoint、后台合成消息、Worker 来信和由导入 system 消息转换的 user 不会取代真实用户。
+
+预算逐份累计图片 `data` base64 字符串经 JSON 编码后的 UTF-8 字节，重复出现的图片按每次发送计数。它不包含文本、工具 schema 或完整 Provider / HTTP 封装，因此不是请求体的硬上限；当前用户图片本身也可能超过目标。投影不改写输入消息、SQLite 或导出，后续请求仍可根据原始历史重新选择图片。
+
+摘要模型支持图片时，待摘要历史复用同一预算投影，并把保留的原图连同来源、顺序标记交给摘要模型；不支持图片时继续使用文本摘要。已移入摘要的图片由摘要文本承接，保留区中的图片在普通请求发送前仍受投影预算约束。摘要切分显式沿用原始上下文的最新真实用户身份，不误保护摘要片段末尾的旧用户图片。
+
+上传入口继续复用既有图片 MIME、base64 和每次输入图片合计 20 MiB 解码后大小校验；本轮没有新增 resize 或图片重编码。
 
 ## 和 Amio 的取舍
 
-只读对照 `E:/Projects/amio-opencode/opencode/packages/opencode/src/session/overflow.ts`、`compaction.ts` 与 `prompt.ts`：
+对照本地 Amio 的 `packages/opencode/src/session/overflow.ts`、`compaction.ts`、`prompt.ts` 与 `message-v2.ts`，当前两者都在请求投影中管理历史图片，存储仍保留原图：
 
 | 项目 | Amio | 本轮 Pie |
 | --- | --- | --- |
@@ -32,15 +40,18 @@
 | 自定义阈值 | threshold_tokens 不允许越过安全预算 | thresholdTokens 同样取安全预算的较小值 |
 | 请求前检查 | 序列化 system + messages 估算 | system + 最终工具 schema + 消息，另参考有效 usage |
 | 最近内容 | 尾部轮次与 token 预算 | keepRecentTokens + 工具调用安全切点，保留当前 user |
-| Provider 超限 | 压缩任务后恢复执行 | 同一原生调用强制压缩后至多重试一次 |
-| 图片处理 | 部分 overflow 路径会移除媒体 | 不删除当前图片；无法容纳时明确失败 |
+| Provider 超限 | 压缩任务后恢复执行 | 同一原生调用强制压缩后至多重试一次，包含 HTTP / SSE 413 |
+| 图片处理 | 默认 16 MiB 编码目标，先工具图再旧用户图，保护当前真实用户图片 | 同样的投影顺序与保护规则；当前图超目标时保留 |
+| 图片摘要 | 视觉模型接收预算内图片，非视觉模型使用文本 | 同样区分视觉与文本摘要，并为图片添加来源标记 |
 | 运行时/存储 | OpenCode Session/Effect | 保持 Pie Agent loop 和 SQLite |
 
 例如 contextWindow=1,048,576、默认 reserveTokens=16,384 时，预算是 943,718 tokens（90%），不再等到旧实现的 1,032,192 tokens。模型 ID、contextWindow 和 maxTokens 元数据均未改变。
 
 ## 配置
 
-配置放在独立的 `PI_DATA_DIR/settings.json`，支持 JSON 注释，避免宿主重写 `models.json` 时丢失。配置在创建或重建 Agent 时读取，现有 Agent 需重启服务或重建运行时后应用。
+图片预算使用公开的 `AgentRuntimeConfig.maxHistoryImageBytes`，必须为正安全整数，默认 `16 * 1024 * 1024`（16 MiB）。宿主配置在下一 Turn 重建 Agent 时应用，子助手使用自身预算；独立本地使用同一默认值，没有新增图片预算的 settings / env 开关。宿主接入见 [能力注入要求](runtime-embedding.md#能力注入要求)。
+
+独立运行的 token 压缩和重试配置放在 `PI_DATA_DIR/settings.json`，支持 JSON 注释，避免宿主重写 `models.json` 时丢失。配置在创建或重建 Agent 时读取，现有 Agent 需重启服务或重建运行时后应用。
 
 ```json
 {
@@ -71,9 +82,10 @@
 
 会话 SSE 和全局 SSE 提供 `compaction.started`、`compaction.retry`、`compaction.finished`（completed/failed/cancelled）。会话的 `compaction.updated` 和 `snapshot.compaction` 保持持久 checkpoint 的事实来源。
 
-采用服务边界契约测试：本地 HTTP 模拟 Provider + 真实 SDK + SQLite，验证超限重试、摘要退避、额度失败、不完整摘要、取消、重启和图片保留；无需真实凭据或付费请求。确定性预算、用量、工具边界与摘要投影使用行为级单测。
+采用服务边界契约测试：本地 HTTP 模拟 Provider + 真实 SDK + SQLite，验证超限重试、HTTP / SSE 413、摘要退避、额度失败、不完整摘要、取消、重启和图片保留；无需真实凭据或付费请求。确定性预算、用量、工具边界与摘要投影使用行为级单测。
 
 ```powershell
+node --conditions=source --test packages/runtime/test/image-history.test.ts packages/runtime/test/image-history-config.test.ts
 node --conditions=source --test packages/server/test/auto-compaction.test.ts packages/server/test/auto-compaction-server.test.ts packages/server/test/compaction.test.ts packages/server/test/compaction-server.test.ts packages/server/test/multimodal-input.test.ts
 npm run check
 ```

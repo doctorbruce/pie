@@ -5,12 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
-import type { Assistant, SessionEvent, SessionSnapshot } from "@pie/runtime/protocol";
+import type { Assistant, SessionEvent, SessionSnapshot, SessionTransfer } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 
 type ModelRequest = { summary: boolean; body: string };
 type Reply = {
 	error?: string;
+	streamError?: string;
 	status?: number;
 	hold?: boolean;
 	finishReason?: string;
@@ -22,7 +23,11 @@ async function start(
 	handle: (request: ModelRequest, requests: ModelRequest[]) => Reply,
 	thresholdTokens = 300,
 	hostThresholdTokens?: number | null,
-	options: { retry?: { maxRetries: number; baseDelayMs: number }; toolIds?: string[] } = {},
+	options: {
+		retry?: { maxRetries: number; baseDelayMs: number };
+		toolIds?: string[];
+		maxHistoryImageBytes?: number;
+	} = {},
 ) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-auto-compaction-"));
 	const requests: ModelRequest[] = [];
@@ -40,6 +45,10 @@ async function start(
 				return;
 			}
 			response.writeHead(200, { "content-type": "text/event-stream" });
+			if (reply.streamError) {
+				response.end(`data: ${JSON.stringify({ error: { message: reply.streamError, type: "test_error" } })}\n\n`);
+				return;
+			}
 			if (reply.hold) {
 				response.flushHeaders();
 				return;
@@ -98,11 +107,11 @@ async function start(
 			retry: options.retry ?? { maxRetries: 2, baseDelayMs: 1 },
 		}),
 	);
-	const core = createCoreServer({ PI_DATA_DIR: directory });
+	let core = createCoreServer({ PI_DATA_DIR: directory });
 	await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
 	const address = core.server.address();
 	assert(address && typeof address !== "string");
-	const base = `http://127.0.0.1:${address.port}`;
+	let base = `http://127.0.0.1:${address.port}`;
 	const abort = new AbortController();
 	let reading: Promise<void> | undefined;
 	context.after(async () => {
@@ -119,7 +128,7 @@ async function start(
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(body),
 		});
-	async function configureHost(threshold?: number) {
+	async function configureHost(threshold?: number, maxHistoryImageBytes = options.maxHistoryImageBytes) {
 		const response = await fetch(`${base}/host-runtimes`, {
 			method: "PUT",
 			headers: { "content-type": "application/json" },
@@ -134,6 +143,7 @@ async function start(
 							skills: [],
 							subagents: [],
 							compaction: threshold === undefined ? {} : { thresholdTokens: threshold },
+							maxHistoryImageBytes,
 						},
 					},
 				],
@@ -195,7 +205,26 @@ async function start(
 		assert.equal((await post(`/sessions/${session.id}/turns`, body)).status, 202);
 		return settled();
 	}
-	return { requests, events, post, session, snapshot, settled, submit, configureHost, directory };
+	return {
+		requests,
+		events,
+		post,
+		session,
+		snapshot,
+		settled,
+		submit,
+		configureHost,
+		directory,
+		export: async () => (await (await fetch(`${base}/sessions/${session.id}/export`)).json()) as SessionTransfer,
+		async restart() {
+			await core.close();
+			core = createCoreServer({ PI_DATA_DIR: directory });
+			await new Promise<void>((resolve) => core.server.listen(0, "127.0.0.1", resolve));
+			const address = core.server.address();
+			assert(address && typeof address !== "string");
+			base = `http://127.0.0.1:${address.port}`;
+		},
+	};
 }
 
 test("ordinary model requests recover from an empty-body 503, including host compaction defaults", async (context) => {
@@ -296,7 +325,7 @@ test("host compaction thresholds hot-update without reading a local settings fil
 	assert.equal(restored.compaction?.generation, 1);
 });
 
-test("provider overflow compacts and retries the same native turn, retaining images and full history", async (context) => {
+test("provider overflow uses vision summaries and retries the same native turn, retaining images and full history", async (context) => {
 	let failed = false;
 	const server = await start(
 		context,
@@ -309,7 +338,11 @@ test("provider overflow compacts and retries the same native turn, retaining ima
 		},
 		9000,
 	);
-	assert.equal((await server.submit({ text: `older-${"x".repeat(600)}` })).turn?.status, "completed");
+	const olderImage = { type: "image", data: "b2xkZXItaW1hZ2U=", mimeType: "image/png" };
+	assert.equal(
+		(await server.submit({ text: `older-${"x".repeat(600)}`, images: [olderImage] })).turn?.status,
+		"completed",
+	);
 	const image = { type: "image", data: "Zml4dHVyZSBpbWFnZQ==", mimeType: "image/png" };
 	const snapshot = await server.submit({ text: "current", images: [image] });
 	assert.equal(snapshot.turn?.status, "completed");
@@ -320,8 +353,85 @@ test("provider overflow compacts and retries the same native turn, retaining ima
 		0,
 	);
 	assert(server.requests.at(-1)?.body.includes(`data:image/png;base64,${image.data}`));
+	assert(
+		server.requests.find((request) => request.summary)?.body.includes(`data:image/png;base64,${olderImage.data}`),
+	);
 	assert(server.events.some((event) => event.type === "compaction.started" && event.event?.reason === "overflow"));
 	assert(server.events.some((event) => event.type === "compaction.finished" && event.event?.status === "completed"));
+});
+
+test("outgoing history omits old user and tool images while keeping current attachments and persistent originals", async (context) => {
+	const server = await start(
+		context,
+		(_request, requests) =>
+			requests.length === 1
+				? { tool: { name: "read", arguments: { path: "screenshot.png", description: "Inspect screenshot" } } }
+				: {},
+		9000,
+		9000,
+		{ toolIds: ["read"], maxHistoryImageBytes: 128 },
+	);
+	const screenshot = Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), Buffer.alloc(256, 3)]);
+	await writeFile(join(server.directory, "screenshot.png"), screenshot);
+	const olderImage = { type: "image", data: Buffer.alloc(256, 7).toString("base64"), mimeType: "image/png" };
+	assert.equal(
+		(await server.submit({ text: "Read the screenshot.", images: [olderImage] })).turn?.status,
+		"completed",
+	);
+	const image = { type: "image", data: "Y3VycmVudC1pbWFnZQ==", mimeType: "image/png" };
+	const snapshot = await server.submit({ text: "Inspect this current image.", images: [image] });
+	assert.equal(snapshot.turn?.status, "completed", snapshot.turn?.error);
+	assert.equal(server.requests.length, 3);
+	const sent = server.requests.at(-1)!.body;
+	assert(sent.includes(`data:image/png;base64,${image.data}`));
+	assert(!sent.includes(olderImage.data));
+	assert(!sent.includes(screenshot.toString("base64")));
+	assert(sent.includes("Read image file"));
+	assert(sent.includes("read-once"));
+	assert(sent.includes("Historical image omitted"));
+	assert.equal(snapshot.messages.filter((message) => message.role === "toolResult").length, 1);
+	const stored = JSON.stringify(snapshot.messages);
+	assert(stored.includes(olderImage.data));
+	assert(stored.includes(screenshot.toString("base64")));
+	const exported = JSON.stringify(await server.export());
+	assert(exported.includes(olderImage.data));
+	await server.configureHost(9000, 1024);
+	assert.equal((await server.submit({ text: "Revisit the previous screenshots." })).turn?.status, "completed");
+	assert(server.requests.at(-1)?.body.includes(olderImage.data));
+	assert(server.requests.at(-1)?.body.includes(screenshot.toString("base64")));
+	await server.restart();
+	const restored = JSON.stringify((await server.snapshot()).messages);
+	assert(restored.includes(olderImage.data));
+	assert(restored.includes(screenshot.toString("base64")));
+});
+
+test("repeated streaming 413 stops after one recovery without repeating a completed tool or dropping the current image", async (context) => {
+	const server = await start(
+		context,
+		(request, requests) => {
+			if (request.summary) return {};
+			const count = requests.filter((call) => !call.summary).length;
+			if (count === 1)
+				return { tool: { name: "read", arguments: { path: "result.txt", description: "Read result" } } };
+			return count > 2 ? { streamError: "Upstream API error: 413" } : {};
+		},
+		9000,
+		undefined,
+		{ toolIds: ["read"] },
+	);
+	await writeFile(join(server.directory, "result.txt"), "already completed image inspection");
+	assert.equal((await server.submit({ text: "Read result.txt." })).turn?.status, "completed");
+	const image = { type: "image", data: "Y3VycmVudC1pbWFnZQ==", mimeType: "image/png" };
+	const snapshot = await server.submit({ text: "Inspect this.", images: [image] });
+	assert.equal(snapshot.turn?.status, "failed");
+	assert.match(snapshot.turn?.error ?? "", /413/);
+	assert.equal(server.requests.length, 5);
+	const summaries = server.requests.filter((request) => request.summary);
+	assert.equal(summaries.length, 1);
+	assert(summaries[0].body.includes("already completed image inspection"));
+	assert(server.requests.at(-1)?.body.includes(`data:image/png;base64,${image.data}`));
+	assert.equal(server.events.filter((event) => event.event?.type === "tool_execution_start").length, 1);
+	assert(JSON.stringify(snapshot.messages).includes(image.data));
 });
 
 test("transient summary failures retry through the SDK and publish backoff events", async (context) => {

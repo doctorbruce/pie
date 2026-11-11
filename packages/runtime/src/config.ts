@@ -106,6 +106,14 @@ function parseAgentRuntimeConfig(
 			throw new SkillConfigError("compaction.thresholdTokens 必须是正整数");
 		compaction = threshold === undefined ? {} : { thresholdTokens: threshold };
 	}
+	const maxHistoryImageBytes = input.maxHistoryImageBytes;
+	if (
+		maxHistoryImageBytes !== undefined &&
+		(typeof maxHistoryImageBytes !== "number" ||
+			!Number.isSafeInteger(maxHistoryImageBytes) ||
+			maxHistoryImageBytes <= 0)
+	)
+		throw new SkillConfigError("maxHistoryImageBytes 必须是正整数");
 	return {
 		systemPrompt: input.systemPrompt,
 		...(capabilityCatalog !== undefined ? { capabilityCatalog } : {}),
@@ -116,6 +124,7 @@ function parseAgentRuntimeConfig(
 		permissions: parsePermissionPolicy(input.permissions),
 		...(input.mcp !== undefined ? { mcp: parseMcpServers(input.mcp) } : {}),
 		...(compaction !== undefined ? { compaction } : {}),
+		...(maxHistoryImageBytes !== undefined ? { maxHistoryImageBytes } : {}),
 	};
 }
 
@@ -175,6 +184,9 @@ export function hydrateHostRuntime(
 					permissions: structuredClone(target.runtime.permissions),
 					...(target.runtime.mcp ? { mcp: structuredClone(target.runtime.mcp) } : {}),
 					...(target.runtime.compaction ? { compaction: structuredClone(target.runtime.compaction) } : {}),
+					...(target.runtime.maxHistoryImageBytes !== undefined
+						? { maxHistoryImageBytes: target.runtime.maxHistoryImageBytes }
+						: {}),
 				},
 			};
 		}),

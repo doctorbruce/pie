@@ -79,6 +79,8 @@ export type McpServerConfig =
 	  };
 export type AgentRuntimeConfig = {
 	compaction?: { thresholdTokens?: number };
+	/** Encoded image target; defaults to 16 MiB. Latest real user images may exceed it. */
+	maxHistoryImageBytes?: number;
 	mcp?: Record<string, McpServerConfig>;
 	systemPrompt: string;
 	capabilityCatalog?: string;

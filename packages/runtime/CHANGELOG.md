@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Project image history with a configurable `AgentRuntimeConfig.maxHistoryImageBytes` target, defaulting to 16 MiB of encoded image data. Omit older tool images before older user images, preserve the latest real user images and original stored history, and include budgeted images with source markers in vision summaries.
+
 - Wait for configured Host Runtime MCP prewarm during runtime registration, reusing the connection readiness promise on the first Turn.
 - Publish the existing skill index and optional host `capabilityCatalog` as persisted, hidden user context only on first use or change. Append complete replacements, including empty lists, preserve system/history prefixes, and republish after compaction removes the list.
 
@@ -70,6 +72,8 @@
 - List currently available, unloaded deferred tools by ID and a brief summary in `tool_search.description`, refreshing the list before each model request without changing the system prompt.
 
 ### Fixed
+
+- Recover once through compaction from HTTP or streamed 413 payload errors, preserving current user images and ending the Turn if recovery fails again.
 
 - Cancel local Shell/Task jobs belonging to an explicitly stopped Turn, including descendant background work after a Task returns; wait for their cleanup before Turn settlement and suppress cancellation wakeups. Preserve jobs from normally completed earlier Turns and other sessions.
 

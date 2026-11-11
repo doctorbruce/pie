@@ -19,6 +19,7 @@ import { retryAssistantCall } from "./compaction/retry.ts";
 import { SUMMARIZATION_SYSTEM_PROMPT } from "./compaction/utils.ts";
 import { type CompactionEvent, createCompactionStream, createCompactionTransform } from "./compaction.ts";
 import { resolveCompactionSettings } from "./compaction-settings.ts";
+import { projectImageHistory } from "./image-history.ts";
 import { BackgroundJobs } from "./jobs.ts";
 import { isMcpError } from "./mcp.ts";
 import { createRetryStream } from "./model-retry.ts";
@@ -267,6 +268,8 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							contextWindow: realModel.contextWindow,
 							initial: compaction.current,
 							settings: automation?.compaction,
+							supportsImages: realModel.input.includes("image"),
+							imageBudgetBytes: runtime.maxHistoryImageBytes,
 							onCompacted: async (next, source, projected) => {
 								next.loadedToolNames = toolSearch.loadedToolNames;
 								await compaction.update(next, source, projected);
@@ -275,14 +278,22 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 								for (const message of projected) source.push(message);
 							},
 							report: compaction.report,
-							summarize: async ({ prompt, maxTokens }, signal) => {
+							summarize: async ({ prompt, maxTokens, images }, signal) => {
 								const response = await retryAssistantCall(
 									() =>
 										models.completeSimple(
 											realModel,
 											{
 												systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
-												messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+												messages: [
+													{
+														role: "user",
+														content: images?.length
+															? [{ type: "text", text: prompt }, ...images]
+															: prompt,
+														timestamp: Date.now(),
+													},
+												],
 											},
 											{
 												signal,
@@ -323,11 +334,21 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 					context.messages,
 					options?.signal,
 				)) as typeof context.messages;
-				return models.streamSimple(model, context, {
-					...options,
-					headers: { ...options?.headers, ...modelHeaders },
-					onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
-				});
+				return models.streamSimple(
+					model,
+					{
+						...context,
+						messages: projectImageHistory(
+							context.messages,
+							runtime.maxHistoryImageBytes,
+						) as typeof context.messages,
+					},
+					{
+						...options,
+						headers: { ...options?.headers, ...modelHeaders },
+						onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
+					},
+				);
 			};
 			const retryStream = createRetryStream(realStream, automation?.retry, report);
 			const compactStream = compactContext

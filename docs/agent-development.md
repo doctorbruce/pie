@@ -378,6 +378,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `packages/local/src/store.ts` | SQLite、消息落盘与中断恢复 |
 | `packages/runtime/src/agent.ts` | 使用注入能力构造 Agent、工具发现、模型调用和测试 provider |
 | `packages/runtime/src/compaction.ts` | 上下文预算、切分点、摘要生成输入和压缩后模型上下文 |
+| `packages/runtime/src/image-history.ts` | 请求图片预算、真实用户识别和不修改原历史的图片投影 |
 | `packages/local/src/plugins.ts` | Astron manifest 的 Skill 索引、本地导入与卸载 |
 | `packages/runtime/src/config.ts`、`packages/local/src/skills.ts` | 共享运行配置校验与本地 Skill 读取、来源和加载结果 |
 | `packages/local/src/tools.ts`、`tools/` | 十个内置工具的 Core 适配、文件操作、网页抓取、搜索、系统命令和后台作业管理 |
@@ -388,6 +389,6 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 
 运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖十个内置工具的注册、文件读写改查、网页抓取、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Bash 失败、限额、取消、后台执行和超时。`webfetch.test.ts` 覆盖格式转换、权限、重定向、响应限额、结果预览、超时和取消。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
 
-自动压缩位于服务层，不修改 `agent-loop.ts`。真实模型每次调用前，`transformContext` 根据最后一次有效模型 usage 加尾部消息估算 token；超过模型窗口减去保留预算时，用同一模型生成结构化摘要，并把“摘要 + 最近消息”作为本次模型上下文。切分点不会落在 `toolResult`，后续压缩会把新历史合并进旧摘要。摘要记录随会话持久化，完整消息数组保持不变，因此页面和恢复仍能看到原始历史。摘要请求失败时回退到原上下文。
+自动压缩由共享 Runtime 装配，不修改 `agent-loop.ts`。真实模型调用前检查上下文预算；需要压缩时用同一模型生成摘要，保留工具调用安全边界和当前真实用户输入，后续压缩合并旧摘要。摘要失败时明确结束本轮。普通请求和视觉摘要复用纯图片投影，优先省略历史工具图片，再省略旧用户图片；SQLite 保留完整原始历史，导出沿用既有契约。图片预算、视觉摘要和 HTTP / SSE 413 恢复边界见 [自动压缩接入](compaction-integration.md)。
 
 当前本地助手最多 32 个，插件最多 32 个，每个助手的 `subagentIds` 最多 32 项；根会话和子会话均未设置固定数量上限。会话 SSE 使用有界启动快照和后续增量，HTTP 和 SDK 支持历史分页；全局 `/events` 持续携带轻量运行摘要。持久 Turn 列表仍是后续能力。

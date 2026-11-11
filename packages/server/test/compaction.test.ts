@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { createCompactionTransform } from "@pie/runtime/compaction";
+import { type CompactionSummaryRequest, createCompactionTransform } from "@pie/runtime/compaction";
 import type { ContextCompaction } from "@pie/runtime/protocol";
 import { nextCapabilityCatalog } from "../../runtime/src/capability-catalog.ts";
 
@@ -147,5 +147,214 @@ test("commit failure and cancellation leave the original working history availab
 		onCompacted: () => assert.fail("cancelled checkpoint must not commit"),
 	});
 	await assert.rejects(cancelled(messages, controller.signal), { name: "AbortError" });
+	assert.deepEqual(messages, original);
+});
+
+function imageHistory(): AgentMessage[] {
+	return [
+		{ role: "user", content: [{ type: "image", data: "b2xk", mimeType: "image/png" }], timestamp: 1 },
+		fauxAssistantMessage([{ type: "toolCall", id: "read-1", name: "read", arguments: { path: "chart.png" } }]),
+		{
+			role: "toolResult",
+			toolCallId: "read-1",
+			toolName: "read",
+			content: [
+				{ type: "text", text: `Previously read chart.png successfully${"x".repeat(2100)}` },
+				{ type: "image", data: "dG9vbA==", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 3,
+		},
+		{ role: "user", content: [{ type: "image", data: "cmVjZW50", mimeType: "image/png" }], timestamp: 4 },
+		fauxAssistantMessage("previous answer", { timestamp: 5 }),
+		{ role: "user", content: [{ type: "image", data: "Y3VycmVudA==", mimeType: "image/png" }], timestamp: 6 },
+	];
+}
+
+test("vision summaries receive historical user and tool images with their sources", async () => {
+	const messages = imageHistory();
+	const original = structuredClone(messages);
+	let request: CompactionSummaryRequest | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		supportsImages: true,
+		imageBudgetBytes: 128,
+		settings: { reserveTokens: 100, keepRecentTokens: 1 },
+		summarize: async (input) => {
+			request = input;
+			return "checkpoint";
+		},
+		onCompacted: () => {},
+	});
+	const projected = await transform(messages, undefined, { force: true });
+	assert.deepEqual(
+		request?.images?.map((image) => image.data),
+		["b2xk", "dG9vbA==", "cmVjZW50"],
+	);
+	assert.match(request?.prompt ?? "", /Image 1.*user message 1/i);
+	assert.match(request?.prompt ?? "", /Image 2.*read.*read-1/i);
+	assert.match(request?.prompt ?? "", /Previously read chart.png successfully/);
+	assert.match(request?.prompt ?? "", /\[User\]: \[Attached image 1: user message 1, content block 1\]/);
+	assert.match(request?.prompt ?? "", /\[Attached image 2: read tool result \(read-1\), content block 2\]/);
+	assert.match(request?.prompt ?? "", /\[User\]: \[Attached image 3: user message 4, content block 1\]/);
+	assert.deepEqual(messages, original);
+	assert.equal(projected.at(-1), messages.at(-1));
+});
+
+test("summary image budgets do not protect an old head user when the current user is retained", async () => {
+	const messages = imageHistory();
+	const original = structuredClone(messages);
+	let request: CompactionSummaryRequest | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		supportsImages: true,
+		imageBudgetBytes: 1,
+		settings: { reserveTokens: 100, keepRecentTokens: 1 },
+		summarize: async (input) => {
+			request = input;
+			return "checkpoint";
+		},
+		onCompacted: () => {},
+	});
+	const projected = await transform(messages, undefined, { force: true });
+	assert.equal(request?.images?.length ?? 0, 0);
+	assert.match(request?.prompt ?? "", /Historical image omitted/);
+	assert.deepEqual(messages, original);
+	assert.equal(projected.at(-1), messages.at(-1));
+});
+
+test("every image source remains available when a tool's image markers exceed its summary text limit", async () => {
+	const messages = imageHistory();
+	const tool = messages[2];
+	if (tool.role !== "toolResult") throw new Error("missing tool result");
+	tool.content.push(
+		...Array.from({ length: 40 }, () => ({ type: "image" as const, data: "aW1n", mimeType: "image/png" })),
+	);
+	const original = structuredClone(messages);
+	let request: CompactionSummaryRequest | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 100000,
+		supportsImages: true,
+		imageBudgetBytes: 8192,
+		settings: { reserveTokens: 100, keepRecentTokens: 1 },
+		summarize: async (input) => {
+			request = input;
+			return "checkpoint";
+		},
+		onCompacted: () => {},
+	});
+	await transform(messages, undefined, { force: true });
+	assert.equal(request?.images?.length, 43);
+	assert.match(request?.prompt ?? "", /Attached image 42: read tool result \(read-1\), content block 42/);
+	assert.match(request?.prompt ?? "", /Attached image 43: user message 4, content block 1/);
+	assert.deepEqual(messages, original);
+});
+
+test("non-vision summaries retain tool text without resending image pixels", async () => {
+	let request: CompactionSummaryRequest | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		supportsImages: false,
+		settings: { reserveTokens: 100, keepRecentTokens: 1 },
+		summarize: async (input) => {
+			request = input;
+			return "checkpoint";
+		},
+		onCompacted: () => {},
+	});
+	await transform(imageHistory(), undefined, { force: true });
+	assert.equal(request?.images, undefined);
+	assert.match(request?.prompt ?? "", /Previously read chart.png successfully/);
+	assert(!request?.prompt.includes("dG9vbA=="));
+});
+
+test("forced compaction keeps the only real user's image and summarizes completed work before a synthetic notice", async () => {
+	const user: AgentMessage = {
+		role: "user",
+		content: [{ type: "image", data: "Y3VycmVudA==", mimeType: "image/png" }],
+		timestamp: 1,
+	};
+	const messages: AgentMessage[] = [
+		user,
+		fauxAssistantMessage([{ type: "toolCall", id: "write-1", name: "write", arguments: { path: "report.txt" } }]),
+		{
+			role: "toolResult",
+			toolCallId: "write-1",
+			toolName: "write",
+			content: [{ type: "text", text: "Wrote the completed analysis to report.txt" }],
+			isError: false,
+			timestamp: 3,
+		},
+		{
+			role: "user",
+			content: [Object.assign({ type: "text" as const, text: "background job completed" }, { synthetic: true })],
+			timestamp: 4,
+		},
+	];
+	const original = structuredClone(messages);
+	let request: CompactionSummaryRequest | undefined;
+	let record: ContextCompaction | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		supportsImages: true,
+		imageBudgetBytes: 1,
+		settings: { reserveTokens: 100, keepRecentTokens: 1 },
+		summarize: async (input) => {
+			request = input;
+			return "checkpoint records the completed write";
+		},
+		onCompacted: (next) => {
+			record = next;
+		},
+	});
+	const projected = await transform(messages, undefined, { force: true });
+	assert.equal(record?.turnStartIndex, 0);
+	assert(projected.includes(user));
+	assert.deepEqual(
+		request?.images?.map((image) => image.data),
+		["Y3VycmVudA=="],
+	);
+	assert.match(request?.prompt ?? "", /Wrote the completed analysis to report.txt/);
+	assert.match(request?.prompt ?? "", /write\(path="report.txt"\)/);
+	assert.deepEqual(messages, original);
+});
+
+test("compaction budgets exclude omitted historical pixels without replacing checkpoint source or retained history", async () => {
+	const messages: AgentMessage[] = [];
+	for (let index = 0; index < 3; index++) {
+		messages.push(
+			{ role: "user", content: [{ type: "image", data: "b2xk", mimeType: "image/png" }], timestamp: index * 2 },
+			fauxAssistantMessage("done", { timestamp: index * 2 + 1 }),
+		);
+	}
+	messages.push({ role: "user", content: "current request", timestamp: 10 });
+	const previous = messages[1];
+	assert.equal(previous.role, "assistant");
+	if (previous.role !== "assistant") throw new Error("missing previous assistant");
+	previous.usage = { ...previous.usage, input: 9000, totalTokens: 9000 };
+	const original = structuredClone(messages);
+	const records: ContextCompaction[] = [];
+	const transform = createCompactionTransform({
+		contextWindow: 4000,
+		supportsImages: true,
+		imageBudgetBytes: 1,
+		settings: { reserveTokens: 400, keepRecentTokens: 1500 },
+		summarize: async () => "checkpoint",
+		onCompacted: (next, source) => {
+			records.push(next);
+			assert.equal(source, messages);
+			assert.deepEqual(source, original);
+		},
+	});
+	assert.equal(await transform(messages, undefined, { systemPrompt: "s".repeat(10000) }), messages);
+	assert.equal(records.length, 0);
+	const projected = await transform(messages, undefined, { force: true, systemPrompt: "s".repeat(10000) });
+	assert.equal(records.length, 1);
+	assert(records[0].estimatedTokensAfter < 3600);
+	assert(
+		projected.some(
+			(message) => Array.isArray(message.content) && message.content.some((block) => block.type === "image"),
+		),
+	);
 	assert.deepEqual(messages, original);
 });

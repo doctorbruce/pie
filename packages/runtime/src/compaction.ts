@@ -5,9 +5,10 @@ import {
 	type Context,
 	createAssistantMessageEventStream,
 	fauxAssistantMessage,
+	type ImageContent,
+	type TextContent,
 	type Usage,
 } from "@earendil-works/pi-ai";
-import { isCapabilityCatalog } from "./capability-catalog.ts";
 import { isContextOverflow, isRecoverableLength } from "./compaction/overflow.ts";
 import {
 	computeFileLists,
@@ -16,6 +17,7 @@ import {
 	formatFileOperations,
 	serializeConversation,
 } from "./compaction/utils.ts";
+import { latestRealUserMessage, projectImageHistory } from "./image-history.ts";
 import type { ContextCompaction } from "./protocol.ts";
 
 export type CompactionSettings = {
@@ -25,7 +27,7 @@ export type CompactionSettings = {
 	thresholdTokens?: number;
 };
 
-export type CompactionSummaryRequest = { prompt: string; maxTokens: number };
+export type CompactionSummaryRequest = { prompt: string; maxTokens: number; images?: ImageContent[] };
 export type CompactionEvent = {
 	type: "compaction.started" | "compaction.finished" | "compaction.retry";
 	reason?: "threshold" | "overflow";
@@ -40,6 +42,8 @@ type CompactionOptions = {
 	contextWindow: number;
 	initial?: ContextCompaction;
 	settings?: CompactionSettings;
+	supportsImages?: boolean;
+	imageBudgetBytes?: number;
 	summarize: (
 		request: CompactionSummaryRequest,
 		signal?: AbortSignal,
@@ -130,8 +134,11 @@ function findFirstKeptMessage(messages: AgentMessage[], start: number, keepRecen
 	return cuts.at(-1);
 }
 
-function buildSummaryPrompt(messages: AgentMessage[], previousSummary?: string): string {
-	const conversation = `<conversation>\n${serializeConversation(messages)}\n</conversation>`;
+function buildSummaryPrompt(messages: AgentMessage[], previousSummary?: string, imageSources: string[] = []): string {
+	const imageIndex = imageSources.length
+		? `\n\n<historical-images>\nAttached images correspond to this complete source index, in order:\n${imageSources.join("\n")}\n</historical-images>`
+		: "";
+	const conversation = `<conversation>\n${serializeConversation(messages)}\n</conversation>${imageIndex}`;
 	if (!previousSummary) return `${conversation}\n\n${SUMMARY_INSTRUCTIONS}`;
 	return `${conversation}\n\n<previous-summary>\n${previousSummary}\n</previous-summary>\n\n${UPDATE_INSTRUCTIONS}`;
 }
@@ -191,42 +198,75 @@ export function createCompactionTransform(options: CompactionOptions) {
 					: (current.turnStartIndex === undefined ? 1 : 2) +
 						Math.max(0, current.messageCount - current.firstKeptMessage)
 			: 0;
+		const requestMessages = projectImageHistory(active, options.imageBudgetBytes);
 		const tokensBefore = Math.max(
-			estimateContextTokens(active, firstUsageIndex < 0 ? active.length : firstUsageIndex),
-			requestTokens(active, budget),
+			requestMessages === active
+				? estimateContextTokens(active, firstUsageIndex < 0 ? active.length : firstUsageIndex)
+				: 0,
+			requestTokens(requestMessages, budget),
 		);
 		if (settings.enabled === false || (!budget.force && tokensBefore <= threshold)) return active;
 		const reason = budget.force ? "overflow" : "threshold";
 		await options.report?.({ type: "compaction.started", reason });
 		try {
 			const boundary = materialized ? 1 : (current?.firstKeptMessage ?? 0);
+			const latestUser = latestRealUserMessage(active);
+			const latestUserIndex = latestUser ? messages.indexOf(latestUser) : -1;
 			let firstKeptMessage = findFirstKeptMessage(messages, boundary, settings.keepRecentTokens);
-			if (budget.force && firstKeptMessage === undefined) {
-				for (let index = messages.length - 1; index > boundary; index--) {
-					if (messages[index].role === "user" && !isCapabilityCatalog(messages[index])) {
-						firstKeptMessage = index;
-						break;
-					}
-				}
-			}
+			if (budget.force && firstKeptMessage === undefined && latestUserIndex > boundary)
+				firstKeptMessage = latestUserIndex;
 			if (firstKeptMessage === undefined)
 				throw new Error("上下文超限且没有可压缩的历史；请缩短当前输入、工具输出或附件。");
-			let turnStartIndex: number | undefined;
-			for (let index = messages.length - 1; index >= boundary; index--) {
-				if (messages[index].role === "user" && !isCapabilityCatalog(messages[index])) {
-					if (index < firstKeptMessage) turnStartIndex = index;
-					break;
-				}
-			}
+			const turnStartIndex =
+				latestUserIndex >= boundary && latestUserIndex < firstKeptMessage ? latestUserIndex : undefined;
 			const fileOps = createFileOps();
 			for (const path of current?.details?.readFiles ?? []) fileOps.read.add(path);
 			for (const path of current?.details?.modifiedFiles ?? []) fileOps.written.add(path);
 			for (const message of messages.slice(boundary, firstKeptMessage)) extractFileOpsFromMessage(message, fileOps);
 			const details = computeFileLists(fileOps);
+			const head = messages.slice(boundary, firstKeptMessage);
+			const summaryHead = options.supportsImages
+				? projectImageHistory(head, options.imageBudgetBytes, latestUser)
+				: head;
+			const images: ImageContent[] = [];
+			const imageSources: string[] = [];
+			const summaryMessages = summaryHead.map((message, index) => {
+				if (
+					!options.supportsImages ||
+					(message.role !== "user" && message.role !== "toolResult") ||
+					typeof message.content === "string"
+				)
+					return message;
+				const markers: TextContent[] = [];
+				const content = message.content.map((block, blockIndex) => {
+					if (block.type !== "image") return block;
+					images.push(block);
+					const source =
+						message.role === "toolResult"
+							? `${message.toolName} tool result (${message.toolCallId})`
+							: `user message ${boundary + index + 1}`;
+					const marker = {
+						type: "text" as const,
+						text: `[Attached image ${images.length}: ${source}, content block ${blockIndex + 1}]`,
+					};
+					markers.push(marker);
+					imageSources.push(marker.text);
+					return marker;
+				});
+				return {
+					...message,
+					// Tool text is truncated for summaries; keep image references ahead of that text.
+					content:
+						message.role === "toolResult"
+							? [...markers, ...message.content.filter((block) => block.type !== "image")]
+							: content,
+				};
+			});
 			const result = await options.summarize(
 				{
-					prompt: buildSummaryPrompt(messages.slice(boundary, firstKeptMessage), current?.summary),
+					prompt: buildSummaryPrompt(summaryMessages, current?.summary, imageSources),
 					maxTokens: Math.max(1, Math.floor(settings.reserveTokens * 0.8)),
+					...(images.length ? { images } : {}),
 				},
 				signal,
 			);
@@ -247,7 +287,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 			};
 			const projected = compactedContext(messages, next);
 			next.workingMessageCount = projected.length;
-			next.estimatedTokensAfter = requestTokens(projected, budget);
+			next.estimatedTokensAfter = requestTokens(projectImageHistory(projected, options.imageBudgetBytes), budget);
 			if (next.estimatedTokensAfter > threshold)
 				throw new Error("压缩后上下文仍超出预算；当前输入、工具输出或附件过大。");
 			await options.onCompacted(next, messages, projected);

@@ -255,6 +255,9 @@ function App() {
 	const [draftVersion, setDraftVersion] = useState(0);
 	const [interactionError, setInteractionError] = useState("");
 	const [modelRevision, setModelRevision] = useState(0);
+	const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 760px)").matches);
+	const sidebarWasOpen = useRef(false);
+	const sidebarToggle = useRef<HTMLButtonElement>(null);
 	const selection = useRef(0);
 	const operation = useRef(false);
 	const initialized = useRef(false);
@@ -344,8 +347,19 @@ function App() {
 			.catch(() => {});
 	}, [accept, busy, pending, refreshSessions, snapshot]);
 	useEffect(() => {
+		const media = window.matchMedia("(max-width: 760px)");
+		const resize = () => setNarrow(media.matches);
+		media.addEventListener("change", resize);
+		return () => media.removeEventListener("change", resize);
+	}, []);
+	useEffect(() => {
+		if (narrow && showSidebar) document.getElementById("session-search")?.focus();
+		else if (narrow && sidebarWasOpen.current) sidebarToggle.current?.focus();
+		sidebarWasOpen.current = narrow && showSidebar;
+	}, [narrow, showSidebar]);
+	useEffect(() => {
 		const handleEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape") {
+			if (event.key === "Escape" && !document.querySelector("dialog[open]")) {
 				setShowSidebar(false);
 				setShowDetails(false);
 			}
@@ -586,9 +600,11 @@ function App() {
 			const selected = tree?.entries.find((entry) => entry.id === entryId);
 			let images: Draft["images"] = [];
 			if (selected?.role === "user") {
-				// Older tree nodes may not be in the viewport. Read the full path only for explicit editing.
-				const history = await request<SessionSnapshot>(`/sessions/${snapshot.id}`);
-				const message = history.messages.find((message) => messageIdentity(message) === selected.messageId);
+				// Select the node's own path, including images on inactive branches.
+				const page = await request<SessionHistoryPage>(
+					`/sessions/${snapshot.id}/history?limit=1&leafId=${encodeURIComponent(selected.id)}`,
+				);
+				const message = page.entries.find((entry) => entry.id === selected.id)?.message;
 				if (message?.role === "user" && typeof message.content !== "string")
 					images = message.content.filter((part) => part.type === "image");
 			}
@@ -673,7 +689,7 @@ function App() {
 						onClick={() => setShowSidebar(false)}
 					/>
 				)}
-				<aside className="sidebar">
+				<aside className="sidebar" inert={narrow && !showSidebar}>
 					<header className="sidebar-header">
 						<button
 							type="button"
@@ -798,12 +814,14 @@ function App() {
 						</button>
 					</footer>
 				</aside>
-				<main className="workspace">
+				<main className="workspace" inert={narrow && showSidebar}>
 					<header className="chat-header">
 						<button
+							ref={sidebarToggle}
 							type="button"
 							className="circle-button mobile-only"
 							aria-label="打开导航"
+							aria-expanded={showSidebar}
 							onClick={() => setShowSidebar(true)}
 						>
 							☰
@@ -1197,7 +1215,7 @@ function App() {
 					error={interactionError}
 					canStop={snapshot.execution.actions.cancel.available}
 					onStop={() => void cancel()}
-					disabled={!connected || replyingInteractionId !== undefined}
+					disabled={!connected || pending || replyingInteractionId !== undefined}
 					onReply={(approved, remember) => void replyToInteraction(approved, remember)}
 				/>
 			)}

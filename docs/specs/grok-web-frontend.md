@@ -1,6 +1,6 @@
 # Grok 风格 Web 前端
 
-状态：进行中（2026-11-12，持续完善本地聊天入口）
+状态：已完成（2026-11-12，完成多轮实现、复核与浏览器回归）
 
 ## 问题与目标
 
@@ -24,9 +24,9 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 ## 验收方式
 
 - `npm run check`
-- `node --conditions=source --test apps/web/test/messages.test.ts`
-- `node --conditions=source --test apps/web/test/*.test.ts`
-- `npm run web` 后在浏览器确认页面可加载、可读取会话列表并显示 SSE 更新；真实模型调用只在用户配置凭据后进行。
+- `npm run test:web`：消息转换、可靠 SSE、提交去重和真实宿主 HTTP/SSE / CLI 生命周期。
+- `npm run test:web:browser`：本机 Chrome + 临时数据目录 + faux，覆盖完整操作及桌面/窄屏/小窗口。
+- `npm run chat` 为日常入口；独立 `serve` / `web` 为开发入口。验收不调用付费模型。
 
 ## 实施记录
 
@@ -35,11 +35,13 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 - 第一阶段：新增 `apps/web/host.ts` 与共享 Vite 配置，提供 `npm run chat`；随机 Core 端口和令牌由本机代理管理，Host/Origin 校验后再代理。退出前等待 Core 清理和持久化，开发仍支持独立 `serve` / `web`。
 - 验证：宿主 HTTP/SSE、异源拒绝、启动失败释放、真实 CLI SIGTERM 与重启取消状态共 4 项通过；宿主单独 Node 类型检查纳入根 `check`，`npm run check` 已通过。未运行构建或付费模型。
 - 第二阶段：`main.tsx`、`composer.tsx`、`session-connection.ts`、`turn-submission.ts` 补齐会话搜索/标题/归档/删除/导出、历史分页/分支、图片与草稿、复制、执行中追加输入/停止/恢复、权限确认及记忆；设置面板补加载重试/参数校验/助手删除，会话详情提供模型、工作目录和后台作业。
-- 验证：`node --conditions=source --test apps/web/test/*.test.ts` 27/27；`npm run check` 通过。首轮 Chrome 13 组回归通过，发现并修复窄屏高度、同会话分支重连、过期请求、停止弹窗和失败草稿等问题。下一阶段继续复核配置持久化、分支附件与初始化失败恢复。
+- 验证：`npm run test:web` 27/27；`npm run check` 通过。多轮 Chrome 回归发现并修复窄屏高度、同会话分支重连、过期请求、停止弹窗和失败草稿等问题。
 
-- 新增 `apps/web` React/Vite 工作区，恢复 HTTP/SSE 适配、消息转换、设置面板和回归测试。
-- 重写 `apps/web/client/main.tsx` 和 `apps/web/client/style.css`，实现参考图风格的浅色两栏聊天界面，并保留模型、助手、插件、停止、恢复和交互确认入口。
-- 根 `package.json`、`biome.json` 和锁文件重新纳入 Web 工作区；README、开发文档和原删除 SPEC 已同步更新。
-- 验证通过：前端变更完成后 `npm run check`；`npx biome check --error-on-warnings apps/web`；`npx tsc --noEmit -p apps/web`；`node --conditions=source --test apps/web/test/messages.test.ts`（5/5）。启动 `npm run serve -- --port 4318` 与 `npm run web` 后浏览器页面加载、真实会话列表和历史消息展示正常，设置弹窗可打开，控制台无错误。
-- 最后一次仓库级 `npm run check` 被并发 WIP 修改的 `packages/agent/src/agent-loop.ts` 格式检查拦截；该文件及相关 Runtime 测试改动未由本前端任务触碰，已保留。
-- 完整 `npm run test:server` 共 587 项，579 项通过；2 项失败、6 项取消，均为现有后台作业/Worker/权限/PowerShell 测试的超时或平台行为，未涉及前端文件。
+- 第三阶段：将 Chrome 回归保留为 `apps/web/test/browser.mjs`，无新增依赖；修正短窗口网格高度、隐藏侧栏键盘焦点及其他分支图片草稿恢复。
+- 最终浏览器验收 20/20，383 个 SSE 包，运行时/控制台错误 0。覆盖首次连接失败自动恢复、真实崩溃 fixture 的原 Turn 手动恢复、流式/图片、发送失败保留草稿、工具批准/拒绝/停止、执行中追加要求、独立分支重试、64 条历史分页、标题/归档/搜索、提供商/助手保存、插件导入卸载、断线恢复、其他分支图片重发、键盘焦点与刷新。人工复核 1440×960、420×780、320×480、900×500 截图，输入栏和侧栏独立滚动正常。最终检查与 27 项定向测试通过，无本次未完成的验收项。
+
+## 边界与剩余风险
+
+- 未修改 Runtime / Local / Server 源码或会话语义；宿主验证调用真实 HTTP/SSE，未重跑全部后端测试。11 月 11 日记录的后台作业/Worker/PowerShell 全量失败不在本次修复范围，不宣称已修复。
+- Web 入口使用本机 Vite 服务，尚无桌面安装包、托盘或自动更新；本次未执行构建/Sidecar 打包或部署。
+- 已验证 Chromium；其他浏览器、Windows/macOS 原生窗口与真实提供商凭据/网络尚未实测。文本草稿保存在浏览器，图片草稿只在当前页面内存中保留；已发送历史由 Core 持久化。

@@ -30,6 +30,8 @@
 		"test:core": "npm exec --workspace=@earendil-works/pi-agent-core -- vitest run test/agent.test.ts test/agent-loop.test.ts test/message-replacement.test.ts test/streamed-tool-execution.test.ts test/cancellation.test.ts",
 		"test:mcp": "npm exec --workspace=@earendil-works/pi-mcp -- vitest run",
 		"test:runtime": "node scripts/run-node-tests.mjs packages/runtime/test",
+		"test:web": "node scripts/run-node-tests.mjs apps/web/test",
+		"test:web:browser": "node --conditions=source apps/web/test/browser.mjs",
 		"test:server": "node --expose-gc scripts/run-node-tests.mjs packages/runtime/test packages/server/test apps/web/test apps/prompt-viewer/test",
 		"example": "node --conditions=source examples/basic.ts",
 		"hydrate:model-data": "npm run hydrate-model-data --workspace=@earendil-works/pi-ai",

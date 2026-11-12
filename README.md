@@ -111,6 +111,12 @@ npm run web
 
 浏览器打开 `http://127.0.0.1:5174`。Vite 会将 `/api` 请求代理到 `PI_SERVER_URL`（仅接受本机 HTTP 地址，默认 `http://127.0.0.1:4318`）；设置 `PI_SERVER_TOKEN` 后，代理会自动附带访问令牌。代理先验证页面来源，再移除浏览器 Origin，因此无需为 Core 设置 `PI_SERVER_ORIGIN`。同一数据目录不能同时启动 `chat` 和独立 `serve`。前端入口和协议适配位于 `apps/web`。
 
+会话详情中可重命名、归档、导出、设置工作目录和选择下一轮模型；消息顶部可加载旧历史。执行中发送补充要求会引导当前回合；停止按钮等待工具清理后结算。重试会创建独立分支并恢复输入，检查后再发送。草稿文本保存在当前浏览器，图片草稿只在本次页面打开期间保留；清除浏览器数据不会删除 Core 中已保存的会话。
+
+需要崩溃后的手动恢复时，在 `.env` 设置 `PI_TURN_RECOVERY=manual`；符合恢复条件的会话会显示「继续」，无法安全恢复时保留原因。默认策略仍将遗留执行标记为失败。关闭页面不会停止 Core 中的任务，退出 `chat` 进程会停止执行。
+
+无需付费模型的前端验收：`npm run test:web`。安装本机 Chrome 后可运行 `npm run test:web:browser`；默认可执行文件为 `/usr/bin/google-chrome`，其他平台通过 `PI_CHROME` 指定。浏览器测试使用临时 SQLite 和 faux 模型，不读取日常数据与模型密钥，截图和 JSON 结果写入输出的临时目录，可用 `PI_BROWSER_ARTIFACTS` 指定。日常真实模型端点、凭据与工具运行环境仍需自行配置。
+
 模型目录的 JSON 数据由原版生成器从公开模型目录获取，默认不提交；新 checkout 需要执行 `hydrate:model-data`，它不会调用付费模型。
 
 包提供 `source` 导出条件，开发时可直接运行 TypeScript：

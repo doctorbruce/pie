@@ -1,6 +1,6 @@
 # Grok 风格 Web 前端
 
-状态：已完成（2026-11-12，完成多轮实现、复核与浏览器回归）
+状态：已完成（2026-11-12，真实桌面 CUA 复核通过）
 
 ## 问题与目标
 
@@ -30,6 +30,14 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 
 ## 实施记录
 
+### 真实桌面 CUA 复核
+
+- 使用独立 `PI_DATA_DIR`、Chrome profile 与 `DISPLAY=:5`，通过桌面鼠标、键盘和截图操作实际界面，不运行 `apps/web/test/browser.mjs` 代替验收。
+- 实际通过：启动连接；创建/保存提供商、模型、助手与插件挂载；插件 `skill_search`；新建、搜索、切换、重命名、归档/取消归档；真实 HTTP/SSE 流式、停止、原 Turn 手动恢复、执行中追加；失败后编辑新分支重试；图片预览/发送与切换会话恢复草稿；工具批准/拒绝/记忆授权/确认框停止；刷新恢复文本草稿；关闭/重启宿主后自动重连；66 条历史的更早消息加载；桌面、窄窗口与短窗口操作。
+- 界面发现并修复四项：`main.tsx` 接入 `remark-gfm` 渲染表格；工具确认展示工作目录，将完整授权范围放入可展开详情；`model-settings.tsx` 增加图片能力开关，Runtime 协议和 Local 模型目录投影有效 `input` 能力；`session-title.ts` 等待首次 Turn 结算后命名，失败保留首条标题、后续消息不覆盖，手动标题等待在途自动命名完成。
+- 修复后再次实际点击回归：图文请求的本地假模型报告收到 1 张图片，表格正确显示，首条标题及手动标题刷新后保留，工具确认与小窗口可用。未发现剩余阻塞项。截图、操作记录及验收索引位于 `/workspace/codex-runs/pie-cua-artifacts/`。
+- 最终验证：`npm run check` 通过（格式、根/Web/宿主类型、模型数据）；`npm run test:web` 32/32；`node --conditions=source --test packages/server/test/model-input-settings.test.ts packages/server/test/model-override.test.ts packages/server/test/provider-composer.test.ts` 5/5。新增标题测试 5 项和模型能力 HTTP 测试 2 项。仅 faux/本机假 HTTP 模型，无付费调用；未运行构建或本轮浏览器脚本。
+
 ### 2026-11-12 持续完善
 
 - 第一阶段：新增 `apps/web/host.ts` 与共享 Vite 配置，提供 `npm run chat`；随机 Core 端口和令牌由本机代理管理，Host/Origin 校验后再代理。退出前等待 Core 清理和持久化，开发仍支持独立 `serve` / `web`。
@@ -42,6 +50,7 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 
 ## 边界与剩余风险
 
-- 未修改 Runtime / Local / Server 源码或会话语义；宿主验证调用真实 HTTP/SSE，未重跑全部后端测试。11 月 11 日记录的后台作业/Worker/PowerShell 全量失败不在本次修复范围，不宣称已修复。
+- 本轮仅扩展 Runtime 模型目录的可选 `input` 字段与 Local 有效能力投影，并增加 Server HTTP 测试；没有更改会话/Turn 语义。未重跑全部后端测试。11 月 11 日记录的后台作业/Worker/PowerShell 全量失败不在本次修复范围，不宣称已修复。
+- 修改已有模型的能力/参数后，已加载的会话需重启聊天服务使用新配置；新会话立即使用。设置保存反馈已说明这一点。
 - Web 入口使用本机 Vite 服务，尚无桌面安装包、托盘或自动更新；本次未执行构建/Sidecar 打包或部署。
 - 已验证 Chromium；其他浏览器、Windows/macOS 原生窗口与真实提供商凭据/网络尚未实测。文本草稿保存在浏览器，图片草稿只在当前页面内存中保留；已发送历史由 Core 持久化。

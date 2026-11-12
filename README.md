@@ -92,14 +92,24 @@ npm run check
 npm run example
 ```
 
-启动本地聊天前端（需先启动 Pie Core）：
+日常聊天使用单命令入口，同一 Node 进程启动本地 Core 和 Web 界面：
+
+```sh
+npm run chat
+```
+
+浏览器打开输出的 `http://127.0.0.1:5174`。`npm run chat -- --port 5180` 可指定页面端口，`0` 使用随机端口。Core 使用随机本机端口和仅在进程内保存的访问令牌；浏览器通过同源 `/api` 访问 HTTP/SSE，无需配置 Core 地址或令牌。只接受 `127.0.0.1` 页面及其自身 Origin，不对局域网提供服务。数据仍保存在 `.pie/`，可用 `.env` 中的 `PI_DATA_DIR` 切换目录。退出终端时用 Ctrl+C，宿主会关闭页面服务并停止 Core 执行。
+
+首次启动后在「设置」中配置模型，在「编辑助手」中选择工具，再创建对话。该入口保留为 Web：现有 Core 已提供本机文件、工具和持久化能力，浏览器 HTTP/SSE 可完整承载聊天与确认流程，日常使用无需 Electron 额外运行时。将页面固定为浏览器应用窗口即可独立使用；当前没有打包桌面安装程序。
+
+开发时也可分开启动 Core 与支持热更新的前端：
 
 ```sh
 npm run serve
 npm run web
 ```
 
-浏览器打开 `http://127.0.0.1:5174`。Vite 会将 `/api` 请求代理到 `PI_SERVER_URL`（默认 `http://127.0.0.1:4318`）；设置 `PI_SERVER_TOKEN` 后，代理会自动附带访问令牌。前端入口和协议适配位于 `apps/web`。
+浏览器打开 `http://127.0.0.1:5174`。Vite 会将 `/api` 请求代理到 `PI_SERVER_URL`（仅接受本机 HTTP 地址，默认 `http://127.0.0.1:4318`）；设置 `PI_SERVER_TOKEN` 后，代理会自动附带访问令牌。代理先验证页面来源，再移除浏览器 Origin，因此无需为 Core 设置 `PI_SERVER_ORIGIN`。同一数据目录不能同时启动 `chat` 和独立 `serve`。前端入口和协议适配位于 `apps/web`。
 
 模型目录的 JSON 数据由原版生成器从公开模型目录获取，默认不提交；新 checkout 需要执行 `hydrate:model-data`，它不会调用付费模型。
 

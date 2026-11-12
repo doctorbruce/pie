@@ -9,5 +9,6 @@
 		"lib": ["ES2022", "DOM", "DOM.Iterable"],
 		"types": ["node", "vite/client"]
 	},
-	"include": ["client/**/*.ts", "client/**/*.tsx", "vite.config.ts"]
+	"include": ["client/**/*.ts", "client/**/*.tsx", "test/**/*.ts", "vite.config.ts"],
+	"exclude": ["test/host.test.ts"]
 }

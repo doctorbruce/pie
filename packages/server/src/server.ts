@@ -335,7 +335,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				);
 			}
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override|archive)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override|archive|workspace)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			if (!match) throw new RuntimeError(404, "会话或接口不存在");
@@ -373,6 +373,8 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				return json(200, await runtime.importSession(id, await readJson(req, TURN_REQUEST_LIMIT)));
 			if (req.method === "PUT" && action === "model-override")
 				return json(200, await runtime.setModelOverride(id, await readJson(req)));
+			if (req.method === "PUT" && action === "workspace")
+				return json(200, await runtime.setSessionWorkspace(id, await readJson(req)));
 			if (req.method === "PATCH" && !action) return json(200, await runtime.renameSession(id, await readJson(req)));
 			if (req.method === "POST" && action === "archive")
 				return json(200, await runtime.archiveSession(id, await readJson(req)));

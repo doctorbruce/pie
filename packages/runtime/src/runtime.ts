@@ -132,6 +132,12 @@ function optionalRequestId(body: Record<string, unknown>): string | undefined {
 	return body.requestId.trim();
 }
 
+function sessionWorkspacePath(value: unknown): string {
+	if (typeof value !== "string" || !value.trim() || value.length > 4096 || value.includes("\0"))
+		throw new RuntimeError(400, "workspacePath 需要 1–4096 个字符，不能包含空字符");
+	return value.trim();
+}
+
 function sessionCreationKey(value: unknown): string {
 	if (typeof value !== "string" || !value.trim() || value.length > 256 || value.includes("\0"))
 		throw new RuntimeError(400, "creationKey 需要 1–256 个字符，不能包含空字符");
@@ -2586,6 +2592,34 @@ async function initializeRuntime(options: RuntimeOptions) {
 				}
 				await publish(session, "snapshot");
 				return await snapshot(session);
+			}, true);
+		},
+		setSessionWorkspace(sessionId: string, body: Record<string, unknown>) {
+			return execute(async () => {
+				const workspacePath = sessionWorkspacePath(body.workspacePath);
+				const session = await requireSession(sessionId);
+				if (session.workspacePath === workspacePath) return structuredClone(summary(session));
+				assertAction(session, "submit");
+				if (
+					session.agent?.hasQueuedMessages() ||
+					jobs.list(session.id).some((job) => job.status === "running") ||
+					[...pendingInteractions.values()].some(
+						(pending) => pending.sessionId === session.id || pending.executionSessionId === session.id,
+					)
+				)
+					throw new RuntimeError(409, "请先结束当前执行、后台任务及交互");
+				const previous = { workspacePath: session.workspacePath, updatedAt: session.updatedAt };
+				session.workspacePath = workspacePath;
+				session.updatedAt = Date.now();
+				try {
+					await persist(session);
+				} catch (error) {
+					Object.assign(session, previous);
+					throw error;
+				}
+				session.agent = undefined;
+				await publish(session, "snapshot");
+				return structuredClone(summary(session));
 			}, true);
 		},
 		renameSession(sessionId: string, body: Record<string, unknown>) {

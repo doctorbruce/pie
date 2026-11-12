@@ -36,6 +36,8 @@
 
 ### Added
 
+- Add `setSessionWorkspace` to persist an idle root session's directory before subsequent direct or Worker turns. Preserve history, reset the idle Agent after saving, restore the original path on save failure, and allow same-path verification while busy.
+
 - Bind Local Assistant lifecycle updates to a stable logical Worker identity while keeping Worker Session creation lazy per work item.
 
 - Preserve a safe `metadata.workerCommunication` envelope on incoming Worker messages and display events, so hosts can distinguish peer messages from human input without changing model roles or message bodies.

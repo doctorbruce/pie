@@ -284,6 +284,8 @@ export async function createLocalRuntime(options: {
 			execute(() => runtime.importSession(...args), true),
 		setModelOverride: (...args: Parameters<PieRuntime["setModelOverride"]>) =>
 			execute(() => runtime.setModelOverride(...args), true),
+		setSessionWorkspace: (...args: Parameters<PieRuntime["setSessionWorkspace"]>) =>
+			execute(() => runtime.setSessionWorkspace(...args), true),
 		renameSession: (...args: Parameters<PieRuntime["renameSession"]>) =>
 			execute(() => runtime.renameSession(...args), true),
 		archiveSession: (...args: Parameters<PieRuntime["archiveSession"]>) =>

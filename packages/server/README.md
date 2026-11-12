@@ -40,6 +40,7 @@
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
 | `POST /sessions/:id/archive` | `{ archived: boolean }` | 归档或取消归档根会话，返回含 archived 的快照；保留历史和任务执行，子会话返回 409 |
 | `PUT /sessions/:id/model-override` | `{ modelOverride: { providerId, model } \| null, initializeOnly? }` | 保存会话模型选择；null 跟随默认模型。initializeOnly 仅补入尚未初始化的历史会话，保留已存在的选择或 null |
+| `PUT /sessions/:id/workspace` | `{ workspacePath }` | 保存空闲根会话的目录，清除旧 Agent，返回轻量 SessionSummary；相同目录幂等；忙碌时不同目录返回 409 |
 | `GET /sessions/:id` | 可选 `?limit=50` | 会话快照，含消息、当前部分消息、最近一次 turn 和 execution；limit 提供有界历史页 |
 | `GET /sessions/:id/jobs` | 无 | `{ instanceId, sessionId, jobs }`；本实例、直接拥有的 Shell/Task 摘要，不读历史或输出正文 |
 | `POST /sessions/:id/jobs/:jobId/cancel` | `{ instanceId, executionId }`，取自 jobs 查询 | `202` + `{ instanceId, sessionId, accepted, durable: false, job }`；直接停止本机作业，等待清理完成，身份过期返回 409 |
@@ -64,6 +65,8 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 通过 Worker 收件入口创建的工作 Session 保存 `workerId`，模型使用 `communicate` 对等协作，不提供 `task`。主动目标来自宿主 `workerTargets`，省略时回退到 subagents；来源与调用键由 Runtime 注入，reply_to 沿可信消息链回原 Session。一次调用发送并按 `wait` 选择等待：`async` 保存等待，模型正常收尾后让出，回信在原 Turn 完整清理后启动新 Turn；`sync` 每段最多等待 30 秒，新输入可提前返回，已到达的 result/question/reply 优先与工具结果原子消费；`wait: false` 仅发送。默认 async，宿主可用 `runtime.workerWaitMode: "sync"` 改变默认。同步分段未取得回应时返回 `wait.status: waiting` 和 `reason: interval/message`，模型接纳阶段进展后可用原 `message_id` 续等；progress 不表示工作完成。仅用户明确要求时传 `wait.timeout_ms`（1–300000 毫秒），它是单次等待上限，到期返回 timed_out；大于 30 秒时先返回 interval，续等按新调用重新计时，原请求继续。分段返回不登记异步让出；禁止等待当前同一 Session，不沿通信关系取消对端。异步等待的 completed 带 `yield`，执行投影带 `waitingForMessage`，不表示业务完成。取消准确 Turn 会撤销等待，迟到回复不自动恢复执行；普通会话的 task 路径不变。持久存储与模型沟通边界见 [Worker 嵌入接入](../../docs/runtime-embedding.md#可选-worker-内部调度)。
 
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
+
+宿主通过 `PUT /sessions/:id/workspace` 独立更新已有会话的执行目录。`workspacePath` 接受 1–4096 字符且不含空字符的路径，去除首尾空白。成功保存后清除旧 Agent，后续普通 Turn 及 Worker 收件执行使用新目录，保留历史和当前 Turn 身份，不启动新输入；保存失败恢复原内存目录。相同路径直接返回，忙碌时也可核对；不同路径要求会话无执行、清理、中断、排队输入、运行中后台任务或待答交互。普通 Turn 和 Steer 不修改目录。默认根、目录结构、文件复制及产品绑定由宿主负责，此接口不提供跨文件复制的执行锁。
 
 交互的“允许一次”发送 `{ approved: true }`，“始终允许”发送 `{ approved: true, remember: true }`。后者仅适用于请求携带 `remember: { permission, patterns }` 的原生 `bash/external_directory` 权限，先持久化到实际执行会话，再批准当前工具；匹配范围可跨回合和重启复用，新会话、Fork 及父子会话不互相继承。命令按入口和工作目录分类，外部路径保持准确范围，详见[授权记忆契约](../../docs/runtime-embedding.md#交互授权记忆)。凭据、邮件等业务确认仍逐次回答；拒绝或无范围请求带 `remember: true` 返回 400。
 

@@ -178,7 +178,13 @@ export type SessionSummary = {
 	turn?: Turn;
 };
 export type ModelSelection = { provider: string; id: string };
-export type ProviderModel = { id: string; contextWindow?: number; maxTokens?: number; reasoning?: boolean };
+export type ProviderModel = {
+	id: string;
+	contextWindow?: number;
+	maxTokens?: number;
+	reasoning?: boolean;
+	input?: ("text" | "image")[];
+};
 export type ProviderSettings = {
 	id: string;
 	name: string;
@@ -197,6 +203,7 @@ export type ModelCatalog = {
 		contextWindow: number;
 		maxTokens: number;
 		reasoning: boolean;
+		input?: ("text" | "image")[];
 		keyConfigured: boolean;
 	})[];
 };

@@ -167,6 +167,7 @@ export function createModelSettings(environment: NodeJS.ProcessEnv) {
 					contextWindow: model.contextWindow,
 					maxTokens: model.maxTokens,
 					reasoning: model.reasoning,
+					input: [...model.input],
 					keyConfigured: !!current.config.providers[model.provider]?.apiKey,
 				})),
 			};
@@ -191,6 +192,7 @@ export function createModelSettings(environment: NodeJS.ProcessEnv) {
 							contextWindow: model?.contextWindow,
 							maxTokens: model?.maxTokens,
 							reasoning: model?.reasoning,
+							input: model ? [...model.input] : undefined,
 						};
 					}),
 				};

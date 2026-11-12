@@ -95,6 +95,7 @@ export function ModelSettings({
 					contextWindow: known?.contextWindow ?? 128000,
 					maxTokens: known?.maxTokens ?? 8192,
 					reasoning: known?.reasoning ?? false,
+					input: known?.input ?? ["text"],
 				},
 			],
 		});
@@ -144,7 +145,7 @@ export function ModelSettings({
 			const provider = next.providers.find((provider) => provider.id === form.id);
 			if (provider) choose(provider, next.selected);
 			onSaved(next.selected);
-			setNotice("已保存。已有会话可在会话详情中选择模型，下一次发送时生效。");
+			setNotice("已保存。模型能力与参数对新会话生效；已有会话需重启聊天服务后使用新配置。");
 		} catch (error) {
 			setError(error instanceof Error ? error.message : String(error));
 		} finally {
@@ -423,6 +424,23 @@ export function ModelSettings({
 											}
 										/>
 										支持推理
+									</label>
+									<label className="settings-checkbox">
+										<input
+											type="checkbox"
+											checked={model.input?.includes("image") ?? false}
+											onChange={(event) =>
+												setForm({
+													...form,
+													models: form.models.map((entry) =>
+														entry.id === model.id
+															? { ...entry, input: event.target.checked ? ["text", "image"] : ["text"] }
+															: entry,
+													),
+												})
+											}
+										/>
+										支持图片输入
 									</label>
 								</details>
 							</div>

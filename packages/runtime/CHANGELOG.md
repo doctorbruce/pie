@@ -36,6 +36,8 @@
 
 ### Added
 
+- Expose effective text/image input capabilities in provider and model catalogs so local frontends can configure custom vision models without dropping image support on save.
+
 - Add `setSessionWorkspace` to persist an idle root session's directory before subsequent direct or Worker turns. Preserve history, reset the idle Agent after saving, restore the original path on save failure, and allow same-path verification while busy.
 
 - Bind Local Assistant lifecycle updates to a stable logical Worker identity while keeping Worker Session creation lazy per work item.

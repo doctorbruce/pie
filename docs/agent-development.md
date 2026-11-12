@@ -4,7 +4,7 @@
 
 ## 目标与分层
 
-Pie 是可嵌入、也可独立启动的 Agent Core。仓库不再附带 Web UI，开发验收通过 SDK、HTTP/SSE 和嵌入契约完成；Astron Cowork 已通过官方 `pie` adapter 接入会话、Turn、事件和跨 Core 历史同步。
+Pie 是可嵌入、也可独立启动的 Agent Core。仓库同时提供一个可选的本地 `apps/web` 聊天前端；Core 的开发验收仍通过 SDK、HTTP/SSE 和嵌入契约完成。Astron Cowork 已通过官方 `pie` adapter 接入会话、Turn、事件和跨 Core 历史同步。
 
 ```text
 HTTP/SSE 宿主

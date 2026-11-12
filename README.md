@@ -1,6 +1,6 @@
 # Pie
 
-用于二次开发的 Pi 执行内核。保留原版 `Agent`、agent loop 和 `pi-ai`，通过 SDK、嵌入接口和本地 HTTP/SSE 接入宿主，不附带 Web UI。
+用于二次开发的 Pi 执行内核。保留原版 `Agent`、agent loop 和 `pi-ai`，通过 SDK、嵌入接口和本地 HTTP/SSE 接入宿主，并提供一个可选的本地 Web 聊天前端。
 
 主要架构、Assistant / Session / Agent 的关系、数据流和开发边界见 [Agent 开发文档](docs/agent-development.md)，后续随实现同步维护。
 
@@ -91,6 +91,15 @@ npm run hydrate:model-data
 npm run check
 npm run example
 ```
+
+启动本地聊天前端（需先启动 Pie Core）：
+
+```sh
+npm run serve
+npm run web
+```
+
+浏览器打开 `http://127.0.0.1:5174`。Vite 会将 `/api` 请求代理到 `PI_SERVER_URL`（默认 `http://127.0.0.1:4318`）；设置 `PI_SERVER_TOKEN` 后，代理会自动附带访问令牌。前端入口和协议适配位于 `apps/web`。
 
 模型目录的 JSON 数据由原版生成器从公开模型目录获取，默认不提交；新 checkout 需要执行 `hydrate:model-data`，它不会调用付费模型。
 

@@ -1137,6 +1137,33 @@ dialog.confirm-dialog::backdrop {
 	font-size: 12px;
 	line-height: 1.65;
 }
+.confirm-dialog .interaction-workdir {
+	margin-top: 8px;
+	overflow-wrap: anywhere;
+}
+.interaction-permission {
+	display: grid;
+	gap: 8px;
+	margin-top: 12px;
+	color: #777773;
+	font-size: 11px;
+}
+.interaction-permission input {
+	flex-shrink: 0;
+}
+.interaction-permission summary {
+	cursor: pointer;
+}
+.interaction-permission pre {
+	max-height: 180px;
+	overflow: auto;
+	margin: 8px 0 0;
+	padding: 10px;
+	border-radius: 8px;
+	background: #f6f6f4;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
 .interaction-preview {
 	margin: 16px 0 0;
 	padding: 11px;

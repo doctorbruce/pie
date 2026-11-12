@@ -8,7 +8,8 @@
 		"@assistant-ui/react-markdown": "0.14.15",
 		"@pie/runtime": "0.0.1",
 		"react": "19.3.0",
-		"react-dom": "19.3.0"
+		"react-dom": "19.3.0",
+		"remark-gfm": "4.0.1"
 	},
 	"devDependencies": {
 		"@types/react": "19.3.0",

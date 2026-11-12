@@ -27,6 +27,7 @@ import type {
 import { messageIdentity, prependHistoryPage } from "@pie/runtime/session-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
+import remarkGfm from "remark-gfm";
 import { AssistantSettings } from "./assistant-settings.tsx";
 import { Composer, type Draft } from "./composer.tsx";
 import { toThreadMessages, updateToolProgress } from "./messages.ts";
@@ -36,6 +37,7 @@ import { request } from "./request.ts";
 import { connectSession } from "./session-connection.ts";
 import { BackgroundJobs } from "./session-jobs.tsx";
 import { SessionModelSelect } from "./session-model.tsx";
+import { createSessionTitles } from "./session-title.ts";
 import { SessionTreeDialog } from "./session-tree.tsx";
 import { store, stored } from "./storage.ts";
 import { createTurnSender } from "./turn-submission.ts";
@@ -118,7 +120,7 @@ function AssistantMessage() {
 }
 
 function Markdown() {
-	return <MarkdownTextPrimitive />;
+	return <MarkdownTextPrimitive remarkPlugins={[remarkGfm]} />;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -160,6 +162,11 @@ function InteractionPrompt({
 				<span className="dialog-kicker">需要你的确认</span>
 				<h2 id="interaction-title">{interaction.title}</h2>
 				<p>{interaction.message}</p>
+				{typeof interaction.metadata?.workdir === "string" && interaction.metadata.workdir && (
+					<p className="interaction-workdir">
+						工作目录：<code>{interaction.metadata.workdir}</code>
+					</p>
+				)}
 				{error && (
 					<p className="message-error" role="alert">
 						{error}
@@ -176,15 +183,21 @@ function InteractionPrompt({
 					</dl>
 				)}
 				{interaction.remember && (
-					<label className="settings-checkbox">
-						<input
-							type="checkbox"
-							checked={remember}
-							onChange={(event) => setRemember(event.target.checked)}
-							disabled={disabled}
-						/>
-						本会话记住此范围：{interaction.remember.patterns.join("、")}
-					</label>
+					<div className="interaction-permission">
+						<label className="settings-checkbox">
+							<input
+								type="checkbox"
+								checked={remember}
+								onChange={(event) => setRemember(event.target.checked)}
+								disabled={disabled}
+							/>
+							在本会话内自动批准相同范围的后续操作
+						</label>
+						<details>
+							<summary>查看授权范围</summary>
+							<pre>{JSON.stringify(interaction.remember, null, 2)}</pre>
+						</details>
+					</div>
 				)}
 				<div className="dialog-actions">
 					{canStop && (
@@ -263,6 +276,7 @@ function App() {
 	const initialized = useRef(false);
 	const initializing = useRef(false);
 	const turnSender = useRef(createTurnSender());
+	const sessionTitles = useRef(createSessionTitles());
 	const viewport = useRef<HTMLDivElement>(null);
 	const sessionRef = useRef<SessionSnapshot | undefined>(undefined);
 	const busy = snapshot?.turn?.status === "running";
@@ -335,17 +349,16 @@ function App() {
 		void initialize();
 	}, [initialize]);
 	useEffect(() => {
-		if (!snapshot || busy || pending || snapshot.title !== "新会话") return;
-		const title = stored(`pie.title.${snapshot.id}`);
-		if (!title) return;
-		store(`pie.title.${snapshot.id}`, "");
-		void request<SessionSnapshot>(`/sessions/${snapshot.id}`, "PATCH", { title })
+		if (!snapshot || pending) return;
+		void sessionTitles.current
+			.apply(snapshot)
 			.then((next) => {
+				if (!next) return;
 				accept(next);
 				return refreshSessions();
 			})
 			.catch(() => {});
-	}, [accept, busy, pending, refreshSessions, snapshot]);
+	}, [accept, pending, refreshSessions, snapshot]);
 	useEffect(() => {
 		const media = window.matchMedia("(max-width: 760px)");
 		const resize = () => setNarrow(media.matches);
@@ -437,10 +450,7 @@ function App() {
 		try {
 			const reconciled = await turnSender.current.send(current, draft);
 			if (reconciled) accept(reconciled);
-			if (!busy && current.title === "新会话" && draft.text.trim()) {
-				// Runtime prohibits renaming a running session. Apply after it settles.
-				store(`pie.title.${current.id}`, draft.text.trim().replace(/\s+/g, " ").slice(0, 40));
-			}
+			if (!busy) sessionTitles.current.remember(current, draft.text);
 			return true;
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
@@ -546,6 +556,8 @@ function App() {
 		setPending(true);
 		setError("");
 		try {
+			if (!action && method === "PATCH" && isRecord(body) && typeof body.title === "string")
+				await sessionTitles.current.clear(current.id);
 			await request(`/sessions/${current.id}${action}`, method, body);
 			const next = await request<SessionSnapshot>(`/sessions/${current.id}?limit=50`);
 			accept(next);

@@ -1,5 +1,5 @@
 import type { Assistant, Plugin, ToolId, ToolInfo } from "@pie/runtime/protocol";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { request } from "./request.ts";
 
 export function AssistantSettings({
@@ -7,11 +7,13 @@ export function AssistantSettings({
 	assistants,
 	onClose,
 	onSaved,
+	onDeleted,
 }: {
 	assistant?: Assistant;
 	assistants: Assistant[];
 	onClose: () => void;
 	onSaved: (assistant: Assistant) => void;
+	onDeleted?: (id: string) => void;
 }) {
 	const dialog = useRef<HTMLDialogElement>(null);
 	const [name, setName] = useState(assistant?.name ?? "");
@@ -23,15 +25,27 @@ export function AssistantSettings({
 	const [tools, setTools] = useState<ToolInfo[]>();
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState("");
+	const [loading, setLoading] = useState(true);
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			const [plugins, tools] = await Promise.all([
+				request<{ plugins: Plugin[] }>("/plugins"),
+				request<{ tools: ToolInfo[] }>("/tools"),
+			]);
+			setPlugins(plugins.plugins);
+			setTools(tools.tools);
+		} catch (error) {
+			setError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setLoading(false);
+		}
+	}, []);
 	useEffect(() => {
 		dialog.current?.showModal();
-		void Promise.all([request<{ plugins: Plugin[] }>("/plugins"), request<{ tools: ToolInfo[] }>("/tools")])
-			.then(([plugins, tools]) => {
-				setPlugins(plugins.plugins);
-				setTools(tools.tools);
-			})
-			.catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
-	}, []);
+		void load();
+	}, [load]);
 	return (
 		<dialog
 			ref={dialog}
@@ -51,7 +65,7 @@ export function AssistantSettings({
 						const saved = await request<Assistant>(
 							assistant ? `/assistants/${assistant.id}` : "/assistants",
 							assistant ? "PUT" : "POST",
-							{ name, systemPrompt, toolIds, pluginIds, subagentIds },
+							{ name: name.trim(), systemPrompt, toolIds, pluginIds, subagentIds },
 						);
 						onSaved(saved);
 						onClose();
@@ -66,7 +80,13 @@ export function AssistantSettings({
 					<h2 id="assistant-settings-title">{assistant ? "编辑助手" : "新建助手"}</h2>
 				</div>
 				<p className="settings-note">保存后，新配置会在已有会话下一次提交时生效。</p>
-				<fieldset disabled={pending || !tools}>
+				{loading && <output>正在加载工具与插件…</output>}
+				{!loading && !tools && (
+					<button type="button" className="event-toggle" onClick={() => void load()}>
+						重新加载配置
+					</button>
+				)}
+				<fieldset disabled={pending || loading || !tools}>
 					<label>
 						助手名称
 						<input required maxLength={100} value={name} onChange={(event) => setName(event.target.value)} />
@@ -149,10 +169,34 @@ export function AssistantSettings({
 					</p>
 				)}
 				<div className="settings-actions">
+					{assistant && (
+						<button
+							type="button"
+							className="event-toggle"
+							disabled={pending || assistants.length <= 1}
+							title="至少保留一个助手；有会话或被其他助手调用时，请先移除关联"
+							onClick={async () => {
+								if (!window.confirm(`删除助手「${assistant.name}」？此操作无法撤销。`)) return;
+								setPending(true);
+								setError("");
+								try {
+									await request(`/assistants/${encodeURIComponent(assistant.id)}`, "DELETE");
+									onDeleted?.(assistant.id);
+									onClose();
+								} catch (error) {
+									setError(error instanceof Error ? error.message : String(error));
+								} finally {
+									setPending(false);
+								}
+							}}
+						>
+							删除助手
+						</button>
+					)}
 					<button type="button" className="event-toggle" disabled={pending} onClick={onClose}>
 						取消
 					</button>
-					<button type="submit" className="send-button" disabled={pending || !tools}>
+					<button type="submit" className="send-button" disabled={pending || loading || !tools || !name.trim()}>
 						{pending ? "保存中…" : "保存助手"}
 					</button>
 				</div>

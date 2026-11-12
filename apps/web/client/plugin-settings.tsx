@@ -1,5 +1,5 @@
 import type { Plugin } from "@pie/runtime/protocol";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { request } from "./request.ts";
 
 export function PluginSettings({ onClose }: { onClose: () => void }) {
@@ -8,18 +8,31 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 	const [path, setPath] = useState("");
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState("");
+	const [notice, setNotice] = useState("");
+	const [loading, setLoading] = useState(true);
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			setPlugins((await request<{ plugins: Plugin[] }>("/plugins")).plugins);
+		} catch (error) {
+			setError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setLoading(false);
+		}
+	}, []);
 	useEffect(() => {
 		dialog.current?.showModal();
-		void request<{ plugins: Plugin[] }>("/plugins")
-			.then((result) => setPlugins(result.plugins))
-			.catch((error: unknown) => setError(error instanceof Error ? error.message : String(error)));
-	}, []);
+		void load();
+	}, [load]);
 	async function operate(action: () => Promise<unknown>) {
 		setPending(true);
 		setError("");
+		setNotice("");
 		try {
 			await action();
 			setPlugins((await request<{ plugins: Plugin[] }>("/plugins")).plugins);
+			setNotice("插件列表已更新。请在助手设置中检查挂载。");
 		} catch (error) {
 			setError(error instanceof Error ? error.message : String(error));
 		} finally {
@@ -39,19 +52,17 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 			<div className="settings-heading">
 				<h2 id="plugin-settings-title">插件</h2>
 			</div>
-			<p className="settings-note">
-				导入后，在「编辑助手」中挂载插件。已有会话保持原挂载，新建真实模型会话可使用 Skill。
-			</p>
+			<p className="settings-note">导入后，在「编辑助手」中挂载插件。助手的最新挂载会在已有会话下一次提交时生效。</p>
 			<form
 				onSubmit={(event) => {
 					event.preventDefault();
 					void operate(async () => {
-						await request("/plugins/import", "POST", { path });
+						await request("/plugins/import", "POST", { path: path.trim() });
 						setPath("");
 					});
 				}}
 			>
-				<fieldset disabled={pending}>
+				<fieldset disabled={pending || loading}>
 					<label>
 						本地插件目录
 						<input
@@ -64,7 +75,7 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 					<p className="settings-note">
 						复制到 Pie 数据目录，不自动安装依赖。仅导入受信任的插件；启用 shell 后命令以当前系统用户权限执行。
 					</p>
-					<button type="submit" className="send-button">
+					<button type="submit" className="send-button" disabled={!path.trim()}>
 						{pending ? "处理中…" : "导入插件"}
 					</button>
 				</fieldset>
@@ -85,7 +96,7 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 					<button
 						type="button"
 						className="event-toggle"
-						disabled={pending}
+						disabled={pending || loading}
 						onClick={() => {
 							if (window.confirm(`卸载插件「${plugin.name}」？`))
 								void operate(() => request(`/plugins/${encodeURIComponent(plugin.id)}`, "DELETE"));
@@ -95,10 +106,15 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 					</button>
 				</section>
 			))}
-			{!plugins.length && <p className="settings-note">暂无插件。</p>}
+			{loading && <output>正在加载插件…</output>}
+			{!loading && !error && !plugins.length && <p className="settings-note">暂无插件。</p>}
+			{notice && <output className="settings-success">{notice}</output>}
 			{error && (
 				<p role="alert" className="banner error">
 					{error}
+					<button type="button" className="event-toggle" disabled={pending || loading} onClick={() => void load()}>
+						刷新插件列表
+					</button>
 				</p>
 			)}
 			<div className="settings-actions">

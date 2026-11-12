@@ -193,3 +193,65 @@ test("loading older history preserves existing UI message identities", () => {
 		before.map((message) => message.id),
 	);
 });
+
+test("user image history retains ordered image and text parts", () => {
+	const image = { type: "image" as const, mimeType: "image/png", data: "aW1hZ2U=" };
+	const original: SessionSnapshot = {
+		...snapshot,
+		messages: [{ role: "user", content: [image, { type: "text", text: "解释图片" }, image], timestamp: 0 }],
+	};
+	const [message] = toThreadMessages(original);
+	assert.deepEqual(message.content, [
+		{ type: "image", image: "data:image/png;base64,aW1hZ2U=" },
+		{ type: "text", text: "解释图片" },
+		{ type: "image", image: "data:image/png;base64,aW1hZ2U=" },
+	]);
+	assert.deepEqual(original.messages[0].content, [image, { type: "text", text: "解释图片" }, image]);
+});
+
+test("tool image results remain visible after their call without discarding error text", () => {
+	const converted = toThreadMessages({
+		...snapshot,
+		messages: [
+			...snapshot.messages,
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "powershell",
+				isError: true,
+				content: [
+					{ type: "text", text: "截图失败前的最后画面" },
+					{ type: "image", mimeType: "image/jpeg", data: "c2NyZWVu" },
+				],
+				timestamp: 2,
+			},
+		],
+	});
+	assert(Array.isArray(converted[1].content));
+	assert.equal(converted[1].content[1].result, "截图失败前的最后画面\n[图片结果见下方]");
+	assert.equal(converted[1].content[1].isError, true);
+	assert.deepEqual(converted[1].content[2], { type: "image", image: "data:image/jpeg;base64,c2NyZWVu" });
+});
+
+test("streaming text and terminal length/errors preserve their execution status", () => {
+	const message: WireMessage = {
+		role: "assistant",
+		timestamp: 5,
+		content: [{ type: "text", text: "streaming" }],
+		stopReason: "stop",
+	};
+	assert.deepEqual(toThreadMessages({ ...snapshot, streamingMessage: message }).at(-1)?.status, {
+		type: "running",
+	});
+	for (const [stopReason, status] of [
+		["length", { type: "incomplete", reason: "length" }],
+		["error", { type: "incomplete", reason: "error", error: "provider disconnected" }],
+	] as const) {
+		const converted = toThreadMessages({
+			...snapshot,
+			turn: { id: "turn-1", status: "failed" },
+			messages: [{ ...message, stopReason, errorMessage: "provider disconnected" }],
+		});
+		assert.deepEqual(converted[0].status, status);
+	}
+});

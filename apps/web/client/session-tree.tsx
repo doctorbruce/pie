@@ -1,4 +1,5 @@
 import type { SessionTree } from "@pie/runtime/protocol";
+import { useEffect, useRef } from "react";
 
 export function SessionTreeDialog({
 	tree,
@@ -11,6 +12,10 @@ export function SessionTreeDialog({
 	onClose: () => void;
 	onSelect: (entryId: string) => void;
 }) {
+	const dialog = useRef<HTMLDialogElement>(null);
+	useEffect(() => {
+		dialog.current?.showModal();
+	}, []);
 	const children = new Map<string | null, SessionTree["entries"]>();
 	for (const entry of tree.entries) {
 		const siblings = children.get(entry.parentId) ?? [];
@@ -37,19 +42,25 @@ export function SessionTreeDialog({
 		));
 	}
 	return (
-		<div className="settings-overlay">
-			<section className="fork-dialog" role="dialog" aria-modal="true" aria-labelledby="tree-title">
-				<div className="settings-heading">
-					<div>
-						<h2 id="tree-title">会话树</h2>
-						<p>选择用户消息后可修改重发；选择回复可继续该分支。旧分支保留，不自动发送。</p>
-					</div>
-					<button type="button" aria-label="关闭会话树" disabled={disabled} onClick={onClose}>
-						×
-					</button>
+		<dialog
+			ref={dialog}
+			className="model-settings"
+			aria-labelledby="tree-title"
+			onCancel={(event) => {
+				event.preventDefault();
+				if (!disabled) onClose();
+			}}
+		>
+			<div className="settings-heading">
+				<div>
+					<h2 id="tree-title">会话树</h2>
+					<p>选择用户消息后可修改重发；选择回复可继续该分支。旧分支保留，不自动发送。</p>
 				</div>
-				<div className="fork-message-list">{renderBranch(null, 0)}</div>
-			</section>
-		</div>
+				<button type="button" aria-label="关闭会话树" disabled={disabled} onClick={onClose}>
+					×
+				</button>
+			</div>
+			<div className="fork-message-list">{renderBranch(null, 0)}</div>
+		</dialog>
 	);
 }

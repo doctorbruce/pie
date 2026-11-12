@@ -42,6 +42,7 @@ export function ModelSettings({
 	const [pending, setPending] = useState(false);
 	const [error, setError] = useState("");
 	const [notice, setNotice] = useState("");
+	const [loading, setLoading] = useState(true);
 
 	const choose = useCallback((provider: ProviderSettings, selected?: ModelSelection) => {
 		setForm(provider);
@@ -53,25 +54,29 @@ export function ModelSettings({
 		setError("");
 		setDefaultId(selected?.provider === provider.id ? selected.id : (provider.models[0]?.id ?? ""));
 	}, []);
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError("");
+		try {
+			const [next, models] = await Promise.all([
+				request<ProviderCatalog>("/providers"),
+				request<ModelCatalog>("/models"),
+			]);
+			setCatalog(next);
+			setBuiltins(models.models);
+			const provider =
+				next.providers.find((provider) => provider.id === next.selected?.provider) ?? next.providers[0];
+			if (provider) choose(provider, next.selected);
+		} catch (error) {
+			setError(error instanceof Error ? error.message : String(error));
+		} finally {
+			setLoading(false);
+		}
+	}, [choose]);
 	useEffect(() => {
 		dialog.current?.showModal();
-		let active = true;
-		void Promise.all([request<ProviderCatalog>("/providers"), request<ModelCatalog>("/models")])
-			.then(([next, models]) => {
-				if (!active) return;
-				setCatalog(next);
-				setBuiltins(models.models);
-				const provider =
-					next.providers.find((provider) => provider.id === next.selected?.provider) ?? next.providers[0];
-				if (provider) choose(provider, next.selected);
-			})
-			.catch((error: unknown) => {
-				if (active) setError(error instanceof Error ? error.message : String(error));
-			});
-		return () => {
-			active = false;
-		};
-	}, [choose]);
+		void load();
+	}, [load]);
 
 	function add() {
 		const id = modelId.trim();
@@ -107,6 +112,21 @@ export function ModelSettings({
 			setError("请至少添加一个模型");
 			return;
 		}
+		const invalid = form.models.find((model) => {
+			const contextWindow = model.contextWindow ?? 128000;
+			const maxTokens = model.maxTokens ?? 16384;
+			return (
+				!Number.isSafeInteger(contextWindow) ||
+				contextWindow < 1 ||
+				!Number.isSafeInteger(maxTokens) ||
+				maxTokens < 1 ||
+				maxTokens > contextWindow
+			);
+		});
+		if (invalid) {
+			setError(`模型 ${invalid.id} 的上下文和最大输出必须为正整数，且最大输出不能超过上下文窗口`);
+			return;
+		}
 		setPending(true);
 		setError("");
 		setNotice("");
@@ -124,7 +144,7 @@ export function ModelSettings({
 			const provider = next.providers.find((provider) => provider.id === form.id);
 			if (provider) choose(provider, next.selected);
 			onSaved(next.selected);
-			setNotice("已保存。新建真实模型会话后生效。");
+			setNotice("已保存。已有会话可在会话详情中选择模型，下一次发送时生效。");
 		} catch (error) {
 			setError(error instanceof Error ? error.message : String(error));
 		} finally {
@@ -192,6 +212,12 @@ export function ModelSettings({
 				</button>
 			</div>
 			<p className="settings-note">一个提供商共用地址和密钥，可配置多个模型。</p>
+			{loading && <output>正在加载模型配置…</output>}
+			{!loading && !catalog && (
+				<button type="button" className="event-toggle" onClick={() => void load()}>
+					重新加载配置
+				</button>
+			)}
 			{error && (
 				<p className="banner error" role="alert">
 					{error}
@@ -205,7 +231,7 @@ export function ModelSettings({
 				}}
 				onChange={() => setNotice("")}
 			>
-				<fieldset disabled={pending || !catalog}>
+				<fieldset disabled={pending || loading || !catalog}>
 					<label>
 						提供商
 						<select
@@ -346,6 +372,7 @@ export function ModelSettings({
 											<input
 												type="number"
 												min={1}
+												step={1}
 												required
 												value={model.contextWindow ?? 128000}
 												onChange={(event) =>
@@ -365,6 +392,8 @@ export function ModelSettings({
 											<input
 												type="number"
 												min={1}
+												step={1}
+												max={model.contextWindow ?? 128000}
 												required
 												value={model.maxTokens ?? 16384}
 												onChange={(event) =>

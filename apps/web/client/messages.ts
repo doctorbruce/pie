@@ -52,36 +52,51 @@ export function toThreadMessages(
 					content:
 						typeof message.content === "string"
 							? message.content
-							: message.content.flatMap((part) => (part.type === "text" ? [part] : [])),
+							: message.content.map((part) =>
+									part.type === "text"
+										? part
+										: { type: "image", image: `data:${part.mimeType};base64,${part.data}` },
+								),
 				},
 			];
 		}
-		const content: Exclude<ThreadMessageLike["content"], string>[number][] = message.content.map((part) => {
-			if (part.type === "text") return { type: "text", text: part.text };
-			if (part.type === "thinking") return { type: "reasoning", text: part.thinking };
+		const content = message.content.flatMap<Exclude<ThreadMessageLike["content"], string>[number]>((part) => {
+			if (part.type === "text") return [{ type: "text", text: part.text }];
+			if (part.type === "thinking") return [{ type: "reasoning", text: part.thinking }];
 			const result = results.get(part.id);
-			return {
-				type: "tool-call",
-				toolCallId: part.id,
-				toolName: part.name,
-				argsText: part.argumentsText ?? JSON.stringify(part.arguments),
-				result: result?.content.map((c) => (c.type === "text" ? c.text : "[图片结果]")).join("\n"),
-				isError: result?.isError,
-				artifact: !result && snapshot.turn?.status === "running" ? toolProgress?.get(part.id) : undefined,
-			};
+			return [
+				{
+					type: "tool-call",
+					toolCallId: part.id,
+					toolName: part.name,
+					argsText: part.argumentsText ?? JSON.stringify(part.arguments),
+					result: result?.content.map((c) => (c.type === "text" ? c.text : "[图片结果见下方]")).join("\n"),
+					isError: result?.isError,
+					artifact: !result && snapshot.turn?.status === "running" ? toolProgress?.get(part.id) : undefined,
+				},
+				...(result?.content.flatMap((image) =>
+					image.type === "image"
+						? [{ type: "image" as const, image: `data:${image.mimeType};base64,${image.data}` }]
+						: [],
+				) ?? []),
+			];
 		});
 		const pending =
-			message.stopReason === "pending" || message.content.some((p) => p.type === "toolCall" && !results.has(p.id));
+			message === snapshot.streamingMessage ||
+			message.stopReason === "pending" ||
+			message.content.some((p) => p.type === "toolCall" && !results.has(p.id));
 		const status: ThreadMessageLike["status"] =
 			message.stopReason === "aborted"
 				? { type: "incomplete", reason: "cancelled" }
 				: message.stopReason === "error"
 					? { type: "incomplete", reason: "error", error: message.errorMessage }
-					: pending && snapshot.turn?.status === "running"
-						? { type: "running" }
-						: pending
-							? { type: "incomplete", reason: "tool-calls" }
-							: { type: "complete", reason: "stop" };
+					: message.stopReason === "length"
+						? { type: "incomplete", reason: "length" }
+						: pending && snapshot.turn?.status === "running"
+							? { type: "running" }
+							: pending
+								? { type: "incomplete", reason: "tool-calls" }
+								: { type: "complete", reason: "stop" };
 		return [{ id, role: "assistant", content, status }];
 	});
 }

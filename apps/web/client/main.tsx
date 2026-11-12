@@ -1,6 +1,6 @@
 import {
+	ActionBarPrimitive,
 	AssistantRuntimeProvider,
-	ComposerPrimitive,
 	MessagePrimitive,
 	type ReasoningMessagePartProps,
 	type ThreadMessageLike,
@@ -16,18 +16,29 @@ import type {
 	ProviderCatalog,
 	ServerInfo,
 	SessionEvent,
+	SessionForkResult,
+	SessionHistoryPage,
 	SessionSnapshot,
 	SessionSummary,
+	SessionTransfer,
+	SessionTree,
 	ToolActivity,
 } from "@pie/runtime/protocol";
-import { applySessionEvent } from "@pie/runtime/session-events";
+import { messageIdentity, prependHistoryPage } from "@pie/runtime/session-events";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { AssistantSettings } from "./assistant-settings.tsx";
+import { Composer, type Draft } from "./composer.tsx";
 import { toThreadMessages, updateToolProgress } from "./messages.ts";
 import { ModelSettings } from "./model-settings.tsx";
 import { PluginSettings } from "./plugin-settings.tsx";
 import { request } from "./request.ts";
+import { connectSession } from "./session-connection.ts";
+import { BackgroundJobs } from "./session-jobs.tsx";
+import { SessionModelSelect } from "./session-model.tsx";
+import { SessionTreeDialog } from "./session-tree.tsx";
+import { store, stored } from "./storage.ts";
+import { createTurnSender } from "./turn-submission.ts";
 import "./style.css";
 
 function Reasoning({ text }: ReasoningMessagePartProps) {
@@ -81,6 +92,9 @@ function UserMessage() {
 		<MessagePrimitive.Root className="message user-message">
 			<div className="message-content">
 				<MessagePrimitive.Parts />
+				<ActionBarPrimitive.Root className="message-actions">
+					<ActionBarPrimitive.Copy aria-label="复制消息">复制</ActionBarPrimitive.Copy>
+				</ActionBarPrimitive.Root>
 			</div>
 		</MessagePrimitive.Root>
 	);
@@ -92,6 +106,12 @@ function AssistantMessage() {
 			<div className="assistant-badge">P</div>
 			<div className="message-content">
 				<MessagePrimitive.Parts components={{ Text: Markdown, Reasoning, tools: { Fallback: Tool } }} />
+				<MessagePrimitive.Error>
+					<p className="message-error">回复未完成，请查看下方状态并重试。</p>
+				</MessagePrimitive.Error>
+				<ActionBarPrimitive.Root className="message-actions">
+					<ActionBarPrimitive.Copy aria-label="复制回复">复制</ActionBarPrimitive.Copy>
+				</ActionBarPrimitive.Root>
 			</div>
 		</MessagePrimitive.Root>
 	);
@@ -108,44 +128,84 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function InteractionPrompt({
 	interaction,
 	disabled,
+	error,
+	canStop,
+	onStop,
 	onReply,
 }: {
 	interaction: InteractionRequest;
 	disabled: boolean;
-	onReply: (approved: boolean) => void;
+	error: string;
+	canStop: boolean;
+	onStop: () => void;
+	onReply: (approved: boolean, remember: boolean) => void;
 }) {
+	const dialog = useRef<HTMLDialogElement>(null);
+	const [remember, setRemember] = useState(false);
+	useEffect(() => {
+		dialog.current?.showModal();
+	}, []);
 	const display = isRecord(interaction.metadata?.display) ? interaction.metadata.display : {};
 	const card = isRecord(display.previewCard) ? display.previewCard : {};
 	const items = Array.isArray(card.items) ? card.items.filter(isRecord) : [];
 	return (
-		<div className="modal-backdrop">
-			<section className="confirm-dialog" role="dialog" aria-modal="true" aria-labelledby="interaction-title">
-				<div className="dialog-mark">!</div>
-				<div>
-					<span className="dialog-kicker">需要你的确认</span>
-					<h2 id="interaction-title">{interaction.title}</h2>
-					<p>{interaction.message}</p>
-					{items.length > 0 && (
-						<dl className="interaction-preview">
-							{items.map((item, index) => (
-								<div key={`${String(item.label)}:${index}`}>
-									<dt>{String(item.label || "信息")}</dt>
-									<dd>{String(item.value || "—")}</dd>
-								</div>
-							))}
-						</dl>
+		<dialog
+			ref={dialog}
+			className="confirm-dialog"
+			aria-labelledby="interaction-title"
+			onCancel={(event) => event.preventDefault()}
+		>
+			<div className="dialog-mark">!</div>
+			<div>
+				<span className="dialog-kicker">需要你的确认</span>
+				<h2 id="interaction-title">{interaction.title}</h2>
+				<p>{interaction.message}</p>
+				{error && (
+					<p className="message-error" role="alert">
+						{error}
+					</p>
+				)}
+				{items.length > 0 && (
+					<dl className="interaction-preview">
+						{items.map((item, index) => (
+							<div key={`${String(item.label)}:${index}`}>
+								<dt>{String(item.label || "信息")}</dt>
+								<dd>{String(item.value || "—")}</dd>
+							</div>
+						))}
+					</dl>
+				)}
+				{interaction.remember && (
+					<label className="settings-checkbox">
+						<input
+							type="checkbox"
+							checked={remember}
+							onChange={(event) => setRemember(event.target.checked)}
+							disabled={disabled}
+						/>
+						本会话记住此范围：{interaction.remember.patterns.join("、")}
+					</label>
+				)}
+				<div className="dialog-actions">
+					{canStop && (
+						<button type="button" disabled={disabled} onClick={onStop}>
+							停止本次执行
+						</button>
 					)}
-					<div className="dialog-actions">
-						<button type="button" disabled={disabled} onClick={() => onReply(false)}>
-							拒绝
-						</button>
-						<button type="button" className="confirm-button" disabled={disabled} onClick={() => onReply(true)}>
-							{disabled ? "处理中…" : "确认并继续"}
-						</button>
-					</div>
+					<button type="button" disabled={disabled} onClick={() => onReply(false, false)}>
+						拒绝
+					</button>
+					<button
+						type="button"
+						className="confirm-button"
+						disabled={disabled}
+						onClick={() => onReply(true, remember)}
+					>
+						{disabled ? "处理中…" : "确认并继续"}
+					</button>
 				</div>
-			</section>
-		</div>
+			</div>
+		</dialog>
 	);
 }
 
@@ -185,8 +245,24 @@ function App() {
 	const [showPluginSettings, setShowPluginSettings] = useState(false);
 	const [assistantEditor, setAssistantEditor] = useState<Assistant | "new">();
 	const [replyingInteractionId, setReplyingInteractionId] = useState<string>();
+	const [loadingSession, setLoadingSession] = useState(false);
+	const [loadingHistory, setLoadingHistory] = useState(false);
+	const [archived, setArchived] = useState(false);
+	const [tree, setTree] = useState<SessionTree>();
+	const [initialDraft, setInitialDraft] = useState<Draft>();
+	const [notice, setNotice] = useState("");
+	const [connectionEpoch, setConnectionEpoch] = useState(0);
+	const [draftVersion, setDraftVersion] = useState(0);
+	const [interactionError, setInteractionError] = useState("");
+	const [modelRevision, setModelRevision] = useState(0);
+	const selection = useRef(0);
+	const operation = useRef(false);
+	const initialized = useRef(false);
+	const initializing = useRef(false);
+	const turnSender = useRef(createTurnSender());
+	const viewport = useRef<HTMLDivElement>(null);
 	const sessionRef = useRef<SessionSnapshot | undefined>(undefined);
-	const busy = pending || snapshot?.turn?.status === "running";
+	const busy = snapshot?.turn?.status === "running";
 	const interrupted = snapshot?.turn?.status === "interrupted";
 
 	const accept = useCallback((next: SessionSnapshot) => {
@@ -198,7 +274,7 @@ function App() {
 	}, []);
 
 	const refreshSessions = useCallback(async () => {
-		const result = await request<{ sessions: SessionSummary[] }>("/sessions");
+		const result = await request<{ sessions: SessionSummary[] }>("/sessions?includeArchived=true");
 		const visible = result.sessions
 			.filter((session) => session.kind === "root")
 			.sort((left, right) => right.updatedAt - left.updatedAt);
@@ -210,15 +286,22 @@ function App() {
 		sessionRef.current = next;
 		setSnapshot(next);
 		setToolProgress(new Map());
+		setConnected(false);
+		setConnectionEpoch((value) => value + 1);
+		setInitialDraft(undefined);
+		setTree(undefined);
 		if (next) {
 			setAssistantId(next.assistantId);
-			localStorage.setItem("pie.web.session", next.id);
-		} else localStorage.removeItem("pie.web.session");
+			store("pie.web.session", next.id);
+		} else store("pie.web.session", "");
 	}, []);
 
 	const initialize = useCallback(async () => {
+		if (initializing.current) return;
+		initializing.current = true;
 		setPending(true);
 		setError("");
+		const ticket = ++selection.current;
 		try {
 			await request<ServerInfo>("/health");
 			setCoreReady(true);
@@ -230,12 +313,17 @@ function App() {
 			setSelectedModel(catalog.selected);
 			setAssistants(assistantCatalog.assistants);
 			setAssistantId(assistantCatalog.assistants[0]?.id ?? "");
-			const savedId = localStorage.getItem("pie.web.session");
-			const existing = allSessions.find((session) => session.id === savedId) ?? allSessions[0];
-			activate(existing ? await request<SessionSnapshot>(`/sessions/${existing.id}?limit=50`) : undefined);
+			const savedId = stored("pie.web.session");
+			const existing =
+				allSessions.find((session) => session.id === savedId) ?? allSessions.find((session) => !session.archived);
+			const next = existing ? await request<SessionSnapshot>(`/sessions/${existing.id}?limit=50`) : undefined;
+			if (ticket === selection.current) activate(next);
+			initialized.current = true;
 		} catch (reason) {
+			setCoreReady(false);
 			setError(reason instanceof Error ? reason.message : String(reason));
 		} finally {
+			initializing.current = false;
 			setPending(false);
 		}
 	}, [activate, refreshSessions]);
@@ -244,93 +332,154 @@ function App() {
 		void initialize();
 	}, [initialize]);
 	useEffect(() => {
-		const timer = setInterval(() => void refreshSessions().catch(() => {}), 5000);
+		if (!snapshot || busy || pending || snapshot.title !== "新会话") return;
+		const title = stored(`pie.title.${snapshot.id}`);
+		if (!title) return;
+		store(`pie.title.${snapshot.id}`, "");
+		void request<SessionSnapshot>(`/sessions/${snapshot.id}`, "PATCH", { title })
+			.then((next) => {
+				accept(next);
+				return refreshSessions();
+			})
+			.catch(() => {});
+	}, [accept, busy, pending, refreshSessions, snapshot]);
+	useEffect(() => {
+		const handleEscape = (event: KeyboardEvent) => {
+			if (event.key === "Escape") {
+				setShowSidebar(false);
+				setShowDetails(false);
+			}
+		};
+		window.addEventListener("keydown", handleEscape);
+		return () => window.removeEventListener("keydown", handleEscape);
+	}, []);
+	useEffect(() => {
+		const timer = setInterval(() => {
+			if (!initialized.current) {
+				void initialize();
+				return;
+			}
+			void request<ServerInfo>("/health")
+				.then(() => {
+					setCoreReady(true);
+					return refreshSessions();
+				})
+				.catch(() => setCoreReady(false));
+		}, 5000);
 		return () => clearInterval(timer);
-	}, [refreshSessions]);
+	}, [initialize, refreshSessions]);
 	useEffect(() => {
 		const sessionId = snapshot?.id;
-		if (!sessionId) return;
-		let source: EventSource | undefined;
-		let closed = false;
-		const connect = () => {
-			if (closed) return;
-			setConnected(false);
-			source = new EventSource(`/api/sessions/${sessionId}/events`);
-			source.onmessage = (message) => {
-				const packet = JSON.parse(message.data) as SessionEvent;
-				if (sessionRef.current?.id !== packet.sessionId) return;
-				const next = applySessionEvent(sessionRef.current, packet);
-				if (!next) {
-					source?.close();
-					void request<SessionSnapshot>(`/sessions/${sessionId}?limit=50`)
-						.then(activate)
-						.catch(() => {});
-					return;
-				}
-				setConnected(true);
-				accept(next);
+		if (!sessionId || !connectionEpoch) return;
+		return connectSession(sessionId, {
+			getSnapshot: () => sessionRef.current,
+			onSnapshot: accept,
+			onConnection: setConnected,
+			onError: (reason) => setError(reason.message),
+			onEvent: (packet: SessionEvent) => {
 				setToolProgress((current) => updateToolProgress(current, packet));
 				if (packet.type === "turn.settled") void refreshSessions().catch(() => {});
-			};
-			source.onerror = () => setConnected(false);
-		};
-		connect();
-		return () => {
-			closed = true;
-			source?.close();
-		};
-	}, [accept, activate, refreshSessions, snapshot?.id]);
+			},
+		});
+	}, [accept, refreshSessions, snapshot?.id, connectionEpoch]);
 
 	function switchSession(next?: SessionSnapshot) {
+		selection.current++;
 		activate(next);
 		setShowSidebar(false);
 		setShowDetails(false);
+		setError("");
+		setNotice("");
+		setLoadingSession(false);
+	}
+	async function openSession(id: string) {
+		const ticket = ++selection.current;
+		setLoadingSession(true);
+		setError("");
+		try {
+			const next = await request<SessionSnapshot>(`/sessions/${id}?limit=50`);
+			if (ticket === selection.current) switchSession(next);
+		} catch (reason) {
+			if (ticket === selection.current) setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			if (ticket === selection.current) setLoadingSession(false);
+		}
 	}
 
-	async function send(text: string) {
+	async function send(draft: Draft): Promise<boolean> {
 		const current = sessionRef.current;
-		if (!current || !connected || pending || busy || interrupted || !text.trim()) return;
+		const action = current?.execution.actions[busy ? "steer" : "submit"];
+		if (
+			!current ||
+			!connected ||
+			operation.current ||
+			!action?.available ||
+			(!draft.text.trim() && !draft.images.length)
+		)
+			return false;
+		operation.current = true;
 		setPending(true);
 		setError("");
 		try {
-			await request(`/sessions/${current.id}/turns`, "POST", { text });
+			const reconciled = await turnSender.current.send(current, draft);
+			if (reconciled) accept(reconciled);
+			if (!busy && current.title === "新会话" && draft.text.trim()) {
+				// Runtime prohibits renaming a running session. Apply after it settles.
+				store(`pie.title.${current.id}`, draft.text.trim().replace(/\s+/g, " ").slice(0, 40));
+			}
+			return true;
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
-			throw reason;
+			return false;
 		} finally {
+			operation.current = false;
 			setPending(false);
 		}
 	}
 
 	async function cancel() {
 		const current = sessionRef.current;
-		if (!current?.turn) return;
+		if (!current?.turn || !current.execution.actions.cancel.available || operation.current) return;
+		operation.current = true;
+		setPending(true);
 		try {
 			await request(`/sessions/${current.id}/cancel`, "POST", { turnId: current.turn.id });
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			operation.current = false;
+			setPending(false);
 		}
 	}
 
 	async function resume() {
 		const current = sessionRef.current;
-		if (!current?.turn) return;
+		if (!current?.turn || !current.execution.actions.resume.available || operation.current) return;
+		operation.current = true;
+		setPending(true);
 		try {
 			await request(`/sessions/${current.id}/resume`, "POST", { turnId: current.turn.id });
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			operation.current = false;
+			setPending(false);
 		}
 	}
 
-	async function newSession() {
-		if (pending || !assistantId || !selectedModel) return;
+	async function newSession(mode: "real" | "faux" = "real") {
+		if (pending || !assistantId) return;
+		if (mode === "real" && !selectedModel) {
+			setShowModelSettings(true);
+			return;
+		}
 		setPending(true);
 		setError("");
 		try {
 			const next = await request<SessionSnapshot>("/sessions", "POST", {
 				assistantId,
-				mode: "real",
-				model: selectedModel,
+				mode,
+				model: mode === "real" ? selectedModel : undefined,
 			});
 			switchSession(next);
 			await refreshSessions();
@@ -341,17 +490,145 @@ function App() {
 		}
 	}
 
-	async function replyToInteraction(approved: boolean) {
+	async function replyToInteraction(approved: boolean, remember: boolean) {
 		const current = sessionRef.current;
 		const interaction = current?.interactions[0];
 		if (!current || !interaction || replyingInteractionId) return;
 		setReplyingInteractionId(interaction.id);
+		setInteractionError("");
 		try {
-			await request(`/sessions/${current.id}/interactions/${interaction.id}`, "POST", { approved });
+			await request(`/sessions/${current.id}/interactions/${interaction.id}`, "POST", { approved, remember });
+		} catch (reason) {
+			setInteractionError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setReplyingInteractionId(undefined);
+		}
+	}
+	async function loadHistory() {
+		const current = sessionRef.current;
+		const before = current?.history?.nextBeforeSeq;
+		if (!current || before == null || loadingHistory) return;
+		setLoadingHistory(true);
+		const height = viewport.current?.scrollHeight ?? 0;
+		const top = viewport.current?.scrollTop ?? 0;
+		try {
+			const page = await request<SessionHistoryPage>(
+				`/sessions/${current.id}/history?limit=50&beforeSeq=${before}&leafId=${encodeURIComponent(String(current.history?.leafId))}`,
+			);
+			if (sessionRef.current?.id !== current.id) return;
+			accept(prependHistoryPage(sessionRef.current, page, before));
+			requestAnimationFrame(() => {
+				if (viewport.current) viewport.current.scrollTop = top + viewport.current.scrollHeight - height;
+			});
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
 		} finally {
-			setReplyingInteractionId(undefined);
+			setLoadingHistory(false);
+		}
+	}
+	async function manage(action: string, body?: unknown, method = "POST") {
+		const current = sessionRef.current;
+		if (!current || pending) return;
+		setPending(true);
+		setError("");
+		try {
+			await request(`/sessions/${current.id}${action}`, method, body);
+			const next = await request<SessionSnapshot>(`/sessions/${current.id}?limit=50`);
+			accept(next);
+			await refreshSessions();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setPending(false);
+		}
+	}
+	async function retryLastMessage() {
+		const current = sessionRef.current;
+		const user = current ? [...current.messages].reverse().find((message) => message.role === "user") : undefined;
+		if (!current || user?.role !== "user" || pending) return;
+		setPending(true);
+		setError("");
+		try {
+			const result = await request<SessionForkResult>(`/sessions/${current.id}/fork`, "POST", {
+				beforeMessageId: messageIdentity(user),
+			});
+			switchSession(result.session);
+			setInitialDraft({
+				text: result.selectedText,
+				images: typeof user.content === "string" ? [] : user.content.filter((part) => part.type === "image"),
+			});
+			setDraftVersion((value) => value + 1);
+			setNotice("已创建分支并恢复上一条消息；检查后发送。原会话及已发生的工具操作会保留。");
+			await refreshSessions();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setPending(false);
+		}
+	}
+	async function openTree() {
+		if (!snapshot || pending) return;
+		const ticket = selection.current;
+		setPending(true);
+		try {
+			const next = await request<SessionTree>(`/sessions/${snapshot.id}/tree`);
+			if (ticket === selection.current) setTree(next);
+		} catch (reason) {
+			if (ticket === selection.current) setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setPending(false);
+		}
+	}
+	async function selectBranch(entryId: string) {
+		if (!snapshot || pending) return;
+		setPending(true);
+		try {
+			const selected = tree?.entries.find((entry) => entry.id === entryId);
+			let images: Draft["images"] = [];
+			if (selected?.role === "user") {
+				// Older tree nodes may not be in the viewport. Read the full path only for explicit editing.
+				const history = await request<SessionSnapshot>(`/sessions/${snapshot.id}`);
+				const message = history.messages.find((message) => messageIdentity(message) === selected.messageId);
+				if (message?.role === "user" && typeof message.content !== "string")
+					images = message.content.filter((part) => part.type === "image");
+			}
+			const result = await request<SessionForkResult>(`/sessions/${snapshot.id}/tree`, "POST", { entryId });
+			activate(result.session);
+			setInitialDraft({ text: result.selectedText, images });
+			setDraftVersion((value) => value + 1);
+			setTree(undefined);
+			await refreshSessions();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setPending(false);
+		}
+	}
+	async function exportChat() {
+		if (!snapshot) return;
+		try {
+			const data = await request<SessionTransfer>(`/sessions/${snapshot.id}/export`);
+			const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
+			const anchor = document.createElement("a");
+			anchor.href = url;
+			anchor.download = `pie-${snapshot.id}.json`;
+			anchor.click();
+			URL.revokeObjectURL(url);
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : String(reason));
+		}
+	}
+	async function deleteChat() {
+		if (!snapshot || !window.confirm(`永久删除「${snapshot.title}」及其子会话？此操作无法撤销。`)) return;
+		setPending(true);
+		try {
+			await request(`/sessions/${snapshot.id}`, "DELETE");
+			switchSession();
+			await refreshSessions();
+		} catch (reason) {
+			setError(reason instanceof Error ? reason.message : String(reason));
+		} finally {
+			setPending(false);
 		}
 	}
 
@@ -361,13 +638,21 @@ function App() {
 		convertMessage: (message: ThreadMessageLike) => message,
 		isRunning: Boolean(busy),
 		isDisabled: !connected || pending || Boolean(interrupted),
-		onNew: async (message) =>
-			send(message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n")),
+		onNew: async (message) => {
+			await send({
+				text: message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n"),
+				images: [],
+			});
+		},
 		onCancel: cancel,
 	});
 	const currentAssistant = assistants.find((assistant) => assistant.id === assistantId);
-	const visibleSessions = sessions.filter((session) =>
-		session.title.toLowerCase().includes(query.trim().toLowerCase()),
+	const visibleSessions = sessions.filter(
+		(session) =>
+			Boolean(session.archived) === archived &&
+			`${session.title} ${assistants.find((assistant) => assistant.id === session.assistantId)?.name ?? ""}`
+				.toLowerCase()
+				.includes(query.trim().toLowerCase()),
 	);
 	const connectionLabel = !coreReady
 		? "Core 离线"
@@ -380,9 +665,23 @@ function App() {
 	return (
 		<AssistantRuntimeProvider runtime={runtime}>
 			<div className={`app-shell ${showSidebar ? "show-sidebar" : ""}`}>
+				{showSidebar && (
+					<button
+						type="button"
+						className="sidebar-scrim"
+						aria-label="关闭导航"
+						onClick={() => setShowSidebar(false)}
+					/>
+				)}
 				<aside className="sidebar">
 					<header className="sidebar-header">
-						<button type="button" className="brand-button" aria-label="Pie 首页" onClick={() => switchSession()}>
+						<button
+							type="button"
+							className="brand-button"
+							aria-label="Pie 首页"
+							disabled={pending}
+							onClick={() => switchSession()}
+						>
 							<span className="brand-mark">P</span>
 							<strong>Pie</strong>
 						</button>
@@ -399,7 +698,7 @@ function App() {
 								type="button"
 								className="circle-button add-button"
 								aria-label="新建对话"
-								disabled={pending || !selectedModel}
+								disabled={pending || !coreReady}
 								onClick={() => void newSession()}
 							>
 								＋
@@ -415,12 +714,10 @@ function App() {
 							disabled={pending}
 							onChange={(event) => {
 								const id = event.target.value;
+								switchSession();
 								setAssistantId(id);
 								const latest = sessions.find((session) => session.assistantId === id);
-								if (latest)
-									void request<SessionSnapshot>(`/sessions/${latest.id}?limit=50`)
-										.then(switchSession)
-										.catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)));
+								if (latest) void openSession(latest.id);
 							}}
 						>
 							{assistants.map((assistant) => (
@@ -440,9 +737,16 @@ function App() {
 						</button>
 					</div>
 					<div className="group-heading">
-						<span>新建分组</span>
-						<button type="button" className="plain-icon" aria-label="添加分组">
-							＋
+						<span>
+							{archived ? "已归档" : "全部会话"} · {visibleSessions.length}
+						</span>
+						<button
+							type="button"
+							className="event-toggle"
+							aria-label={archived ? "返回最近会话" : "查看归档"}
+							onClick={() => setArchived(!archived)}
+						>
+							{archived ? "返回" : "归档"}
 						</button>
 					</div>
 					<label className="session-search">
@@ -463,11 +767,8 @@ function App() {
 								key={session.id}
 								className={`session-row ${session.id === snapshot?.id ? "active" : ""}`}
 								disabled={pending}
-								onClick={() =>
-									void request<SessionSnapshot>(`/sessions/${session.id}?limit=50`)
-										.then(switchSession)
-										.catch((reason) => setError(reason instanceof Error ? reason.message : String(reason)))
-								}
+								onClick={() => void openSession(session.id)}
+								aria-current={session.id === snapshot?.id ? "page" : undefined}
 							>
 								<span className="session-icon">{session.title.slice(0, 1).toUpperCase() || "P"}</span>
 								<span className="session-copy">
@@ -479,7 +780,11 @@ function App() {
 								{session.id === snapshot?.id && <span className="session-active-dot" />}
 							</button>
 						))}
-						{visibleSessions.length === 0 && <p className="empty-list">还没有对话</p>}
+						{visibleSessions.length === 0 && (
+							<p className="empty-list">
+								{query ? "没有匹配的对话" : archived ? "暂无归档对话" : "还没有对话，点击右上角 ＋ 创建。"}
+							</p>
+						)}
 					</nav>
 					<footer className="sidebar-footer">
 						<button type="button" onClick={() => setAssistantEditor("new")}>
@@ -511,7 +816,16 @@ function App() {
 							</span>
 						</div>
 						<div className="chat-actions">
-							<span className="model-pill">{snapshot?.model ?? selectedModel?.id ?? "未配置模型"}</span>
+							<button
+								type="button"
+								className="model-pill"
+								title="模型设置（新会话默认）"
+								onClick={() => setShowModelSettings(true)}
+							>
+								{snapshot?.mode === "faux"
+									? "本地试用 · 无模型调用"
+									: (snapshot?.model ?? selectedModel?.id ?? "配置模型")}
+							</button>
 							<button
 								type="button"
 								className="circle-button"
@@ -528,10 +842,32 @@ function App() {
 							<button type="button" onClick={() => void initialize()} disabled={pending}>
 								重新连接
 							</button>
+							<button type="button" aria-label="关闭错误" onClick={() => setError("")}>
+								×
+							</button>
 						</div>
 					)}
+					{notice && (
+						<output className="notice">
+							{notice}
+							<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}>
+								×
+							</button>
+						</output>
+					)}
+					{loadingSession && <output className="loading-state">正在加载会话…</output>}
 					<ThreadPrimitive.Root key={snapshot?.id ?? "empty"} className="thread">
-						<ThreadPrimitive.Viewport className="viewport">
+						<ThreadPrimitive.Viewport ref={viewport} className="viewport">
+							{snapshot?.history?.nextBeforeSeq != null && (
+								<button
+									type="button"
+									className="history-button"
+									disabled={loadingHistory}
+									onClick={() => void loadHistory()}
+								>
+									{loadingHistory ? "正在加载…" : "加载更早消息"}
+								</button>
+							)}
 							{messages.length === 0 && (
 								<section className="welcome">
 									<div className="welcome-orb">
@@ -554,7 +890,7 @@ function App() {
 													key={label}
 													type="button"
 													disabled={!connected || Boolean(busy)}
-													onClick={() => void send(prompt).catch(() => {})}
+													onClick={() => void send({ text: prompt, images: [] })}
 												>
 													<strong>{label}</strong>
 													<span>{prompt}</span>
@@ -576,12 +912,38 @@ function App() {
 											配置模型
 										</button>
 									)}
+									{!snapshot && (
+										<button
+											type="button"
+											className="local-trial"
+											disabled={pending || !coreReady}
+											onClick={() => void newSession("faux")}
+										>
+											本地试用 · 不调用模型
+										</button>
+									)}
 								</section>
 							)}
 							<div className="transcript">
 								<ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+								{busy && (
+									<output className="running-indicator">
+										{snapshot?.execution.cancellationRequested
+											? "正在停止并清理工具…"
+											: snapshot?.execution.waitingForInteraction
+												? "等待你的确认"
+												: snapshot?.execution.activeTools.length
+													? `正在执行 ${snapshot.execution.activeTools.map((tool) => tool.toolName).join("、")}`
+													: "Pie 正在思考…"}
+									</output>
+								)}
 							</div>
 						</ThreadPrimitive.Viewport>
+						{messages.length > 0 && (
+							<ThreadPrimitive.ScrollToBottom className="scroll-bottom" aria-label="回到最新消息">
+								↓ 最新消息
+							</ThreadPrimitive.ScrollToBottom>
+						)}
 						{snapshot && (
 							<div className="composer-area">
 								{snapshot.turn && snapshot.turn.status !== "running" && (
@@ -592,52 +954,61 @@ function App() {
 												? "本次执行已停止"
 												: interrupted
 													? "执行已中断，可继续本次对话"
-													: "任务已完成"}
+													: snapshot.execution.waitingForMessage
+														? "正在等待后台消息"
+														: "本轮回复已结束"}
 									</output>
 								)}
 								{interrupted && (
 									<div className="resume-actions">
-										<button type="button" disabled={!connected || pending} onClick={() => void cancel()}>
+										<button
+											type="button"
+											disabled={!connected || pending || !snapshot.execution.actions.cancel.available}
+											onClick={() => void cancel()}
+										>
 											停止
 										</button>
 										<button
 											type="button"
 											className="confirm-button"
-											disabled={!connected || pending}
+											disabled={!connected || pending || !snapshot.execution.actions.resume.available}
 											onClick={() => void resume()}
 										>
 											继续
 										</button>
 									</div>
 								)}
-								<ComposerPrimitive.Root className="composer">
-									<button type="button" className="composer-plus" aria-label="添加内容" disabled>
-										＋
-									</button>
-									<ComposerPrimitive.Input
-										aria-label="发送消息"
-										placeholder={connected ? "给 Pie 发消息" : "正在连接 Core…"}
-										maxLength={16000}
-										disabled={!connected || pending || Boolean(interrupted)}
-									/>
-									<div className="composer-footer">
-										<span>Enter 发送 · Shift + Enter 换行</span>
-										{busy ? (
-											<button
-												type="button"
-												className="send stop"
-												aria-label="停止执行"
-												onClick={() => void cancel()}
-											>
-												■
-											</button>
-										) : (
-											<ComposerPrimitive.Send className="send" aria-label="发送">
-												↑
-											</ComposerPrimitive.Send>
-										)}
+								{snapshot.execution.recoveryBlockedReason && (
+									<p className="turn-status failed">{snapshot.execution.recoveryBlockedReason}</p>
+								)}
+								{!busy && !interrupted && messages.length > 0 && (
+									<div className="resume-actions">
+										<button
+											type="button"
+											disabled={pending || !connected}
+											onClick={() => void retryLastMessage()}
+										>
+											重试 / 编辑上一条（新分支）
+										</button>
 									</div>
-								</ComposerPrimitive.Root>
+								)}
+								<Composer
+									key={`${snapshot.id}:${draftVersion}`}
+									sessionId={snapshot.id}
+									initialDraft={initialDraft}
+									disabled={
+										!connected ||
+										loadingSession ||
+										(!snapshot.execution.actions.submit.available &&
+											!snapshot.execution.actions.steer.available)
+									}
+									pending={pending}
+									running={Boolean(busy)}
+									canStop={snapshot.execution.actions.cancel.available}
+									canSteer={snapshot.execution.actions.steer.available}
+									onSend={send}
+									onStop={() => void cancel()}
+								/>
 								<p className="disclaimer">Pie 可能会出错，请检查重要信息。</p>
 							</div>
 						)}
@@ -656,6 +1027,103 @@ function App() {
 						</header>
 						{snapshot ? (
 							<>
+								{snapshot.mode === "real" && (
+									<section>
+										<SessionModelSelect
+											key={`${snapshot.id}:${modelRevision}`}
+											session={snapshot}
+											disabled={pending}
+											onSaved={accept}
+										/>
+									</section>
+								)}
+								<section key={`${snapshot.id}:${snapshot.title}`}>
+									<form
+										className="session-form"
+										onSubmit={(event) => {
+											event.preventDefault();
+											const data = new FormData(event.currentTarget);
+											void manage("", { title: data.get("title") }, "PATCH");
+										}}
+									>
+										<label>
+											会话标题
+											<input
+												name="title"
+												required
+												maxLength={100}
+												defaultValue={snapshot.title}
+												disabled={pending || busy}
+											/>
+										</label>
+										<button className="event-toggle" type="submit" disabled={pending || busy}>
+											保存标题
+										</button>
+									</form>
+									<form
+										className="session-form"
+										onSubmit={(event) => {
+											event.preventDefault();
+											const data = new FormData(event.currentTarget);
+											void manage(
+												"/workspace",
+												{ workspacePath: String(data.get("workspacePath") ?? "").trim() },
+												"PUT",
+											);
+										}}
+									>
+										<label>
+											工作目录
+											<input
+												name="workspacePath"
+												required
+												maxLength={4096}
+												defaultValue={snapshot.workspacePath ?? ""}
+												placeholder="例如 /workspace/project"
+												disabled={pending || !snapshot.execution.actions.submit.available}
+											/>
+										</label>
+										<button
+											className="event-toggle"
+											type="submit"
+											disabled={pending || !snapshot.execution.actions.submit.available}
+										>
+											保存工作目录
+										</button>
+									</form>
+									<button
+										type="button"
+										className="event-toggle"
+										disabled={pending || busy || Boolean(interrupted)}
+										onClick={() => void openTree()}
+									>
+										查看会话分支
+									</button>
+									<button
+										type="button"
+										className="event-toggle"
+										disabled={pending || busy}
+										onClick={() => void exportChat()}
+									>
+										导出会话 JSON
+									</button>
+									<button
+										type="button"
+										className="event-toggle"
+										disabled={pending}
+										onClick={() => void manage("/archive", { archived: !snapshot.archived })}
+									>
+										{snapshot.archived ? "取消归档" : "归档会话"}
+									</button>
+									<button
+										type="button"
+										className="event-toggle danger"
+										disabled={pending || busy || Boolean(interrupted)}
+										onClick={() => void deleteChat()}
+									>
+										删除会话
+									</button>
+								</section>
 								<section>
 									<span className="detail-label">助手</span>
 									<strong>{snapshot.assistant?.name ?? snapshot.assistantId}</strong>
@@ -666,6 +1134,8 @@ function App() {
 									</strong>
 									<span className="detail-label">消息</span>
 									<strong>{snapshot.messages.length} 条</strong>
+									<span className="detail-label">会话 ID</span>
+									<strong>{snapshot.id}</strong>
 								</section>
 								<section>
 									<span className="detail-label">最近活动</span>
@@ -683,6 +1153,9 @@ function App() {
 										))}
 									{!snapshot.activities?.length && <p className="context-empty">暂无活动。</p>}
 								</section>
+								<section>
+									<BackgroundJobs key={snapshot.id} sessionId={snapshot.id} />
+								</section>
 							</>
 						) : (
 							<p className="context-empty">选择一个对话后查看。</p>
@@ -698,7 +1171,12 @@ function App() {
 					onSaved={(assistant) => {
 						setAssistants((previous) => [...previous.filter((item) => item.id !== assistant.id), assistant]);
 						setAssistantId(assistant.id);
+						if (snapshot && snapshot.assistantId !== assistant.id) switchSession();
 						setAssistantEditor(undefined);
+					}}
+					onDeleted={(id) => {
+						setAssistants((previous) => previous.filter((assistant) => assistant.id !== id));
+						setAssistantId(assistants.find((assistant) => assistant.id !== id)?.id ?? "");
 					}}
 				/>
 			)}
@@ -706,14 +1184,29 @@ function App() {
 			{showModelSettings && (
 				<ModelSettings
 					onClose={() => setShowModelSettings(false)}
-					onSaved={(selected) => setSelectedModel(selected)}
+					onSaved={(selected) => {
+						setSelectedModel(selected);
+						setModelRevision((value) => value + 1);
+					}}
 				/>
 			)}
 			{snapshot?.interactions[0] && (
 				<InteractionPrompt
+					key={snapshot.interactions[0].id}
 					interaction={snapshot.interactions[0]}
-					disabled={replyingInteractionId !== undefined}
-					onReply={(approved) => void replyToInteraction(approved)}
+					error={interactionError}
+					canStop={snapshot.execution.actions.cancel.available}
+					onStop={() => void cancel()}
+					disabled={!connected || replyingInteractionId !== undefined}
+					onReply={(approved, remember) => void replyToInteraction(approved, remember)}
+				/>
+			)}
+			{tree && (
+				<SessionTreeDialog
+					tree={tree}
+					disabled={pending}
+					onClose={() => setTree(undefined)}
+					onSelect={(entryId) => void selectBranch(entryId)}
 				/>
 			)}
 		</AssistantRuntimeProvider>

@@ -34,7 +34,8 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 
 - 第一阶段：新增 `apps/web/host.ts` 与共享 Vite 配置，提供 `npm run chat`；随机 Core 端口和令牌由本机代理管理，Host/Origin 校验后再代理。退出前等待 Core 清理和持久化，开发仍支持独立 `serve` / `web`。
 - 验证：宿主 HTTP/SSE、异源拒绝、启动失败释放、真实 CLI SIGTERM 与重启取消状态共 4 项通过；宿主单独 Node 类型检查纳入根 `check`，`npm run check` 已通过。未运行构建或付费模型。
-- 第二阶段进行中：会话整理、分页/分支、可靠 SSE、图片草稿、执行控制与设置；已完成单元测试，正在真实 Chrome 中使用 faux 模型验收与纠错。
+- 第二阶段：`main.tsx`、`composer.tsx`、`session-connection.ts`、`turn-submission.ts` 补齐会话搜索/标题/归档/删除/导出、历史分页/分支、图片与草稿、复制、执行中追加输入/停止/恢复、权限确认及记忆；设置面板补加载重试/参数校验/助手删除，会话详情提供模型、工作目录和后台作业。
+- 验证：`node --conditions=source --test apps/web/test/*.test.ts` 27/27；`npm run check` 通过。首轮 Chrome 13 组回归通过，发现并修复窄屏高度、同会话分支重连、过期请求、停止弹窗和失败草稿等问题。下一阶段继续复核配置持久化、分支附件与初始化失败恢复。
 
 - 新增 `apps/web` React/Vite 工作区，恢复 HTTP/SSE 适配、消息转换、设置面板和回归测试。
 - 重写 `apps/web/client/main.tsx` 和 `apps/web/client/style.css`，实现参考图风格的浅色两栏聊天界面，并保留模型、助手、插件、停止、恢复和交互确认入口。

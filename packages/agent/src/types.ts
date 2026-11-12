@@ -28,8 +28,13 @@ import type { Static, TSchema } from "typebox";
 export type StreamFn = (
 	model: Model<Api>,
 	context: Context,
-	options?: SimpleStreamOptions,
+	options?: StreamFnOptions,
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
+
+export interface StreamFnOptions extends SimpleStreamOptions {
+	/** Complete context preparation under the run signal before resuming model preemption. */
+	prepare?: <T>(operation: (signal?: AbortSignal) => Promise<T>) => Promise<T>;
+}
 
 /**
  * Configuration for how tool calls from a single assistant message are executed.
@@ -199,6 +204,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	onContextReady?: (context: AgentContext, newMessages: AgentMessage[]) => void;
+	/** Registers only the current model request; tools continue to use the run signal. */
+	onModelRequest?: (controller: AbortController | undefined) => void;
 
 	/**
 	 * Resolves an API key dynamically for each LLM call.

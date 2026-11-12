@@ -314,8 +314,13 @@ export function createCompactionStream(
 	return (model, context, request) => {
 		const output = createAssistantMessageEventStream();
 		let lastMessage: AssistantMessage | undefined;
+		const prepare = (budget: RequestBudget) =>
+			request?.prepare
+				? request.prepare((signal) => transform(context.messages, signal, budget))
+				: transform(context.messages, request?.signal, budget);
 		void (async () => {
-			let messages = await transform(context.messages, request?.signal, context);
+			let messages = await prepare(context);
+			request?.signal?.throwIfAborted();
 			context.messages = messages;
 			for (let attempt = 0; attempt < 2; attempt++) {
 				const pending: AssistantMessageEvent[] = [];
@@ -343,7 +348,8 @@ export function createCompactionStream(
 						(isContextOverflow(lastMessage, model.contextWindow) ||
 							isRecoverableLength(lastMessage, request?.maxTokens ?? model.maxTokens))
 					) {
-						messages = await transform(context.messages, request?.signal, { ...context, force: true });
+						messages = await prepare({ ...context, force: true });
+						request?.signal?.throwIfAborted();
 						context.messages = messages;
 						recover = true;
 						break;

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+	type Context,
+	contentText,
 	createAssistantMessageEventStream,
 	createModels,
 	fauxAssistantMessage,
@@ -132,19 +134,27 @@ for (const outcome of ["completed", "failed", "cancelled", "steered"] as const) 
 		models.setProvider(faux.provider);
 		const model = faux.getModel();
 		let attempts = 0;
+		let followUpAttempts = 0;
+		const retry = {
+			enabled: true,
+			maxRetries: 1,
+			baseDelayMs: outcome === "cancelled" || outcome === "steered" ? 60000 : 1,
+		};
 		let steering: Promise<unknown> | undefined;
-		context.mock.method(models, "streamSimple", () => {
+		context.mock.method(models, "streamSimple", (_model: unknown, input: Context) => {
 			const output = createAssistantMessageEventStream();
 			attempts++;
+			const followingUp = input.messages.some(
+				(message) => message.role === "user" && contentText(message.content) === "follow up",
+			);
+			if (followingUp) {
+				followUpAttempts++;
+				retry.baseDelayMs = 1;
+			}
 			const message =
-				(outcome === "completed" && attempts > 1) || (outcome === "steered" && attempts % 2 === 0)
+				(outcome === "completed" && attempts > 1) || (outcome === "steered" && followingUp && followUpAttempts > 1)
 					? fauxAssistantMessage("recovered")
 					: fauxAssistantMessage("", { stopReason: "error", errorMessage: "Upstream API error: 530" });
-			if (outcome === "steered" && attempts === 2) {
-				assert(steering);
-				void steering.then(() => output.push({ type: "done", reason: "stop", message }));
-				return output;
-			}
 			output.push(
 				message.stopReason === "error"
 					? { type: "error", reason: "error", error: message }
@@ -165,7 +175,7 @@ for (const outcome of ["completed", "failed", "cancelled", "steered"] as const) 
 			recordModelRequest: () => async () => undefined,
 			compactionSettings: () => ({
 				compaction: { enabled: false, reserveTokens: 1, keepRecentTokens: 1 },
-				retry: { enabled: true, maxRetries: 1, baseDelayMs: outcome === "cancelled" ? 60000 : 1 },
+				retry,
 			}),
 		});
 		const runtime = await createRuntime({
@@ -213,12 +223,13 @@ for (const outcome of ["completed", "failed", "cancelled", "steered"] as const) 
 		});
 		const final = await runtime.waitForTurn(session.id);
 		await cancellation;
+		await steering;
 		assert.equal(final.turn?.status, outcome === "steered" ? "completed" : outcome);
-		assert.equal(attempts, outcome === "cancelled" ? 1 : outcome === "steered" ? 4 : 2);
+		assert.equal(attempts, outcome === "cancelled" ? 1 : outcome === "steered" ? 3 : 2);
 		assert.deepEqual(
 			globals.map((packet) => packet.event?.status),
 			outcome === "steered"
-				? ["started", "completed", "started", "completed"]
+				? ["started", "failed", "started", "completed"]
 				: ["started", outcome === "completed" ? "completed" : "failed"],
 		);
 		assert.deepEqual(timeline.slice(-2), [

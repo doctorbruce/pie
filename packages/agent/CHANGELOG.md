@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Preempt model generation on steering without cancelling started tools. Keep their real results, omit incomplete or unstarted calls from partial history, and apply queued input at the existing continuation boundary.
+
 - Interrupt model, tool, and hook waits on cancellation even when their promises ignore the abort signal. Preserve partial output, close started tool calls with interrupted results, and ignore late progress and completions before allowing another run.
 
 ### Added

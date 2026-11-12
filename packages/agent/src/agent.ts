@@ -162,6 +162,8 @@ type ActiveRun = {
 	promise: Promise<void>;
 	resolve: () => void;
 	abortController: AbortController;
+	modelController?: AbortController;
+	modelPreemptPending?: boolean;
 };
 
 /**
@@ -298,9 +300,13 @@ export class Agent {
 		return this.followUpQueue.mode;
 	}
 
-	/** Queue a message to be injected after the current assistant turn finishes. */
+	/** Preempt model generation, then inject the message after started tools settle. */
 	steer(message: AgentMessage): void {
 		this.steeringQueue.enqueue(message);
+		if (this.activeRun) {
+			this.activeRun.modelPreemptPending = true;
+			this.activeRun.modelController?.abort();
+		}
 	}
 
 	/** Queue a message to run only after the agent would otherwise stop. */
@@ -311,6 +317,7 @@ export class Agent {
 	/** Remove all queued steering messages. */
 	clearSteeringQueue(): void {
 		this.steeringQueue.clear();
+		if (this.activeRun) this.activeRun.modelPreemptPending = false;
 	}
 
 	/** Remove queued follow-up messages matching the predicate, or all if omitted. */
@@ -464,6 +471,7 @@ export class Agent {
 	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		const shouldStopAfterTurn = this.shouldStopAfterTurn;
+		const run = this.activeRun;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -494,12 +502,18 @@ export class Agent {
 				this.activeContext = context;
 				this.activeMessages = newMessages;
 			},
+			onModelRequest: (controller) => {
+				if (!run || this.activeRun !== run) return;
+				run.modelController = controller;
+				if (run.modelPreemptPending) controller?.abort();
+			},
 			getApiKey: this.getApiKey,
 			getSteeringMessages: async () => {
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
+				if (this.activeRun) this.activeRun.modelPreemptPending = false;
 				return this.steeringQueue.drain();
 			},
 			getFollowUpMessages: async () => this.followUpQueue.drain(),

@@ -145,7 +145,7 @@ POST /sessions/:id/turns { text, assistantId?, systemPrompt? }
 
 POST /sessions/:id/steer { turnId, text, displayText? }
   → 仅接受当前 running Turn 的精确 turnId，取消期间拒绝；异步等待后再次校验
-  → Agent.steer() 在当前工具结束后注入用户消息并继续同一 Turn
+  → Agent.steer() 抢占当前模型生成，等待已启动工具结算后注入用户消息并继续同一 Turn
 ```
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
@@ -160,11 +160,11 @@ Pie 保留 Pi 原生的内容分段：`thinking_start/delta/end` 是思考，`te
 
 关闭或切换 SSE 订阅不会停止执行。宿主自行维护草稿和展示缓存，断线后通过快照或执行基线重新对齐；原始事件不持久化、不补发。
 
-Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 Turn，并在当前工具执行完成后进入下一轮模型响应；取消会先清空待处理的 steer/follow-up 队列再中断，取消期间的追加输入返回 `409`。Local 取消直接到达 Runtime，不等待外层串行读取；清理和结算仍阻止下一 Turn 越过。受理成功返回 `202` 和控制回执，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
+Steer 和取消都需要明确的当前 `turnId`。Steer 保持同一个外层 Turn，抢占模型生成但保留已启动工具及其真实结果，全部结算后进入下一轮模型响应；半截参数和未启动调用不会执行。压缩提交等会修改历史的准备先完成，再消费新输入，避免迟到保存覆盖新历史。取消会先清空待处理的 steer/follow-up 队列再中断，取消期间的追加输入返回 `409`。Local 取消直接到达 Runtime，不等待外层串行读取；清理和结算仍阻止下一 Turn 越过。受理成功返回 `202` 和控制回执，最终状态仍以 `turn.settled` 为准。删除和重命名运行中的会话返回 `409`；助手有会话时不允许删除，且至少保留一个助手。
 
 四个控制入口与 `execution.actions` 共用新操作决策，HTTP 以 `reason` 返回稳定拒绝代码。幂等提交重试只查询当前回执，重复取消复用在途操作，终态取消不产生新操作；恢复可用只允许进入历史、账本及外部结果预检。存储故障会发布所有已装载会话的新摘要；普通新操作拒绝，显式 `bestEffort: true` 的活跃取消只尽力停止本实例，回执 `durable: false`，不保证持久取消或外部任务停止。详细契约见 [嵌入接入](runtime-embedding.md#事件隔离与生命周期)。
 
-宿主可在 submit/steer 提供 `canonicalTurnId`，Submit 按 canonical 与原 requestId 的固定关联去重；不同 canonical 可复用连接本地的数字 requestId，得到新的 native Turn。Steer 保持物理 Turn ID，受理仅追加 `Turn.steerAdmissions`，回执 `queued: true, applied/started: false`；`turn.canonicalTurnId/requestId` 继续表示实际执行者。旧模型、工具和交互完成后，消费 user 消息时原子保存历史、实际 owner 与 applied，再发 `turn.applied`。受理前驱指向最近受理者，应用前驱指向实际被接替者；原始关联保留，连续队列逐条应用。取消、失败和关闭逐条发 `steer.settled`，未消费记录 `applied: false`，清空消息而不重放。回执固定准入瞬间，保存失败的 503 仍可能已受理，需通过 `turn.steerAdmissions` 核对 queued/applied/settled；冷装载把丢失队列结算为 interrupted，不能自动重发。范围和验证见 [固定目标取消 SPEC](specs/targeted-cancellation.md)。
+宿主可在 submit/steer 提供 `canonicalTurnId`，Submit 按 canonical 与原 requestId 的固定关联去重；不同 canonical 可复用连接本地的数字 requestId，得到新的 native Turn。Steer 保持物理 Turn ID，受理仅追加 `Turn.steerAdmissions`，回执 `queued: true, applied/started: false`；`turn.canonicalTurnId/requestId` 继续表示实际执行者。旧模型生成收束、已启动工具和交互完成后，消费 user 消息时原子保存历史、实际 owner 与 applied，再发 `turn.applied`。受理前驱指向最近受理者，应用前驱指向实际被接替者；原始关联保留，连续队列逐条应用。取消、失败和关闭逐条发 `steer.settled`，未消费记录 `applied: false`，清空消息而不重放。回执固定准入瞬间，保存失败的 503 仍可能已受理，需通过 `turn.steerAdmissions` 核对 queued/applied/settled；冷装载把丢失队列结算为 interrupted，不能自动重发。范围和验证见 [固定目标取消 SPEC](specs/targeted-cancellation.md)。
 
 ### 多 Core 会话同步
 
@@ -393,7 +393,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | `packages/local/src/external-tools.ts`、`packages/runtime/src/tools.ts` | 本地工具文件加载、共享 ToolContext、工具 ID 和定义校验 |
 | `examples/tools/memory-manage.ts` | Astron 记忆工具适配示例，可复制到外部目录 |
 | `packages/local/src/models/` | 上游模型配置抽取和提供商管理 |
-| `packages/agent/src/agent.ts`、`agent-loop.ts` | 原版执行内核，当前保持 `b2602be` 基线 |
+| `packages/agent/src/agent.ts`、`agent-loop.ts` | Agent 执行内核、输入队列、模型生成抢占与工具调度 |
 
 运行 `npm run check` 做格式、类型和模型目录检查。定向测试 `npm run test:server` 覆盖助手配置、工具过滤、会话隔离、重启、删除、独占存储、崩溃恢复、HTTP/SSE、上下文压缩和模型配置；也覆盖十个内置工具的注册、文件读写改查、网页抓取、搜索、Plugin 根/嵌套 Skill、共享绑定来源、脚本执行，以及 Bash 失败、限额、取消、后台执行和超时。`webfetch.test.ts` 覆盖格式转换、权限、重定向、响应限额、结果预览、超时和取消。`external-tools.test.ts` 覆盖外部工具文件加载、目录查询、按会话启用、模拟 Astron HTTP 调用、参数错误、业务拒绝、取消和重启恢复。只用假模型和本地 HTTP fixture。只有修改内核时再运行相关 `npm run test:core`。
 

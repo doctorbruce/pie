@@ -4,6 +4,8 @@
 
 ### Changed
 
+- Steering preempts model generation while preserving started tools and their execution owner until settlement. Finish mutating context preparation before applying new input; admission receipts, Turn identity and event contracts remain unchanged.
+
 - Project image history with a configurable `AgentRuntimeConfig.maxHistoryImageBytes` target, defaulting to 16 MiB of encoded image data. Omit older tool images before older user images, preserve the latest real user images and original stored history, and include budgeted images with source markers in vision summaries.
 
 - Collapse Worker model-side sending and waiting into one `communicate` tool; keep `send`/`wait` internals and legacy history parsing compatible.

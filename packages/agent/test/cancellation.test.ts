@@ -7,6 +7,8 @@ import {
 	Type,
 } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
+import { convertResponsesMessages } from "../../ai/src/api/openai-responses-shared.ts";
+import { transformMessages } from "../../ai/src/api/transform-messages.ts";
 import { Agent, type AgentEvent, type AgentOptions, type AgentTool } from "../src/index.ts";
 
 function gate<T = void>() {
@@ -24,6 +26,194 @@ async function stopped(agent: Agent) {
 }
 
 describe("non-cooperative cancellation", () => {
+	it.each(["setup", "events", "result"] as const)(
+		"steers past a stuck provider %s and isolates late output",
+		async (phase) => {
+			const entered = gate();
+			const release = gate();
+			const stream = createAssistantMessageEventStream();
+			const partial = fauxAssistantMessage(
+				[
+					{ type: "thinking", thinking: "partial reasoning", thinkingSignature: "unfinished signature" },
+					{ type: "text", text: "partial text", textSignature: "unfinished signature" },
+				],
+				{ stopReason: "pending" },
+			);
+			if (phase === "result")
+				stream.result = async () => {
+					entered.resolve();
+					await release.promise;
+					return partial;
+				};
+			let requests = 0;
+			let providerSignal: AbortSignal | undefined;
+			const agent = new Agent({
+				initialState: { model: fauxProvider().getModel() },
+				async streamFn(_model, _context, options) {
+					if (++requests > 1) {
+						const next = createAssistantMessageEventStream();
+						next.push({ type: "done", reason: "stop", message: fauxAssistantMessage("next") });
+						return next;
+					}
+					providerSignal = options?.signal;
+					if (phase === "setup") {
+						entered.resolve();
+						await release.promise;
+					}
+					return stream;
+				},
+			});
+			agent.subscribe((event) => {
+				if (phase === "events" && event.type === "message_start" && event.message.role === "assistant")
+					entered.resolve();
+			});
+			const pending = agent.prompt("start");
+			if (phase !== "setup") stream.push({ type: "start", partial });
+			if (phase === "result") stream.push({ type: "done", reason: "stop", message: partial });
+			try {
+				await entered.promise;
+				agent.steer({ role: "user", content: "change direction", timestamp: Date.now() });
+				await expect.poll(() => requests, { timeout: 500 }).toBe(2);
+				await pending;
+				expect(providerSignal?.aborted).toBe(true);
+				expect(agent.state.errorMessage).toBeUndefined();
+				if (phase !== "setup") {
+					expect(agent.state.messages[1]).toMatchObject({ stopReason: "stop" });
+					expect(agent.state.messages[1].content).toEqual([
+						{ type: "thinking", thinking: "partial reasoning" },
+						{ type: "text", text: "partial text" },
+					]);
+				}
+				const history = structuredClone(agent.state.messages);
+				partial.content = [{ type: "text", text: "late mutation" }];
+				release.resolve();
+				stream.push({ type: "done", reason: "stop", message: partial });
+				await delay(10);
+				expect(agent.state.messages).toEqual(history);
+			} finally {
+				release.resolve();
+				agent.abort();
+				await pending;
+			}
+		},
+	);
+
+	it.each([false, true])(
+		"lets context preparation settle before steering resumes model generation (failure=%s)",
+		async (failure) => {
+			const entered = gate();
+			const release = gate();
+			let prepared = false;
+			let latePreparations = 0;
+			let requests = 0;
+			let preparationSignal: AbortSignal | undefined;
+			const agent = new Agent({
+				initialState: { model: fauxProvider().getModel() },
+				async streamFn(_model, _context, options) {
+					if (++requests === 1) {
+						await options?.prepare?.(async (signal) => {
+							preparationSignal = signal;
+							entered.resolve();
+							await release.promise;
+							if (failure) throw new Error("preparation storage failed");
+							prepared = true;
+						});
+						try {
+							await options?.prepare?.(async () => {
+								latePreparations++;
+							});
+						} catch (error) {
+							if (!options?.signal?.aborted) throw error;
+						}
+					}
+					const response = createAssistantMessageEventStream();
+					response.push({ type: "done", reason: "stop", message: fauxAssistantMessage("done") });
+					return response;
+				},
+			});
+			const pending = agent.prompt("start");
+			try {
+				await entered.promise;
+				agent.steer({ role: "user", content: "change direction", timestamp: Date.now() });
+				expect(preparationSignal?.aborted).toBe(false);
+				expect(prepared).toBe(false);
+				expect(requests).toBe(1);
+				release.resolve();
+				await pending;
+				expect(latePreparations).toBe(0);
+				if (failure) {
+					expect(prepared).toBe(false);
+					expect(requests).toBe(1);
+					expect(agent.state.errorMessage).toContain("preparation storage failed");
+				} else {
+					expect(prepared).toBe(true);
+					expect(requests).toBe(2);
+					expect(agent.state.errorMessage).toBeUndefined();
+				}
+			} finally {
+				release.resolve();
+				agent.abort();
+				await pending;
+			}
+		},
+	);
+
+	it.each([false, true])(
+		"replays completed reasoning only with a following retained item (text=%s)",
+		async (followingText) => {
+			const model = { ...fauxProvider().getModel(), api: "openai-responses" as const, provider: "openai" };
+			const stream = createAssistantMessageEventStream();
+			const entered = gate();
+			const signature = JSON.stringify({ id: "rs_complete", type: "reasoning", summary: [], status: "completed" });
+			const partial = fauxAssistantMessage(
+				[
+					{ type: "thinking", thinking: "visible reasoning", thinkingSignature: signature },
+					...(followingText ? [{ type: "text" as const, text: "visible text" }] : []),
+				],
+				{ stopReason: "pending" },
+			);
+			Object.assign(partial, { api: model.api, provider: model.provider, model: model.id });
+			let replay: ReturnType<typeof convertResponsesMessages> = [];
+			let requests = 0;
+			const agent = new Agent({
+				initialState: { model },
+				streamFn(_model, context) {
+					if (++requests === 1) return stream;
+					replay = convertResponsesMessages(
+						model,
+						{ ...context, messages: transformMessages(context.messages, model) },
+						new Set(["openai"]),
+					);
+					const next = createAssistantMessageEventStream();
+					next.push({ type: "done", reason: "stop", message: fauxAssistantMessage("next") });
+					return next;
+				},
+			});
+			agent.subscribe((event) => {
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end")
+					entered.resolve();
+			});
+			const pending = agent.prompt("start");
+			stream.push({ type: "start", partial });
+			stream.push({ type: "thinking_end", contentIndex: 0, content: "visible reasoning", partial });
+			try {
+				await entered.promise;
+				agent.steer({ role: "user", content: "change direction", timestamp: Date.now() });
+				await pending;
+				expect(agent.state.errorMessage).toBeUndefined();
+				expect(agent.state.messages[1].content).toEqual(
+					expect.arrayContaining([expect.objectContaining({ type: "thinking", thinking: "visible reasoning" })]),
+				);
+				expect(replay.filter((item) => "type" in item && item.type === "reasoning")).toHaveLength(
+					followingText ? 1 : 0,
+				);
+			} finally {
+				agent.abort();
+				await pending;
+			}
+		},
+	);
+
 	it.each(["result", "return"] as const)("interrupts a stuck provider %s", async (phase) => {
 		const entered = gate();
 		const release = gate();

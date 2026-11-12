@@ -37,7 +37,7 @@ function tool(execute: AgentTool["execute"], name = "action", sequential = false
 	};
 }
 
-function run(tools: AgentTool[], hooks: Pick<Agent, "beforeToolCall" | "afterToolCall"> = {}) {
+function run(tools: AgentTool[], hooks: Pick<Agent, "beforeToolCall" | "afterToolCall" | "shouldStopAfterTurn"> = {}) {
 	const stream = createAssistantMessageEventStream();
 	const message = fauxAssistantMessage([], { stopReason: "pending" });
 	const events: AgentEvent[] = [];
@@ -90,6 +90,88 @@ function run(tools: AgentTool[], hooks: Pick<Agent, "beforeToolCall" | "afterToo
 }
 
 describe("streamed tool execution", () => {
+	it("steers a stalled model without ending the run or invoking normal stop hooks", async () => {
+		let stopChecks = 0;
+		const current = run([], {
+			shouldStopAfterTurn() {
+				stopChecks++;
+				return true;
+			},
+		});
+		await expect.poll(() => current.agent.state.streamingMessage?.role).toBe("assistant");
+		current.agent.steer({ role: "user", content: "change direction", timestamp: Date.now() });
+		await expect.poll(() => current.requests.length, { timeout: 500 }).toBe(2);
+		await current.pending;
+		expect(current.agent.state.errorMessage).toBeUndefined();
+		expect(current.requests[1].messages.at(-1)).toMatchObject({ role: "user", content: "change direction" });
+		expect(stopChecks).toBe(1);
+	});
+
+	it("steers the model, drains the started tool, and drops queued calls and unfinished arguments", async () => {
+		const started = gate();
+		const release = gate();
+		const effects: string[] = [];
+		let toolSignal: AbortSignal | undefined;
+		const current = run([
+			tool(async (id, _args, signal) => {
+				effects.push(id);
+				toolSignal = signal;
+				started.resolve();
+				await release.promise;
+				return { content: [{ type: "text", text: "real result" }], details: {} };
+			}),
+		]);
+		current.call("started", '{"text":"first"}');
+		await started.promise;
+		current.call("queued", '{"text":"second"}');
+		current.call("fragment", '{"text":"unfinished', "action", { text: "unfinished" }, false);
+		await expect.poll(() => current.agent.state.streamingMessage).toMatchObject({ content: [{}, {}, {}] });
+		current.agent.steer({ role: "user", content: "change direction", timestamp: Date.now() });
+		await expect.poll(() => current.agent.state.streamingMessage, { timeout: 500 }).toBeUndefined();
+		expect(toolSignal?.aborted).toBe(false);
+		expect(current.requests).toHaveLength(1);
+		expect(current.agent.state.messages.filter((message) => message.role === "user")).toHaveLength(1);
+		release.resolve();
+		await current.pending;
+		expect(effects).toEqual(["started"]);
+		expect(current.agent.state.errorMessage).toBeUndefined();
+		expect(current.requests).toHaveLength(2);
+		expect(current.requests[1].messages.filter((message) => message.role === "assistant")).toMatchObject([
+			{ stopReason: "toolUse", content: [{ id: "started" }] },
+		]);
+		expect(current.requests[1].messages.filter((message) => message.role === "toolResult")).toMatchObject([
+			{ toolCallId: "started", isError: false, content: [{ text: "real result" }] },
+		]);
+		expect(current.requests[1].messages.at(-1)).toMatchObject({ role: "user", content: "change direction" });
+	});
+
+	it("preserves all already-started parallel tools while steering waits for their real results", async () => {
+		const bothStarted = gate();
+		const release = gate();
+		const signals: AbortSignal[] = [];
+		const current = run([
+			tool(async (id, _args, signal) => {
+				if (signal) signals.push(signal);
+				if (signals.length === 2) bothStarted.resolve();
+				await release.promise;
+				return { content: [{ type: "text", text: id }], details: {} };
+			}),
+		]);
+		current.call("first", '{"text":"first"}');
+		current.call("second", '{"text":"second"}');
+		current.finish();
+		await bothStarted.promise;
+		current.agent.steer({ role: "user", content: "change direction", timestamp: Date.now() });
+		expect(signals.every((signal) => !signal.aborted)).toBe(true);
+		expect(current.requests).toHaveLength(1);
+		release.resolve();
+		await current.pending;
+		expect(current.requests[1].messages.filter((message) => message.role === "toolResult")).toMatchObject([
+			{ toolCallId: "first", isError: false, content: [{ text: "first" }] },
+			{ toolCallId: "second", isError: false, content: [{ text: "second" }] },
+		]);
+	});
+
 	it("starts before response completion but waits for both response and tool before the next request", async () => {
 		const started = gate();
 		const release = gate();

@@ -266,15 +266,28 @@ async function runLoop(
 				controller: new AbortController(),
 			};
 			const toolSignal = signal ? AbortSignal.any([signal, streamed.controller.signal]) : streamed.controller.signal;
+			const modelController = new AbortController();
+			config.onModelRequest?.(modelController);
 			let message: AssistantMessage;
 			try {
-				message = await streamAssistantResponse(currentContext, config, toolSignal, emit, streamFunction, streamed);
+				message = await streamAssistantResponse(
+					currentContext,
+					config,
+					toolSignal,
+					emit,
+					streamFunction,
+					streamed,
+					modelController,
+				);
 			} catch (error) {
 				streamed.active = false;
 				streamed.controller.abort(error);
 				await streamed.tail.catch(() => {});
 				throw streamed.failure ?? error;
+			} finally {
+				config.onModelRequest?.(undefined);
 			}
+			const preempted = modelController.signal.aborted && !toolSignal.aborted;
 			newMessages.push(message);
 
 			if ((message.stopReason === "error" || message.stopReason === "aborted") && streamed.started.size === 0) {
@@ -325,7 +338,7 @@ async function runLoop(
 			};
 
 			const completedTurn = lastCompletedTurn;
-			if (await waitWithSignal(() => config.shouldStopAfterTurn?.(completedTurn), signal)) {
+			if (!preempted && (await waitWithSignal(() => config.shouldStopAfterTurn?.(completedTurn), signal))) {
 				await emit({ type: "agent_end", messages: newMessages });
 				return;
 			}
@@ -368,44 +381,25 @@ async function streamAssistantResponse(
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
 	streamed: StreamedToolCalls,
+	modelController: AbortController,
 ): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
-	let messages = context.messages;
-	if (config.transformContext) {
-		messages = await waitWithSignal(() => config.transformContext!(messages, signal), signal);
-	}
-
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
-	const llmMessages = await waitWithSignal(() => config.convertToLlm(messages), signal);
-
-	// Build LLM context
-	const llmContext: Context = {
-		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
-		tools: context.tools,
-	};
-
-	// Resolve API key (important for expiring tokens)
-	const resolvedApiKey =
-		(config.getApiKey ? await waitWithSignal(() => config.getApiKey!(config.model.provider), signal) : undefined) ||
-		config.apiKey;
-
-	const response = await waitWithSignal(
-		() =>
-			streamFunction(config.model, llmContext, {
-				...config,
-				apiKey: resolvedApiKey,
-				signal,
-			}),
-		signal,
-	);
-
+	const modelSignal = signal ? AbortSignal.any([signal, modelController.signal]) : modelController.signal;
+	let response: Awaited<ReturnType<StreamFn>>;
 	let partialMessage: AssistantMessage | null = null;
+	let interruptedPartial: AssistantMessage | undefined;
 	let addedPartial = false;
+	let finished = false;
 	const argumentsByIndex = new Map<number, string>();
 	const queued = new Set<string>();
+	const completedThinking = new Set<number>();
+	const capturePartial = () => {
+		if (!signal?.aborted && partialMessage) interruptedPartial = structuredClone(partialMessage);
+	};
+	modelSignal.addEventListener("abort", capturePartial, { once: true });
 	const finishResponse = async (cancelledMessage?: AssistantMessage) => {
-		const finalMessage = cancelledMessage ?? (await waitWithSignal(() => response.result(), signal));
+		const finalMessage = cancelledMessage ?? (await waitWithSignal(() => response.result(), modelSignal));
+		finished = true;
+		config.onModelRequest?.(undefined);
 		streamed.active = false;
 		if (finalMessage.stopReason === "error" || finalMessage.stopReason === "aborted")
 			streamed.controller.abort(new Error(finalMessage.errorMessage || "Model response did not complete"));
@@ -431,7 +425,48 @@ async function streamAssistantResponse(
 	};
 
 	try {
-		for await (const event of eventsWithSignal(response, signal)) {
+		modelSignal.throwIfAborted();
+		// Context preparation may mutate persisted history, so steering must wait for it.
+		const prepare: NonNullable<Parameters<StreamFn>[2]>["prepare"] = async (operation) => {
+			if (finished) throw new Error("Model request has already finished");
+			modelSignal.throwIfAborted();
+			config.onModelRequest?.(undefined);
+			const prepared = await waitWithSignal(() => operation(signal), signal);
+			// A pending steer must not hide a preparation or persistence failure.
+			if (!finished) config.onModelRequest?.(modelController);
+			return prepared;
+		};
+		const llmMessages = await prepare(async (preparationSignal) => {
+			const messages = config.transformContext
+				? await waitWithSignal(
+						() => config.transformContext!(context.messages, preparationSignal),
+						preparationSignal,
+					)
+				: context.messages;
+			return await waitWithSignal(() => config.convertToLlm(messages), preparationSignal);
+		});
+		const llmContext: Context = {
+			systemPrompt: context.systemPrompt,
+			messages: llmMessages,
+			tools: context.tools,
+		};
+		const resolvedApiKey =
+			(config.getApiKey
+				? await waitWithSignal(() => config.getApiKey!(config.model.provider), modelSignal)
+				: undefined) || config.apiKey;
+		response = await waitWithSignal(
+			() =>
+				streamFunction(config.model, llmContext, {
+					...config,
+					apiKey: resolvedApiKey,
+					signal: modelSignal,
+					prepare,
+				}),
+			modelSignal,
+		);
+		for await (const event of eventsWithSignal(response, modelSignal)) {
+			modelSignal.throwIfAborted();
+			if (event.type === "thinking_end") completedThinking.add(event.contentIndex);
 			if (event.type === "toolcall_delta")
 				argumentsByIndex.set(event.contentIndex, (argumentsByIndex.get(event.contentIndex) ?? "") + event.delta);
 			const completed = event.type === "toolcall_end" ? structuredClone(event) : undefined;
@@ -467,6 +502,7 @@ async function streamAssistantResponse(
 				case "error":
 					return await finishResponse();
 			}
+			modelSignal.throwIfAborted();
 			if (!completed || ["length", "error", "aborted"].includes(completed.partial.stopReason)) continue;
 			let args: unknown;
 			try {
@@ -497,7 +533,7 @@ async function streamAssistantResponse(
 					(part): part is AgentToolCall => part.type === "toolCall" && part.id === confirmed.id,
 				)!;
 				streamed.tail = streamed.tail.then(async () => {
-					if (!streamed.active || signal?.aborted) return;
+					if (!streamed.active || modelSignal.aborted) return;
 					const outcome = (async () => {
 						await emit({
 							type: "tool_execution_start",
@@ -537,14 +573,65 @@ async function streamAssistantResponse(
 
 		return await finishResponse();
 	} catch (error) {
-		if (!signal?.aborted || !partialMessage) throw error;
-		const cancelledMessage = structuredClone(partialMessage);
+		if (!modelSignal.aborted || (signal?.aborted && !partialMessage)) throw error;
+		const preempted = !signal?.aborted;
+		const cancelledMessage: AssistantMessage = structuredClone(
+			interruptedPartial ??
+				partialMessage ?? {
+					role: "assistant",
+					content: [],
+					api: config.model.api,
+					provider: config.model.provider,
+					model: config.model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				},
+		);
+		if (preempted) {
+			cancelledMessage.content = cancelledMessage.content.map((part, index) => {
+				if (part.type === "text") return { type: "text", text: part.text };
+				if (part.type === "thinking") {
+					// Signed reasoning needs a subsequent replayable item.
+					const hasFollowingItem = cancelledMessage.content
+						.slice(index + 1)
+						.some(
+							(following) =>
+								(following.type === "text" && following.text.trim().length > 0) ||
+								(following.type === "toolCall" && streamed.started.has(following.id)),
+						);
+					if (!completedThinking.has(index) || !hasFollowingItem)
+						return { type: "thinking", thinking: part.thinking };
+				}
+				if (part.type === "toolCall") return structuredClone(streamed.confirmed.get(part.id) ?? part);
+				return part;
+			});
+		}
 		cancelledMessage.content = cancelledMessage.content.filter(
 			(part) => part.type !== "toolCall" || streamed.started.has(part.id),
 		);
-		cancelledMessage.stopReason = "aborted";
-		cancelledMessage.errorMessage = signal.reason instanceof Error ? signal.reason.message : "Operation aborted";
+		cancelledMessage.stopReason = preempted
+			? cancelledMessage.content.some((part) => part.type === "toolCall")
+				? "toolUse"
+				: "stop"
+			: "aborted";
+		if (preempted) {
+			delete cancelledMessage.errorMessage;
+			delete cancelledMessage.rawStopReason;
+			delete cancelledMessage.deferred;
+		} else
+			cancelledMessage.errorMessage = signal?.reason instanceof Error ? signal.reason.message : "Operation aborted";
 		return finishResponse(cancelledMessage);
+	} finally {
+		finished = true;
+		modelSignal.removeEventListener("abort", capturePartial);
 	}
 }
 

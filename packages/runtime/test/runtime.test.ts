@@ -7,9 +7,12 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
+	type Context,
 	createAssistantMessageEventStream,
 	createModels,
 	fauxAssistantMessage,
+	fauxProvider,
+	type Message,
 	type Static,
 	Type,
 } from "@earendil-works/pi-ai";
@@ -953,6 +956,244 @@ test("canonical identity cannot be rebound to a different original requestId", a
 	assert.equal((await runtime.getSession(session.id)).messages.filter((message) => message.role === "user").length, 1);
 });
 
+test(
+	"steer preempts an unfinished model stream without executing its incomplete tool",
+	{ timeout: 10000 },
+	async (context) => {
+		const memory = memoryStore();
+		const partialObserved = deferred();
+		const nextRequest = deferred();
+		const first = createAssistantMessageEventStream();
+		const next = createAssistantMessageEventStream();
+		const requests: Message[][] = [];
+		const calls: string[] = [];
+		const factory = agents("unused", (value) => {
+			calls.push(value);
+		});
+		const create = factory.create;
+		factory.create = (...args) => {
+			const agent = create(...args);
+			agent.streamFunction = (_model, input) => {
+				requests.push(structuredClone(input.messages));
+				if (requests.length === 1) return first;
+				nextRequest.resolve();
+				return next;
+			};
+			return agent;
+		};
+		const runtime = await createRuntime({ store: memory.store, agents: factory, hostRuntimes: [definition] });
+		context.after(async () => {
+			first.push({ type: "error", reason: "aborted", error: fauxAssistantMessage([], { stopReason: "aborted" }) });
+			next.push({ type: "error", reason: "aborted", error: fauxAssistantMessage([], { stopReason: "aborted" }) });
+			await runtime.close();
+		});
+		const session = await runtime.createSession({ assistantId: definition.assistantId });
+		const events: SessionEvent[] = [];
+		await runtime.subscribe(session.id, (packet) => {
+			events.push(packet);
+			const update = packet.event?.assistantMessageEvent;
+			if (update && typeof update === "object" && Reflect.get(update, "type") === "toolcall_delta")
+				partialObserved.resolve();
+		});
+		const accepted = await runtime.submitTurn(session.id, { text: "original", canonicalTurnId: "canonical-A" });
+		const partial = fauxAssistantMessage([], { stopReason: "pending" });
+		first.push({ type: "start", partial: structuredClone(partial) });
+		partial.content.push({ type: "thinking", thinking: "" });
+		first.push({ type: "thinking_start", contentIndex: 0, partial: structuredClone(partial) });
+		partial.content[0] = { type: "thinking", thinking: "partial reasoning" };
+		first.push({
+			type: "thinking_delta",
+			contentIndex: 0,
+			delta: "partial reasoning",
+			partial: structuredClone(partial),
+		});
+		first.push({
+			type: "thinking_end",
+			contentIndex: 0,
+			content: "partial reasoning",
+			partial: structuredClone(partial),
+		});
+		partial.content.push({ type: "text", text: "" });
+		first.push({ type: "text_start", contentIndex: 1, partial: structuredClone(partial) });
+		partial.content[1] = { type: "text", text: "partial answer" };
+		first.push({ type: "text_delta", contentIndex: 1, delta: "partial answer", partial: structuredClone(partial) });
+		first.push({ type: "text_end", contentIndex: 1, content: "partial answer", partial: structuredClone(partial) });
+		partial.content.push({ type: "toolCall", id: "unfinished", name: "sdk_echo", arguments: {} });
+		first.push({ type: "toolcall_start", contentIndex: 2, partial: structuredClone(partial) });
+		partial.content[2] = {
+			type: "toolCall",
+			id: "unfinished",
+			name: "sdk_echo",
+			arguments: { text: "must-not-execute" },
+		};
+		first.push({
+			type: "toolcall_delta",
+			contentIndex: 2,
+			delta: '{"text":"must-not-execute',
+			partial: structuredClone(partial),
+		});
+		await partialObserved.promise;
+		const running = await runtime.getSession(session.id);
+		assert.equal(running.execution.modelStreaming, true);
+		assert.deepEqual(running.execution.activeTools, []);
+		const receipt = await runtime.steer(session.id, {
+			turnId: accepted.turnId,
+			text: "new instruction",
+			canonicalTurnId: "canonical-B",
+			requestId: "steer-request",
+		});
+		assert.equal(receipt.turnId, accepted.turnId);
+		assert.equal(receipt.queued, true);
+		assert.equal(receipt.applied, false);
+		assert.equal(receipt.started, false);
+		assert.equal(
+			await Promise.race([nextRequest.promise.then(() => true), delay(1000).then(() => false)]),
+			true,
+			"Steer must reach the next model request while the original provider stream is still unfinished",
+		);
+		const applied = await runtime.getSession(session.id);
+		assert.equal(applied.turn?.id, accepted.turnId);
+		assert.equal(applied.turn?.canonicalTurnId, "canonical-B");
+		assert.equal(applied.turn?.rootCanonicalTurnId, "canonical-A");
+		assert.equal(applied.turn?.status, "running");
+		assert.equal(applied.execution.cancellationRequested, false);
+		assert.deepEqual(applied.execution.activeTools, []);
+		assert.equal(applied.turn?.steerAdmissions?.[0].status, "applied");
+		assert.equal(applied.turn?.steerAdmissions?.[0].applied, true);
+		const application = events.find((packet) => packet.type === "turn.applied");
+		assert.equal(application?.turnId, accepted.turnId);
+		assert.equal(application?.turn?.canonicalTurnId, "canonical-B");
+		assert.equal(application?.steerAdmission?.status, "applied");
+		assert.equal(requests.length, 2);
+		assert(requests[1].some((message) => message.role === "user" && message.content === "new instruction"));
+		const preserved = requests[1].find((message) => message.role === "assistant");
+		assert(preserved?.role === "assistant");
+		assert.notEqual(preserved.stopReason, "pending");
+		assert(preserved.content.some((part) => part.type === "thinking" && part.thinking === "partial reasoning"));
+		assert(preserved.content.some((part) => part.type === "text" && part.text === "partial answer"));
+		assert(!preserved.content.some((part) => part.type === "toolCall"));
+		assert(!requests[1].some((message) => message.role === "toolResult"));
+		next.push({ type: "start", partial: fauxAssistantMessage([], { stopReason: "pending" }) });
+		next.push({ type: "done", reason: "stop", message: fauxAssistantMessage("guided answer") });
+		const settled = await runtime.waitForTurn(session.id);
+		assert.equal(settled.turn?.id, accepted.turnId);
+		assert.equal(settled.turn?.status, "completed");
+		assert.equal(settled.execution.modelStreaming, false);
+		assert.equal(settled.execution.actions.submit.available, true);
+		assert.equal(settled.turn?.steerAdmissions?.[0].applied, true);
+		assert.equal(settled.turn?.steerAdmissions?.[0].status, "settled");
+		assert.deepEqual(calls, []);
+		assert(!events.some((packet) => packet.event?.type.startsWith("tool_execution_")));
+		assert(
+			!settled.messages.some(
+				(message) => message.role === "assistant" && message.content.some((part) => part.type === "toolCall"),
+			),
+		);
+		assert(JSON.stringify(settled.messages).includes("partial answer"));
+		assert(JSON.stringify(settled.messages).includes("partial reasoning"));
+	},
+);
+
+test(
+	"steer waits for compaction persistence and history replacement before applying input",
+	{ timeout: 10000 },
+	async (context) => {
+		const memory = memoryStore();
+		const saved = deferred();
+		const release = deferred();
+		const applied = deferred();
+		const requests: Message[][] = [];
+		const provider = fauxProvider({ models: [{ id: "tiny", contextWindow: 10000, maxTokens: 100 }] });
+		provider.setResponses(
+			Array.from({ length: 8 }, () => (input: Context) => {
+				if (input.systemPrompt?.includes("You are a context summarization assistant"))
+					return fauxAssistantMessage("checkpoint");
+				requests.push(structuredClone(input.messages));
+				return fauxAssistantMessage("answer");
+			}),
+		);
+		const factory = agents("unused");
+		const models = createModels();
+		models.setProvider(provider.provider);
+		factory.settings.current.models = models;
+		factory.settings.current.selected = { provider: provider.getModel().provider, id: "tiny" };
+		const create = factory.create;
+		let held = false;
+		factory.create = (...args) => {
+			const compaction = args[8];
+			assert(compaction);
+			args[8] = {
+				...compaction,
+				async update(...updateArgs) {
+					await compaction.update(...updateArgs);
+					if (held) return;
+					held = true;
+					saved.resolve();
+					await release.promise;
+				},
+			};
+			return create(...args);
+		};
+		const runtime = await createRuntime({
+			store: memory.store,
+			agents: factory,
+			hostRuntimes: [{ ...definition, runtime: { ...definition.runtime, compaction: { thresholdTokens: 300 } } }],
+		});
+		context.after(async () => {
+			release.resolve();
+			await runtime.close();
+		});
+		const session = await runtime.createSession({ assistantId: definition.assistantId, mode: "real" });
+		await runtime.importSession(session.id, {
+			schemaVersion: 1,
+			source: { astronSessionId: "source", coreId: "test", sessionId: "source" },
+			transcript: [
+				{ role: "user", createdAt: 1, content: [{ type: "text", text: "old history ".repeat(2000) }] },
+				{ role: "assistant", createdAt: 2, content: [{ type: "text", text: "previous answer" }] },
+			],
+		});
+		const events: SessionEvent[] = [];
+		await runtime.subscribe(session.id, (packet) => {
+			events.push(packet);
+			if (packet.type === "turn.applied") applied.resolve();
+		});
+		const accepted = await runtime.submitTurn(session.id, { text: "original", canonicalTurnId: "canonical-A" });
+		await saved.promise;
+		assert(memory.sessions.get(session.id)?.compaction);
+		assert.equal(requests.length, 0);
+		const receipt = await runtime.steer(session.id, {
+			turnId: accepted.turnId,
+			text: "new instruction",
+			canonicalTurnId: "canonical-B",
+		});
+		assert.equal(receipt.queued, true);
+		assert.equal(receipt.applied, false);
+		assert.equal(
+			await Promise.race([applied.promise.then(() => true), delay(250).then(() => false)]),
+			false,
+			"Steer must not apply input while the old compaction callback can still replace its history",
+		);
+		assert.equal(requests.length, 0);
+		release.resolve();
+		const settled = await runtime.waitForTurn(session.id);
+		assert.equal(settled.turn?.id, accepted.turnId);
+		assert.equal(settled.turn?.canonicalTurnId, "canonical-B");
+		assert.equal(settled.turn?.status, "completed");
+		assert.equal(settled.turn?.steerAdmissions?.[0].applied, true);
+		assert.equal(events.filter((packet) => packet.type === "turn.applied").length, 1);
+		assert.equal(
+			settled.messages.filter((message) => message.role === "user" && message.content === "new instruction").length,
+			1,
+		);
+		assert(
+			requests.some((messages) =>
+				messages.some((message) => message.role === "user" && message.content === "new instruction"),
+			),
+		);
+		assert(settled.compaction?.summary.includes("checkpoint"));
+	},
+);
+
 test("queued steer keeps the old tool owner until its user input is applied", async (context) => {
 	const memory = memoryStore();
 	const entered = deferred();
@@ -1095,8 +1336,6 @@ test("model failure settles accepted but unconsumed steering without replaying i
 		const stream = agent.streamFunction;
 		agent.streamFunction = async (...streamArgs) => {
 			if (!fail) return stream(...streamArgs);
-			entered.resolve();
-			await blocked.promise;
 			const output = createAssistantMessageEventStream();
 			output.push({
 				type: "error",
@@ -1105,6 +1344,12 @@ test("model failure settles accepted but unconsumed steering without replaying i
 			});
 			return output;
 		};
+		agent.subscribe(async (event) => {
+			if (event.type !== "message_end" || event.message.role !== "assistant" || event.message.stopReason !== "error")
+				return;
+			entered.resolve();
+			await blocked.promise;
+		});
 		return agent;
 	};
 	const runtime = await createRuntime({ store: memory.store, agents: factory, hostRuntimes: [definition] });

@@ -485,11 +485,14 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 						})
 					: undefined;
 			const realStream: StreamFn = async (model, context, options) => {
+				const { prepare, ...request } = options ?? {};
 				// Compaction can remove the last published list before this provider request.
-				context.messages = (await sessionAgent.transformContext!(
-					context.messages,
-					options?.signal,
-				)) as typeof context.messages;
+				context.messages = (
+					prepare
+						? await prepare((signal) => sessionAgent.transformContext!(context.messages, signal))
+						: await sessionAgent.transformContext!(context.messages, request.signal)
+				) as typeof context.messages;
+				request.signal?.throwIfAborted();
 				return models.streamSimple(
 					model,
 					{
@@ -500,9 +503,9 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 						) as typeof context.messages,
 					},
 					{
-						...options,
-						headers: { ...options?.headers, ...modelHeaders },
-						onPayload: recordModelRequest(sessionId, "turn", options?.onPayload),
+						...request,
+						headers: { ...request.headers, ...modelHeaders },
+						onPayload: recordModelRequest(sessionId, "turn", request.onPayload),
 					},
 				);
 			};
@@ -552,6 +555,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				streamFn: (model, context, options) => {
 					context = toolSearch.expose(context);
 					if (mode === "real") return compactStream(model, context, options);
+					const { prepare: _prepare, ...request } = options ?? {};
 					const last = [...context.messages].reverse().find((message) => !isCapabilityCatalog(message));
 					const availableTools = context.tools ?? [];
 					if (last?.role === "toolResult") {
@@ -581,7 +585,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							} catch {
 								faux.setResponses([fauxAssistantMessage("工具参数需要有效 JSON 对象。")]);
 							}
-							return localModels.streamSimple(model, context, options);
+							return localModels.streamSimple(model, context, request);
 						}
 						const skillRequest = /^加载技能\s+(\S+)$/.exec(input.trim());
 						if (skillRequest) {
@@ -592,7 +596,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 										})
 									: fauxAssistantMessage("当前会话未启用 skill。"),
 							]);
-							return localModels.streamSimple(model, context, options);
+							return localModels.streamSimple(model, context, request);
 						}
 						faux.setResponses([
 							fauxAssistantMessage(
@@ -602,7 +606,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							),
 						]);
 					}
-					return localModels.streamSimple(model, context, options);
+					return localModels.streamSimple(model, context, request);
 				},
 			});
 			let mcpLease: Awaited<ReturnType<typeof mcp.acquire>> | undefined;

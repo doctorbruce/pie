@@ -37,6 +37,7 @@
 - Publish UI-only heartbeats for long-running tools and guide bounded, incremental background-job waits.
 - Add native `webfetch` adapted from Amio/OpenCode, with text, Markdown and HTML output, permission checks, bounded responses, timeout and cancellation.
 - Add a copyable `deepseek-web-search` external tool using the official DeepSeek Search API, with stored provider or environment credentials, permission checks, bounded results and cancellation.
+- Add a copyable `deepseek-web-fetch` external tool using the official DeepSeek Fetch API, with shared credentials, `webfetch` permission checks, bounded Markdown results and cancellation.
 
 ### Changed
 

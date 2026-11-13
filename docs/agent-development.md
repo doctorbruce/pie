@@ -366,7 +366,7 @@ Astron 提供适配后的工具文件
 
 `examples/tools/memory-manage.ts` 是首个 Astron 工具适配示例，保留 list/add/delete 及 Engine 路由，使用 TypeBox 参数与原生 content/details。工具内连接取消信号，HTTP 请求超时 30 秒。源码测试把示例复制到仓库外的带空格目录，用本地模拟 Astron 服务验证调用、隔离、错误、取消和重启恢复。启动方式和工具示例见 [服务协议](../packages/server/README.md#外部工具文件)。
 
-`examples/tools/deepseek-web-search.ts` 是独立的 DeepSeek 搜索扩展，复用同一目录加载、助手 `toolIds`、按需曝光和权限确认，不要求当前会话使用 DeepSeek 模型。Local 优先把 `models.json` 中 `providers.deepseek.apiKey` 注入该工具，也接受 `DEEPSEEK_API_KEY` 作为回退；安装、Web 配置、参数和结果限额见 [DeepSeek 网页搜索扩展](../packages/server/README.md#deepseek-网页搜索扩展)。
+`examples/tools/deepseek-web-search.ts` 和 `examples/tools/deepseek-web-fetch.ts` 是独立的 DeepSeek 搜索与抓取扩展，复用同一目录加载、助手 `toolIds`、按需曝光和权限确认，不要求当前会话使用 DeepSeek 模型。Local 优先把 `models.json` 中 `providers.deepseek.apiKey` 注入这两个工具，也接受 `DEEPSEEK_API_KEY` 作为回退；安装、Web 配置、参数和结果限额见 [DeepSeek 网页搜索与抓取扩展](../packages/server/README.md#deepseek-网页搜索扩展)。搜索扩展会加入默认助手，抓取扩展仍需显式选择。
 
 Astron 侧现已建立 `adapters/pie/tools/tool_assets/` 作为发行来源，当前适配 19 个工具：记忆、三个 IM 工具、Capability 预览/打开/提交、诊断、联网搜索、三个计划任务工具、确认与凭据、邮件、知识检索/表格查询/知识管理和安全 Shell。Capability 工具使用当前的 `open-capability`、`submit-capability` 名称及 `/agent/capability/submissions` 协议。`adapters/pie/tools/installer.py` 在启动前按 capability profile 同步已选工具及共享 `_astron.ts`、`_opencode.ts`：内容相同不重写，更新使用原子文件替换，禁用或退役时只删除已知受管文件，保留其他文件。工具源码随 Astron 版本维护，Pie 同名示例只用于独立开发验证。
 

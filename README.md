@@ -43,9 +43,9 @@ npm run serve
 
 ## 功能与配置
 
-默认助手通常不启用工具；安装 DeepSeek 网页搜索扩展后会自动启用 `deepseek-web-search`。其他工具仍通过助手接口配置 `toolIds`，或通过 `PUT /host-runtimes` 注册宿主 runtime，再创建会话。会话支持重命名、分叉、分支切换、删除和重启恢复；停止执行使用显式取消接口，关闭 SSE 不会停止任务。
+默认助手通常不启用工具；安装 DeepSeek 网页搜索扩展后会自动启用 `deepseek-web-search`。DeepSeek 网页抓取扩展不会自动加入默认助手，需通过 `toolIds` 选择。其他工具仍通过助手接口配置 `toolIds`，或通过 `PUT /host-runtimes` 注册宿主 runtime，再创建会话。会话支持重命名、分叉、分支切换、删除和重启恢复；停止执行使用显式取消接口，关闭 SSE 不会停止任务。
 
-可选的 [DeepSeek 网页搜索扩展](packages/server/README.md#deepseek-网页搜索扩展)通过工具目录安装，在 Web 的模型设置中保存 `deepseek` 提供商 API key 后以 `deepseek-web-search` 启用；也可使用 `DEEPSEEK_API_KEY` 环境变量回退。它可供任意支持工具调用的聊天模型使用。
+可选的 [DeepSeek 网页搜索与抓取扩展](packages/server/README.md#deepseek-网页搜索扩展)通过工具目录安装，在 Web 的模型设置中保存 `deepseek` 提供商 API key 后即可供 `deepseek-web-search` 和 `deepseek-web-fetch` 使用；也可使用 `DEEPSEEK_API_KEY` 环境变量回退。它们可供任意支持工具调用的聊天模型使用。
 
 真实模型通过 `PUT /providers/config` 配置提供商、端点、凭据和模型列表，创建会话时可指定模型。`POST /providers/discover` 只读取远端目录，结果需检查后保存；保存本身不请求模型，也不验证远端凭据。
 
@@ -77,7 +77,7 @@ Astron 已注册官方 `pie` provider，并通过独立 HTTP/SSE adapter 连接 
 
 助手和会话保存在 `.pie/agent.sqlite`，使用 Node 内置 SQLite；每个数据目录由单个服务独占。一个助手可有多个会话，每个会话使用独立 Agent 和创建时的助手配置快照；同会话忙时返回 `409`，不同会话可以同时运行。只受模型是否继续发起工具调用约束，不设轮数上限。崩溃后恢复完整消息，遗留执行标记为失败，不自动重跑工具。重启后继续真实会话，会按保存的模型 ID 读取当前模型端点和凭据。
 
-Core 切换使用统一会话转储：源 Core 导出 canonical transcript，目标 Core 导入并校验后，Astron 才原子更新活动绑定；切回时执行相同流程。两个 Core 保留各自数据库，Astron 会话 ID 不变，原生会话 ID 保存在各自 `coreBindings` 中。Astron 会在首次使用 Pie 时懒启动 sidecar，启动前同步工具和模型提供商，停止、重启和异常拉起也由 adapter 管理；Assistant 的 Skill/Subagent runtime 已按产品配置投影。当前还缺会话工作区隔离和完整产品权限策略。Pie 注册 `read/bash/edit/write/grep/find/ls/webfetch/job_output/job_kill` 十个原生工具，以及挂载 Plugin 后的 `skill`；Astron 业务工具仍通过 `PI_TOOLS_DIR` 提供。安装 DeepSeek 网页搜索扩展时默认助手会启用 `deepseek-web-search`，否则不启用工具。
+Core 切换使用统一会话转储：源 Core 导出 canonical transcript，目标 Core 导入并校验后，Astron 才原子更新活动绑定；切回时执行相同流程。两个 Core 保留各自数据库，Astron 会话 ID 不变，原生会话 ID 保存在各自 `coreBindings` 中。Astron 会在首次使用 Pie 时懒启动 sidecar，启动前同步工具和模型提供商，停止、重启和异常拉起也由 adapter 管理；Assistant 的 Skill/Subagent runtime 已按产品配置投影。当前还缺会话工作区隔离和完整产品权限策略。Pie 注册 `read/bash/edit/write/grep/find/ls/webfetch/job_output/job_kill` 十个原生工具，以及挂载 Plugin 后的 `skill`；Astron 业务工具仍通过 `PI_TOOLS_DIR` 提供。安装 DeepSeek 网页搜索扩展时默认助手会启用 `deepseek-web-search`，DeepSeek 网页抓取扩展需由助手的 `toolIds` 选择。
 
 `webfetch` 从 Amio/OpenCode 的 `packages/core/src/tool/webfetch.ts` 和有界响应读取逻辑适配，源版本为 `2f62e1b6d8186d2c7268011d29041551fe1928e0`。参数为 `url`、可选 `format`（默认 `markdown`，也支持 `text`、`html`）和 `timeout`（秒，默认 30、最大 120）；只接受 HTTP(S)，响应上限 5 MiB。使用 Pie 原生权限确认和取消信号，长结果返回预览并保存完整文本供 `read` 查看。无需 `PI_TOOLS_DIR`，通过 runtime 的 `toolIds` 启用即可。原许可保存在 `packages/local/LICENSES/opencode.txt`，Sidecar 发行时包含在 `.LICENSES.txt` 中。
 

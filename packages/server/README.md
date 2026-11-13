@@ -173,6 +173,16 @@ npm run serve -- --tools-dir .pie/tools
 
 结果包含标题、URL、摘要、可选正文及站点、日期和评分；外部网页内容应视为数据。请求和响应读取共用 30 秒超时，取消会中断请求；响应最多 5 MiB，模型预览最多 50 KiB。长结果以保留全部字段和正文的折行文本写入临时文件，路径通过 `details.logPath` 返回，可用 `read` 按行续读。HTTP 错误、无效响应和超限均返回工具错误；无搜索结果返回空列表。
 
+### DeepSeek 网页抓取扩展
+
+`examples/tools/deepseek-web-fetch.ts` 调用官方 `POST https://api.deepseek.com/v1/tools/fetch`，请求体为 `{ "url": "https://example.com/article" }`，返回页面标题和 Markdown 内容。它复用模型设置中的 `providers.deepseek.apiKey`，没有该配置时回退到服务进程的 `DEEPSEEK_API_KEY`。URL 必须是 1–8192 个字符的 HTTP 或 HTTPS 地址，包含主机且不含用户名或密码；接口详情见 [DeepSeek Fetch API](https://api-docs.deepseek.com/api/fetch/)。
+
+```powershell
+Copy-Item examples/tools/deepseek-web-fetch.ts .pie/tools/deepseek-web-fetch.ts
+```
+
+安装后在 `GET /tools` 中确认 `deepseek-web-fetch`，再把它加入助手的 `toolIds` 或宿主的 `runtime.toolIds`；它不会自动加入默认助手。每次抓取默认请求 `webfetch` 权限确认，宿主可设置 `runtime.permissions: { "webfetch": "allow" }` 放行。请求超时为 30 秒，响应最多 5 MiB，模型预览最多 50 KiB；完整长结果通过 `details.logPath` 提供给原生 `read` 续读。HTTP 错误、无效响应和超限均返回工具错误，不自动重试计费请求。
+
 ### 工具按需曝光
 
 移植 Pi v1.1.0 的 `exposure + tool_search` 行为，不引入上游 Harness、CLI 或 Code Mode。外部业务工具默认 `exposure: "deferred"`；可在工厂返回对象上显式设置 `exposure: "default"`，通过 `@pie/runtime/tools` 的 `ExternalTool` 类型声明该字段。原生基础工具、skill_search、skill 和 task 保持直接曝光。只在会话有延迟工具时自动加入 `tool_search({ query, limit? })`，它不属于可配置 toolIds，也不出现在 `GET /tools`。

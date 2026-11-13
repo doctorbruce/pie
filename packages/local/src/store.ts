@@ -46,7 +46,7 @@ import type {
 
 export type { SavedSession, SessionMetadata } from "@pie/runtime/runtime-store";
 
-export function openStore(env: NodeJS.ProcessEnv) {
+export function openStore(env: NodeJS.ProcessEnv, defaultToolIds: readonly string[] = []) {
 	const directory = resolve(env.PI_DATA_DIR || ".pie");
 	mkdirSync(directory, { recursive: true });
 	const db = new DatabaseSync(join(directory, "agent.sqlite"));
@@ -212,7 +212,7 @@ export function openStore(env: NodeJS.ProcessEnv) {
 				id: randomUUID(),
 				name: "默认助手",
 				systemPrompt: "You are a helpful assistant. Reply in Chinese.",
-				toolIds: [],
+				toolIds: [...defaultToolIds],
 				pluginIds: [],
 				subagentIds: [],
 				createdAt: now,
@@ -220,6 +220,15 @@ export function openStore(env: NodeJS.ProcessEnv) {
 			};
 			db.prepare("INSERT INTO assistants VALUES (?, ?)").run(assistant.id, JSON.stringify(assistant));
 			assistants.push(assistant);
+		} else if (defaultToolIds.length === 1 && defaultToolIds[0] === "deepseek-web-search") {
+			const assistant = assistants.find(
+				(candidate) => candidate.name === "默认助手" && candidate.toolIds.length === 0,
+			);
+			if (assistant) {
+				const migrated = { ...assistant, toolIds: [...defaultToolIds], updatedAt: Date.now() };
+				db.prepare("UPDATE assistants SET payload = ? WHERE id = ?").run(JSON.stringify(migrated), migrated.id);
+				assistants[assistants.indexOf(assistant)] = migrated;
+			}
 		}
 		const insertEntry = db.prepare("INSERT INTO session_entries VALUES (?, ?, ?, ?, ?)");
 		const findEntry = db.prepare("SELECT seq FROM session_entries WHERE session_id = ? AND id = ?");

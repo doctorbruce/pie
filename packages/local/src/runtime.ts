@@ -14,7 +14,7 @@ export function createLocalHost(environment: NodeJS.ProcessEnv = process.env) {
 	const settings = createModelSettings(env);
 	const agents = createAgentFactory(env, { models: settings });
 	const plugins = createPlugins(env);
-	const store = openStore(env);
+	const store = openStore(env, agents.toolIds.includes("deepseek-web-search") ? ["deepseek-web-search"] : []);
 	return {
 		settings,
 		agents,

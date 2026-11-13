@@ -1,5 +1,6 @@
 import type { Assistant, Plugin, ToolId, ToolInfo } from "@pie/runtime/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Icon } from "./icons.tsx";
 import { request } from "./request.ts";
 
 export function AssistantSettings({
@@ -78,6 +79,17 @@ export function AssistantSettings({
 			>
 				<div className="settings-heading">
 					<h2 id="assistant-settings-title">{assistant ? "编辑助手" : "新建助手"}</h2>
+					<button
+						type="button"
+						className="circle-button"
+						aria-label="关闭"
+						title="关闭"
+						disabled={pending}
+						onClick={onClose}
+					>
+						<Icon name="close" />
+						<span className="sr-only">关闭</span>
+					</button>
 				</div>
 				<p className="settings-note">保存后，新配置会在已有会话下一次提交时生效。</p>
 				{loading && <output>正在加载工具与插件…</output>}

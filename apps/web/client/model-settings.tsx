@@ -6,6 +6,7 @@ import type {
 	ProviderSettings,
 } from "@pie/runtime/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Icon } from "./icons.tsx";
 import { request } from "./request.ts";
 
 const protocols = [
@@ -208,8 +209,16 @@ export function ModelSettings({
 		>
 			<div className="settings-heading">
 				<h2 id="settings-title">配置模型提供商</h2>
-				<button type="button" className="event-toggle" disabled={pending} onClick={onClose}>
-					关闭
+				<button
+					type="button"
+					className="circle-button"
+					aria-label="关闭"
+					title="关闭"
+					disabled={pending}
+					onClick={onClose}
+				>
+					<Icon name="close" />
+					<span className="sr-only">关闭</span>
 				</button>
 			</div>
 			<p className="settings-note">一个提供商共用地址和密钥，可配置多个模型。</p>
@@ -327,6 +336,12 @@ export function ModelSettings({
 							maxLength={256}
 							placeholder="例如：deepseek-chat"
 							onChange={(event) => setModelId(event.target.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+									event.preventDefault();
+									add();
+								}
+							}}
 						/>
 						<button
 							type="button"

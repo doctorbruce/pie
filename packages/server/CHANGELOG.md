@@ -36,8 +36,11 @@
 - Add optional user-visible activity descriptions to the native `read`, `edit`, `write`, and `grep` tools.
 - Publish UI-only heartbeats for long-running tools and guide bounded, incremental background-job waits.
 - Add native `webfetch` adapted from Amio/OpenCode, with text, Markdown and HTML output, permission checks, bounded responses, timeout and cancellation.
+- Add a copyable `deepseek-web-search` external tool using the official DeepSeek Search API, with stored provider or environment credentials, permission checks, bounded results and cancellation.
 
 ### Changed
+
+- Enable `deepseek-web-search` in the default assistant when the extension is installed; leave other assistants unchanged.
 
 - Bound local model-request records by age, total bytes, file count and individual size; allow recording to be disabled without changing payload hooks, maintain existing records on startup, and remove session records with their owning sessions.
 

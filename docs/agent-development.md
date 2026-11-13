@@ -60,7 +60,7 @@ Local 宿主支持显式 `createSession({ assistantId, workerId: assistantId, ..
 
 ### 配置何时生效
 
-1. 服务首次启动自动创建“默认助手”，`toolIds`、`pluginIds` 和 `subagentIds` 为空。十个内置工具均已注册，默认启用集合后续再定。
+1. 服务首次启动自动创建“默认助手”；未安装扩展时 `toolIds`、`pluginIds` 和 `subagentIds` 为空，安装 DeepSeek 网页搜索扩展时默认加入 `deepseek-web-search`。十个内置工具均已注册，但不会自动加入助手。
 2. 本地会话保存 `assistantId`、已应用的 Assistant 版本和解析后的 `runtime`（提示词、工具、技能路径、来源绑定和可调用助手）。每次 Turn 准入前重新读取当前 Assistant 及目标 Assistant；版本或 runtime 变化时保留消息并重建 Agent。运行中仅 Skill 绑定在当前工具批次结束、下一次模型调用前刷新；其他配置仍在下一次提交时应用。
 3. 宿主启动 Pie 后用 `PUT /host-runtimes` 注册全部 Assistant runtime，配置刷新时事务性替换注册表；注册请求会等待已配置 Host MCP 的后台连接和工具发现完成。创建 Session 只提供 `assistantId`；每次 Turn 准入时，Pie 从注册表解析该 Assistant 及其 Subagent 的最新版本。Turn 只额外接收时间、记忆、附件等本轮动态 `systemPrompt`，不重复传稳定 runtime。
 4. 模型在新建会话时独立选择，省略时使用提供商配置的默认模型。模型选择不放进 Assistant，也不把凭据复制进助手或会话记录。
@@ -365,6 +365,8 @@ Astron 提供适配后的工具文件
 | 用户交互 | 凭据、邮件确认工具依赖 `context.ask()` 的等待与答复 | server 提供确认型 `context.ask()`、SSE 请求和 HTTP 答复；宿主 runtime 可用 `permissions` 的 `allow/ask` 映射统一处理带权限标识的请求，未标识请求始终交给用户 |
 
 `examples/tools/memory-manage.ts` 是首个 Astron 工具适配示例，保留 list/add/delete 及 Engine 路由，使用 TypeBox 参数与原生 content/details。工具内连接取消信号，HTTP 请求超时 30 秒。源码测试把示例复制到仓库外的带空格目录，用本地模拟 Astron 服务验证调用、隔离、错误、取消和重启恢复。启动方式和工具示例见 [服务协议](../packages/server/README.md#外部工具文件)。
+
+`examples/tools/deepseek-web-search.ts` 是独立的 DeepSeek 搜索扩展，复用同一目录加载、助手 `toolIds`、按需曝光和权限确认，不要求当前会话使用 DeepSeek 模型。Local 优先把 `models.json` 中 `providers.deepseek.apiKey` 注入该工具，也接受 `DEEPSEEK_API_KEY` 作为回退；安装、Web 配置、参数和结果限额见 [DeepSeek 网页搜索扩展](../packages/server/README.md#deepseek-网页搜索扩展)。
 
 Astron 侧现已建立 `adapters/pie/tools/tool_assets/` 作为发行来源，当前适配 19 个工具：记忆、三个 IM 工具、Capability 预览/打开/提交、诊断、联网搜索、三个计划任务工具、确认与凭据、邮件、知识检索/表格查询/知识管理和安全 Shell。Capability 工具使用当前的 `open-capability`、`submit-capability` 名称及 `/agent/capability/submissions` 协议。`adapters/pie/tools/installer.py` 在启动前按 capability profile 同步已选工具及共享 `_astron.ts`、`_opencode.ts`：内容相同不重写，更新使用原子文件替换，禁用或退役时只删除已知受管文件，保留其他文件。工具源码随 Astron 版本维护，Pie 同名示例只用于独立开发验证。
 

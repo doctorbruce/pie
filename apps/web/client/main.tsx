@@ -29,11 +29,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import remarkGfm from "remark-gfm";
 import { AssistantSettings } from "./assistant-settings.tsx";
-import { Composer, type Draft } from "./composer.tsx";
+import { Composer, clearDraft, type Draft, readDraft } from "./composer.tsx";
+import { BotMark, Icon } from "./icons.tsx";
 import { toThreadMessages, updateToolProgress } from "./messages.ts";
 import { ModelSettings } from "./model-settings.tsx";
 import { PluginSettings } from "./plugin-settings.tsx";
 import { request } from "./request.ts";
+import { type SessionAction, SessionActionDialog, SessionActions } from "./session-actions.tsx";
 import { connectSession } from "./session-connection.ts";
 import { BackgroundJobs } from "./session-jobs.tsx";
 import { SessionModelSelect } from "./session-model.tsx";
@@ -67,7 +69,7 @@ function Tool({
 				<span className={`tool-state ${running ? "is-running" : ""}`} />
 				<span>{toolName}</span>
 				<small>{isError ? "失败" : result !== undefined ? "已完成" : running ? "执行中" : "未完成"}</small>
-				<span className="chevron">⌄</span>
+				<Icon name="chevron" className="chevron" />
 			</summary>
 			<div className="tool-detail">
 				<span className="tool-detail-label">输入</span>
@@ -93,9 +95,18 @@ function UserMessage() {
 	return (
 		<MessagePrimitive.Root className="message user-message">
 			<div className="message-content">
-				<MessagePrimitive.Parts />
+				<div className="message-body">
+					<MessagePrimitive.Parts />
+				</div>
 				<ActionBarPrimitive.Root className="message-actions">
-					<ActionBarPrimitive.Copy aria-label="复制消息">复制</ActionBarPrimitive.Copy>
+					<ActionBarPrimitive.Copy aria-label="复制消息" title="复制消息">
+						<span className="copy-label">
+							<Icon name="copy" />
+						</span>
+						<span className="copied-label">
+							<Icon name="check" /> 已复制
+						</span>
+					</ActionBarPrimitive.Copy>
 				</ActionBarPrimitive.Root>
 			</div>
 		</MessagePrimitive.Root>
@@ -105,14 +116,25 @@ function UserMessage() {
 function AssistantMessage() {
 	return (
 		<MessagePrimitive.Root className="message assistant-message">
-			<div className="assistant-badge">P</div>
+			<div className="assistant-badge">
+				<BotMark />
+			</div>
 			<div className="message-content">
-				<MessagePrimitive.Parts components={{ Text: Markdown, Reasoning, tools: { Fallback: Tool } }} />
+				<div className="message-body">
+					<MessagePrimitive.Parts components={{ Text: Markdown, Reasoning, tools: { Fallback: Tool } }} />
+				</div>
 				<MessagePrimitive.Error>
 					<p className="message-error">回复未完成，请查看下方状态并重试。</p>
 				</MessagePrimitive.Error>
 				<ActionBarPrimitive.Root className="message-actions">
-					<ActionBarPrimitive.Copy aria-label="复制回复">复制</ActionBarPrimitive.Copy>
+					<ActionBarPrimitive.Copy aria-label="复制回复" title="复制回复">
+						<span className="copy-label">
+							<Icon name="copy" />
+						</span>
+						<span className="copied-label">
+							<Icon name="check" /> 已复制
+						</span>
+					</ActionBarPrimitive.Copy>
 				</ActionBarPrimitive.Root>
 			</div>
 		</MessagePrimitive.Root>
@@ -257,6 +279,7 @@ function App() {
 	const [showModelSettings, setShowModelSettings] = useState(false);
 	const [showPluginSettings, setShowPluginSettings] = useState(false);
 	const [assistantEditor, setAssistantEditor] = useState<Assistant | "new">();
+	const [sessionAction, setSessionAction] = useState<{ action: "rename" | "delete"; session: SessionSummary }>();
 	const [replyingInteractionId, setReplyingInteractionId] = useState<string>();
 	const [loadingSession, setLoadingSession] = useState(false);
 	const [loadingHistory, setLoadingHistory] = useState(false);
@@ -271,6 +294,8 @@ function App() {
 	const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 760px)").matches);
 	const sidebarWasOpen = useRef(false);
 	const sidebarToggle = useRef<HTMLButtonElement>(null);
+	const detailsPanel = useRef<HTMLDivElement>(null);
+	const detailsReturnFocus = useRef<HTMLElement | null>(null);
 	const selection = useRef(0);
 	const operation = useRef(false);
 	const initialized = useRef(false);
@@ -371,8 +396,15 @@ function App() {
 		sidebarWasOpen.current = narrow && showSidebar;
 	}, [narrow, showSidebar]);
 	useEffect(() => {
+		if (!showDetails) return;
+		detailsPanel.current?.querySelector<HTMLButtonElement>("button")?.focus({ preventScroll: true });
+		return () => {
+			if (detailsReturnFocus.current?.isConnected) detailsReturnFocus.current.focus({ preventScroll: true });
+		};
+	}, [showDetails]);
+	useEffect(() => {
 		const handleEscape = (event: KeyboardEvent) => {
-			if (event.key === "Escape" && !document.querySelector("dialog[open]")) {
+			if (event.key === "Escape" && !document.querySelector("dialog[open], [popover]:popover-open")) {
 				setShowSidebar(false);
 				setShowDetails(false);
 			}
@@ -419,6 +451,11 @@ function App() {
 		setNotice("");
 		setLoadingSession(false);
 	}
+	function openDetails() {
+		detailsReturnFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		setShowSidebar(false);
+		setShowDetails(true);
+	}
 	async function openSession(id: string) {
 		const ticket = ++selection.current;
 		setLoadingSession(true);
@@ -434,23 +471,43 @@ function App() {
 	}
 
 	async function send(draft: Draft): Promise<boolean> {
-		const current = sessionRef.current;
+		let current = sessionRef.current;
 		const action = current?.execution.actions[busy ? "steer" : "submit"];
 		if (
-			!current ||
-			!connected ||
 			operation.current ||
-			!action?.available ||
+			(current ? !connected || !action?.available : !coreReady || !assistantId) ||
 			(!draft.text.trim() && !draft.images.length)
 		)
 			return false;
+		if (!current && !selectedModel) {
+			setShowModelSettings(true);
+			return false;
+		}
+		const creating = !current;
 		operation.current = true;
 		setPending(true);
 		setError("");
 		try {
+			if (!current) {
+				current = await request<SessionSnapshot>("/sessions", "POST", {
+					assistantId,
+					mode: "real",
+					model: selectedModel,
+				});
+				store(`pie.draft.${current.id}`, draft.text);
+				clearDraft("new");
+				switchSession(current);
+				setInitialDraft(draft);
+				void refreshSessions().catch(() => {});
+			}
 			const reconciled = await turnSender.current.send(current, draft);
 			if (reconciled) accept(reconciled);
 			if (!busy) sessionTitles.current.remember(current, draft.text);
+			if (creating) {
+				store(`pie.draft.${current.id}`, "");
+				setInitialDraft({ text: "", images: [] });
+				setDraftVersion((value) => value + 1);
+			}
 			return true;
 		} catch (reason) {
 			setError(reason instanceof Error ? reason.message : String(reason));
@@ -646,16 +703,46 @@ function App() {
 			setError(reason instanceof Error ? reason.message : String(reason));
 		}
 	}
-	async function deleteChat() {
-		if (!snapshot || !window.confirm(`永久删除「${snapshot.title}」及其子会话？此操作无法撤销。`)) return;
+	async function performSessionAction(action: SessionAction, target: SessionSummary, title?: string) {
+		if (operation.current) throw new Error("请等待当前操作完成");
+		operation.current = true;
 		setPending(true);
 		try {
-			await request(`/sessions/${snapshot.id}`, "DELETE");
-			switchSession();
-			await refreshSessions();
-		} catch (reason) {
-			setError(reason instanceof Error ? reason.message : String(reason));
+			if (action === "delete") {
+				await sessionTitles.current.clear(target.id);
+				await request(`/sessions/${target.id}`, "DELETE");
+				clearDraft(target.id);
+				setSessions((previous) => previous.filter((session) => session.id !== target.id));
+				if (sessionRef.current?.id === target.id) switchSession();
+				setNotice(`已删除「${target.title}」`);
+			} else {
+				if (action === "rename") await sessionTitles.current.clear(target.id);
+				const next = await request<SessionSnapshot>(
+					`/sessions/${target.id}${action === "archive" ? "/archive" : ""}`,
+					action === "archive" ? "POST" : "PATCH",
+					action === "archive" ? { archived: !target.archived } : { title },
+				);
+				accept(next);
+				setSessions((previous) =>
+					previous
+						.map((session) =>
+							session.id === next.id
+								? { ...session, title: next.title, archived: next.archived, updatedAt: next.updatedAt }
+								: session,
+						)
+						.sort((left, right) => right.updatedAt - left.updatedAt),
+				);
+				setNotice(
+					action === "rename"
+						? "会话名称已更新"
+						: next.archived
+							? `已归档「${next.title}」，可在归档列表中恢复`
+							: `已恢复「${next.title}」`,
+				);
+			}
+			void refreshSessions().catch(() => {});
 		} finally {
+			operation.current = false;
 			setPending(false);
 		}
 	}
@@ -682,13 +769,17 @@ function App() {
 				.toLowerCase()
 				.includes(query.trim().toLowerCase()),
 	);
-	const connectionLabel = !coreReady
-		? "Core 离线"
-		: busy
-			? "正在处理"
-			: snapshot && !connected
-				? "正在重连"
-				: "Core 已连接";
+	const lastText = snapshot?.messages
+		.filter((message) => message.role === "user" || message.role === "assistant")
+		.slice()
+		.reverse()
+		.flatMap((message) =>
+			typeof message.content === "string"
+				? [message.content]
+				: message.content.filter((part) => part.type === "text").map((part) => part.text),
+		)
+		.find((text) => text.trim());
+	const connectionLabel = !coreReady ? "连接已断开" : busy ? "正在处理" : snapshot && !connected ? "正在重连" : "在线";
 
 	return (
 		<AssistantRuntimeProvider runtime={runtime}>
@@ -710,7 +801,9 @@ function App() {
 							disabled={pending}
 							onClick={() => switchSession()}
 						>
-							<span className="brand-mark">P</span>
+							<span className="brand-mark">
+								<BotMark />
+							</span>
 							<strong>Pie</strong>
 						</button>
 						<div className="sidebar-actions">
@@ -720,113 +813,183 @@ function App() {
 								aria-label="搜索会话"
 								onClick={() => document.getElementById("session-search")?.focus()}
 							>
-								⌕
+								<Icon name="search" />
 							</button>
 							<button
 								type="button"
 								className="circle-button add-button"
 								aria-label="新建对话"
 								disabled={pending || !coreReady}
-								onClick={() => void newSession()}
+								onClick={() => switchSession()}
 							>
-								＋
+								<Icon name="plus" />
 							</button>
 						</div>
 					</header>
-					<div className="assistant-strip">
-						<span className="assistant-avatar">P</span>
-						<select
-							id="assistant-select"
-							aria-label="当前助手"
-							value={assistantId}
-							disabled={pending}
-							onChange={(event) => {
-								const id = event.target.value;
-								switchSession();
-								setAssistantId(id);
-								const latest = sessions.find((session) => session.assistantId === id);
-								if (latest) void openSession(latest.id);
-							}}
-						>
-							{assistants.map((assistant) => (
-								<option key={assistant.id} value={assistant.id}>
-									{assistant.name}
-								</option>
-							))}
-						</select>
+					<div className="sidebar-profile">
 						<button
 							type="button"
-							className="plain-icon"
-							aria-label="编辑助手"
+							className="profile-avatar"
+							aria-label="编辑当前助手"
 							disabled={!currentAssistant}
 							onClick={() => setAssistantEditor(currentAssistant)}
 						>
-							•••
+							<BotMark />
 						</button>
+						<div className="assistant-strip">
+							<select
+								id="assistant-select"
+								aria-label="当前助手"
+								value={assistantId}
+								disabled={pending}
+								onChange={(event) => {
+									const id = event.target.value;
+									switchSession();
+									setAssistantId(id);
+									const latest = sessions.find((session) => session.assistantId === id);
+									if (latest) void openSession(latest.id);
+								}}
+							>
+								{assistants.map((assistant) => (
+									<option key={assistant.id} value={assistant.id}>
+										{assistant.name}
+									</option>
+								))}
+							</select>
+							<button
+								type="button"
+								className="plain-icon"
+								aria-label="编辑助手"
+								disabled={!currentAssistant}
+								onClick={() => setAssistantEditor(currentAssistant)}
+							>
+								<Icon name="chevron" />
+							</button>
+						</div>
 					</div>
 					<div className="group-heading">
 						<span>
-							{archived ? "已归档" : "全部会话"} · {visibleSessions.length}
+							{archived ? "已归档" : "对话"}
+							<span className="session-count">{visibleSessions.length}</span>
 						</span>
 						<button
 							type="button"
-							className="event-toggle"
+							className="plain-icon"
 							aria-label={archived ? "返回最近会话" : "查看归档"}
+							title={archived ? "返回最近会话" : "查看归档"}
 							onClick={() => setArchived(!archived)}
 						>
-							{archived ? "返回" : "归档"}
+							<Icon name={archived ? "chat" : "archive"} />
 						</button>
 					</div>
-					<label className="session-search">
-						<span>⌕</span>
+					<div className="session-search">
+						<Icon name="search" />
 						<input
 							id="session-search"
 							value={query}
 							aria-label="搜索对话"
 							placeholder="搜索对话"
 							onChange={(event) => setQuery(event.target.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Escape" && query) {
+									event.stopPropagation();
+									setQuery("");
+								}
+							}}
 						/>
-					</label>
-					<nav className="session-list" aria-label="对话列表">
-						<div className="session-section-label">最近对话</div>
-						{visibleSessions.map((session) => (
+						{query && (
 							<button
 								type="button"
-								key={session.id}
-								className={`session-row ${session.id === snapshot?.id ? "active" : ""}`}
-								disabled={pending}
-								onClick={() => void openSession(session.id)}
-								aria-current={session.id === snapshot?.id ? "page" : undefined}
+								className="search-clear"
+								aria-label="清除搜索"
+								title="清除搜索"
+								onClick={() => {
+									setQuery("");
+									document.getElementById("session-search")?.focus();
+								}}
 							>
-								<span className="session-icon">{session.title.slice(0, 1).toUpperCase() || "P"}</span>
-								<span className="session-copy">
-									<strong>{session.title}</strong>
-									<small>
-										{session.turn?.status === "running" ? "正在处理" : relativeTime(session.updatedAt)}
-									</small>
-								</span>
-								{session.id === snapshot?.id && <span className="session-active-dot" />}
+								<Icon name="close" />
 							</button>
+						)}
+					</div>
+					<nav className="session-list" aria-label="对话列表">
+						{visibleSessions.map((session) => (
+							<div className="session-row-wrap" key={session.id}>
+								<button
+									type="button"
+									className={`session-row ${session.id === snapshot?.id ? "active" : ""}`}
+									disabled={pending}
+									onClick={() => void openSession(session.id)}
+									aria-current={session.id === snapshot?.id ? "page" : undefined}
+								>
+									<span
+										className={`session-icon avatar-tone-${
+											Math.max(
+												0,
+												assistants.findIndex((assistant) => assistant.id === session.assistantId),
+											) % 5
+										}`}
+									>
+										<BotMark />
+									</span>
+									<span className="session-copy">
+										<span className="session-meta">
+											<strong title={session.title}>{session.title}</strong>
+											<time
+												dateTime={new Date(session.updatedAt).toISOString()}
+												title={new Date(session.updatedAt).toLocaleString("zh-CN")}
+											>
+												{relativeTime(session.updatedAt)}
+											</time>
+										</span>
+										<small className="session-preview">
+											{session.turn?.status === "running"
+												? "正在回复…"
+												: session.id === snapshot?.id && lastText
+													? lastText
+													: (assistants.find((assistant) => assistant.id === session.assistantId)?.name ??
+														"开始聊聊你的想法")}
+										</small>
+									</span>
+									{session.id === snapshot?.id && <span className="session-active-dot" />}
+								</button>
+								<SessionActions
+									session={session.id === snapshot?.id ? snapshot : session}
+									disabled={pending || !coreReady}
+									onAction={(action) => {
+										const target = sessionRef.current?.id === session.id ? sessionRef.current : session;
+										if (action === "archive")
+											void performSessionAction(action, target).catch((reason) =>
+												setError(reason instanceof Error ? reason.message : String(reason)),
+											);
+										else setSessionAction({ action, session: target });
+									}}
+								/>
+							</div>
 						))}
 						{visibleSessions.length === 0 && (
 							<p className="empty-list">
-								{query ? "没有匹配的对话" : archived ? "暂无归档对话" : "还没有对话，点击右上角 ＋ 创建。"}
+								{query
+									? "没有找到相关对话"
+									: archived
+										? "还没有归档的对话"
+										: "从一条消息开始，\n你的对话会保存在这里。"}
 							</p>
 						)}
 					</nav>
 					<footer className="sidebar-footer">
 						<button type="button" onClick={() => setAssistantEditor("new")}>
-							＋ 新建助手
+							<Icon name="plus" /> 新建助手
 						</button>
 						<button type="button" onClick={() => setShowPluginSettings(true)}>
-							插件
+							<Icon name="plug" /> 插件
 						</button>
 						<button type="button" onClick={() => setShowModelSettings(true)}>
-							设置
+							<Icon name="settings" /> 设置
 						</button>
 					</footer>
 				</aside>
-				<main className="workspace" inert={narrow && showSidebar}>
+				<main className="workspace" inert={narrow && (showSidebar || showDetails)}>
 					<header className="chat-header">
 						<button
 							ref={sidebarToggle}
@@ -836,21 +999,44 @@ function App() {
 							aria-expanded={showSidebar}
 							onClick={() => setShowSidebar(true)}
 						>
-							☰
+							<Icon name="panel" />
 						</button>
-						<div className="chat-title">
-							<strong>{snapshot?.title ?? currentAssistant?.name ?? "Pie"}</strong>
-							<span>
-								<i className={coreReady && (!snapshot || connected) ? "online" : ""} />
-								{connectionLabel}
+						<div className="chat-heading">
+							<span className="header-avatar">
+								<BotMark />
 							</span>
+							<div className="chat-title">
+								<strong>{snapshot?.title ?? currentAssistant?.name ?? "Pie"}</strong>
+								<span>
+									<i className={coreReady && (!snapshot || connected) ? "online" : ""} />
+									{connectionLabel}
+								</span>
+							</div>
 						</div>
 						<div className="chat-actions">
+							{!busy && !interrupted && messages.length > 0 && (
+								<button
+									type="button"
+									className="circle-button"
+									disabled={pending || !connected}
+									onClick={() => void retryLastMessage()}
+									title="重试 / 编辑上一条（新分支）"
+								>
+									<Icon name="retry" />
+									<span className="sr-only">重试 / 编辑上一条（新分支）</span>
+								</button>
+							)}
 							<button
 								type="button"
 								className="model-pill"
-								title="模型设置（新会话默认）"
-								onClick={() => setShowModelSettings(true)}
+								title={
+									snapshot
+										? snapshot.mode === "real"
+											? "切换当前会话模型"
+											: "本地试用会话详情"
+										: "设置新会话默认模型"
+								}
+								onClick={() => (snapshot ? openDetails() : setShowModelSettings(true))}
 							>
 								{snapshot?.mode === "faux"
 									? "本地试用 · 无模型调用"
@@ -860,9 +1046,11 @@ function App() {
 								type="button"
 								className="circle-button"
 								aria-label="打开会话详情"
-								onClick={() => setShowDetails((current) => !current)}
+								aria-expanded={showDetails}
+								aria-controls="session-details"
+								onClick={() => (showDetails ? setShowDetails(false) : openDetails())}
 							>
-								•••
+								<Icon name="more" />
 							</button>
 						</div>
 					</header>
@@ -873,7 +1061,7 @@ function App() {
 								重新连接
 							</button>
 							<button type="button" aria-label="关闭错误" onClick={() => setError("")}>
-								×
+								<Icon name="close" />
 							</button>
 						</div>
 					)}
@@ -881,7 +1069,7 @@ function App() {
 						<output className="notice">
 							{notice}
 							<button type="button" aria-label="关闭提示" onClick={() => setNotice("")}>
-								×
+								<Icon name="close" />
 							</button>
 						</output>
 					)}
@@ -901,45 +1089,37 @@ function App() {
 							{messages.length === 0 && (
 								<section className="welcome">
 									<div className="welcome-orb">
-										<span>P</span>
+										<BotMark />
 									</div>
-									<h1>{snapshot ? "有什么我可以帮你？" : "开始一个新对话"}</h1>
-									<p>
-										{selectedModel
-											? "描述一个想法、问题或任务，Pie 会和你一起完成。"
-											: "先在设置中配置模型，再创建第一个对话。"}
-									</p>
-									{snapshot && (
-										<div className="suggestions">
-											{[
-												["整理思路", "帮我把现在的想法整理成可执行计划"],
-												["分析项目", "分析当前项目，指出最值得先做的三件事"],
-												["开始任务", "先问我必要信息，然后开始完成任务"],
-											].map(([label, prompt]) => (
-												<button
-													key={label}
-													type="button"
-													disabled={!connected || Boolean(busy)}
-													onClick={() => void send({ text: prompt, images: [] })}
-												>
-													<strong>{label}</strong>
-													<span>{prompt}</span>
-												</button>
-											))}
-										</div>
-									)}
-									{!snapshot && selectedModel && (
-										<button type="button" className="welcome-action" onClick={() => void newSession()}>
-											创建新对话
-										</button>
-									)}
+									<span className="welcome-eyebrow">{currentAssistant?.name ?? "Pie"}</span>
+									<h1>有什么想一起完成的？</h1>
+									<p>聊一个想法，解决一个问题，或者开始一项工作。</p>
+									<div className="suggestions">
+										{[
+											["整理思路", "帮我把现在的想法整理成可执行计划"],
+											["分析项目", "分析当前项目，指出最值得先做的三件事"],
+											["开始任务", "先问我必要信息，然后开始完成任务"],
+										].map(([label, prompt]) => (
+											<button
+												key={label}
+												type="button"
+												disabled={!coreReady || pending || Boolean(busy)}
+												onClick={() => {
+													const draft = readDraft(snapshot?.id ?? "new");
+													setInitialDraft({
+														...draft,
+														text: draft.text ? `${draft.text}\n\n${prompt}` : prompt,
+													});
+												}}
+											>
+												<strong>{label}</strong>
+												<Icon name="arrow-up" />
+											</button>
+										))}
+									</div>
 									{!selectedModel && (
-										<button
-											type="button"
-											className="welcome-action"
-											onClick={() => setShowModelSettings(true)}
-										>
-											配置模型
+										<button type="button" className="welcome-hint" onClick={() => setShowModelSettings(true)}>
+											<Icon name="settings" /> 连接你的模型，开始对话 <Icon name="chevron" />
 										</button>
 									)}
 									{!snapshot && (
@@ -954,105 +1134,135 @@ function App() {
 									)}
 								</section>
 							)}
-							<div className="transcript">
-								<ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
-								{busy && (
-									<output className="running-indicator">
-										{snapshot?.execution.cancellationRequested
-											? "正在停止并清理工具…"
-											: snapshot?.execution.waitingForInteraction
-												? "等待你的确认"
-												: snapshot?.execution.activeTools.length
-													? `正在执行 ${snapshot.execution.activeTools.map((tool) => tool.toolName).join("、")}`
-													: "Pie 正在思考…"}
-									</output>
-								)}
-							</div>
+							{(messages.length > 0 || busy) && (
+								<div className="transcript">
+									<ThreadPrimitive.Messages components={{ UserMessage, AssistantMessage }} />
+									{busy && (
+										<output className="running-indicator">
+											{snapshot?.execution.cancellationRequested
+												? "正在停止并清理工具…"
+												: snapshot?.execution.waitingForInteraction
+													? "等待你的确认"
+													: snapshot?.execution.activeTools.length
+														? `正在执行 ${snapshot.execution.activeTools.map((tool) => tool.toolName).join("、")}`
+														: "Pie 正在思考…"}
+										</output>
+									)}
+								</div>
+							)}
 						</ThreadPrimitive.Viewport>
 						{messages.length > 0 && (
 							<ThreadPrimitive.ScrollToBottom className="scroll-bottom" aria-label="回到最新消息">
-								↓ 最新消息
+								<Icon name="arrow-down" /> 最新消息
 							</ThreadPrimitive.ScrollToBottom>
 						)}
-						{snapshot && (
-							<div className="composer-area">
-								{snapshot.turn && snapshot.turn.status !== "running" && (
-									<output className={`turn-status ${snapshot.turn.status}`}>
-										{snapshot.turn.status === "failed"
-											? snapshot.turn.error
-											: snapshot.turn.status === "cancelled"
-												? "本次执行已停止"
-												: interrupted
-													? "执行已中断，可继续本次对话"
-													: snapshot.execution.waitingForMessage
-														? "正在等待后台消息"
-														: "本轮回复已结束"}
-									</output>
-								)}
-								{interrupted && (
-									<div className="resume-actions">
-										<button
-											type="button"
-											disabled={!connected || pending || !snapshot.execution.actions.cancel.available}
-											onClick={() => void cancel()}
-										>
-											停止
-										</button>
-										<button
-											type="button"
-											className="confirm-button"
-											disabled={!connected || pending || !snapshot.execution.actions.resume.available}
-											onClick={() => void resume()}
-										>
-											继续
-										</button>
-									</div>
-								)}
-								{snapshot.execution.recoveryBlockedReason && (
-									<p className="turn-status failed">{snapshot.execution.recoveryBlockedReason}</p>
-								)}
-								{!busy && !interrupted && messages.length > 0 && (
-									<div className="resume-actions">
-										<button
-											type="button"
-											disabled={pending || !connected}
-											onClick={() => void retryLastMessage()}
-										>
-											重试 / 编辑上一条（新分支）
-										</button>
-									</div>
-								)}
-								<Composer
-									key={`${snapshot.id}:${draftVersion}`}
-									sessionId={snapshot.id}
-									initialDraft={initialDraft}
-									disabled={
-										!connected ||
-										loadingSession ||
-										(!snapshot.execution.actions.submit.available &&
-											!snapshot.execution.actions.steer.available)
-									}
-									pending={pending}
-									running={Boolean(busy)}
-									canStop={snapshot.execution.actions.cancel.available}
-									canSteer={snapshot.execution.actions.steer.available}
-									onSend={send}
-									onStop={() => void cancel()}
-								/>
-								<p className="disclaimer">Pie 可能会出错，请检查重要信息。</p>
-							</div>
-						)}
+						<div className="composer-area">
+							{snapshot?.turn && snapshot.turn.status !== "running" && (
+								<output
+									className={`turn-status ${snapshot.turn.status} ${snapshot.turn.status === "completed" && !snapshot.execution.waitingForMessage ? "sr-only" : ""}`}
+								>
+									{snapshot.turn.status === "failed"
+										? snapshot.turn.error
+										: snapshot.turn.status === "cancelled"
+											? "本次执行已停止"
+											: interrupted
+												? "执行已中断，可继续本次对话"
+												: snapshot.execution.waitingForMessage
+													? "正在等待后台消息"
+													: "本轮回复已结束"}
+								</output>
+							)}
+							{snapshot && interrupted && (
+								<div className="resume-actions">
+									<button
+										type="button"
+										disabled={!connected || pending || !snapshot.execution.actions.cancel.available}
+										onClick={() => void cancel()}
+									>
+										停止
+									</button>
+									<button
+										type="button"
+										className="confirm-button"
+										disabled={!connected || pending || !snapshot.execution.actions.resume.available}
+										onClick={() => void resume()}
+									>
+										继续
+									</button>
+								</div>
+							)}
+							{snapshot?.execution.recoveryBlockedReason && (
+								<p className="turn-status failed">{snapshot.execution.recoveryBlockedReason}</p>
+							)}
+							<Composer
+								key={`${snapshot?.id ?? "new"}:${draftVersion}`}
+								sessionId={snapshot?.id ?? "new"}
+								initialDraft={initialDraft}
+								disabled={
+									loadingSession ||
+									(snapshot
+										? !connected ||
+											(!snapshot.execution.actions.submit.available &&
+												!snapshot.execution.actions.steer.available)
+										: !coreReady)
+								}
+								pending={pending}
+								running={Boolean(busy)}
+								canStop={snapshot?.execution.actions.cancel.available ?? false}
+								canSteer={snapshot?.execution.actions.steer.available ?? false}
+								onSend={send}
+								onStop={() => void cancel()}
+							/>
+							<p className="disclaimer">Enter 发送 · Shift + Enter 换行</p>
+						</div>
 					</ThreadPrimitive.Root>
 				</main>
 				{showDetails && (
-					<aside className="details-panel">
+					<button
+						type="button"
+						className="details-scrim"
+						aria-label="关闭会话详情遮罩"
+						onClick={() => setShowDetails(false)}
+					/>
+				)}
+				{showDetails && (
+					<div
+						ref={detailsPanel}
+						id="session-details"
+						className="details-panel"
+						role="dialog"
+						aria-modal={narrow || undefined}
+						aria-labelledby="session-details-title"
+						onKeyDown={(event) => {
+							if (!narrow || event.key !== "Tab") return;
+							const controls = [
+								...event.currentTarget.querySelectorAll<HTMLElement>(
+									"button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], summary, [tabindex]:not([tabindex='-1'])",
+								),
+							].filter((control) => control.getClientRects().length > 0);
+							const first = controls[0];
+							const last = controls[controls.length - 1];
+							if (
+								(event.shiftKey && document.activeElement === first) ||
+								(!event.shiftKey && document.activeElement === last)
+							) {
+								event.preventDefault();
+								(event.shiftKey ? last : first)?.focus();
+							}
+						}}
+					>
 						<header>
 							<div>
 								<span className="dialog-kicker">SESSION</span>
-								<h2>会话详情</h2>
+								<h2 id="session-details-title">会话详情</h2>
 							</div>
-							<button type="button" className="circle-button" onClick={() => setShowDetails(false)}>
-								×
+							<button
+								type="button"
+								className="circle-button"
+								aria-label="关闭会话详情"
+								onClick={() => setShowDetails(false)}
+							>
+								<Icon name="close" />
 							</button>
 						</header>
 						{snapshot ? (
@@ -1073,7 +1283,13 @@ function App() {
 										onSubmit={(event) => {
 											event.preventDefault();
 											const data = new FormData(event.currentTarget);
-											void manage("", { title: data.get("title") }, "PATCH");
+											void performSessionAction(
+												"rename",
+												snapshot,
+												String(data.get("title") ?? "").trim(),
+											).catch((reason) =>
+												setError(reason instanceof Error ? reason.message : String(reason)),
+											);
 										}}
 									>
 										<label>
@@ -1141,7 +1357,11 @@ function App() {
 										type="button"
 										className="event-toggle"
 										disabled={pending}
-										onClick={() => void manage("/archive", { archived: !snapshot.archived })}
+										onClick={() =>
+											void performSessionAction("archive", snapshot).catch((reason) =>
+												setError(reason instanceof Error ? reason.message : String(reason)),
+											)
+										}
 									>
 										{snapshot.archived ? "取消归档" : "归档会话"}
 									</button>
@@ -1149,7 +1369,7 @@ function App() {
 										type="button"
 										className="event-toggle danger"
 										disabled={pending || busy || Boolean(interrupted)}
-										onClick={() => void deleteChat()}
+										onClick={() => setSessionAction({ action: "delete", session: snapshot })}
 									>
 										删除会话
 									</button>
@@ -1190,9 +1410,19 @@ function App() {
 						) : (
 							<p className="context-empty">选择一个对话后查看。</p>
 						)}
-					</aside>
+					</div>
 				)}
 			</div>
+			{sessionAction && (
+				<SessionActionDialog
+					key={`${sessionAction.session.id}:${sessionAction.action}`}
+					session={sessionAction.session}
+					action={sessionAction.action}
+					pending={pending}
+					onClose={() => setSessionAction(undefined)}
+					onConfirm={(title) => performSessionAction(sessionAction.action, sessionAction.session, title)}
+				/>
+			)}
 			{assistantEditor && (
 				<AssistantSettings
 					assistant={assistantEditor === "new" ? undefined : assistantEditor}

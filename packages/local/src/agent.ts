@@ -6,6 +6,7 @@ import { loadExternalTools } from "./external-tools.ts";
 import { McpManager } from "./mcp.ts";
 import { createModelRequestRecorder } from "./model-requests.ts";
 import { resolveConfiguredModelHeaders } from "./models/provider-composer.ts";
+import { resolveConfigValueOrThrow } from "./models/resolve-config-value.ts";
 import { createModelSettings } from "./models/settings.ts";
 import { createSkillTools } from "./skills.ts";
 import { systemTools } from "./tools.ts";
@@ -56,7 +57,20 @@ export function createAgentFactory(
 				...systemTools(env, context.directory, context),
 				...toolIds.flatMap((id) => {
 					const create = external.get(id);
-					const tool = create?.(context);
+					const configuredKey = settings.current.config.providers.deepseek?.apiKey;
+					let toolContext = context;
+					if (id === "deepseek-web-search" && configuredKey) {
+						try {
+							const key = resolveConfigValueOrThrow(configuredKey, "DeepSeek API key", settings.current.env);
+							toolContext = {
+								...context,
+								env: Object.freeze({ ...context.env, DEEPSEEK_API_KEY: key }),
+							};
+						} catch {
+							// Let the tool report the same missing-key error as standalone env configuration.
+						}
+					}
+					const tool = create?.(toolContext);
 					return tool ? [{ ...tool, exposure: tool.exposure ?? "deferred" }] : [];
 				}),
 			],

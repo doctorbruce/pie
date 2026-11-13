@@ -84,19 +84,28 @@ export function SessionModelSelect({
 					}}
 				>
 					<option value="">跟随默认模型{catalog?.selected ? ` · ${catalog.selected.id}` : ""}</option>
-					{selectedUnavailable && (
-						<option value={value} disabled>
-							{session.modelOverride?.providerId} / {session.modelOverride?.model}（未配置）
-						</option>
-					)}
-					{catalog?.models.map((model) => (
-						<option
-							key={JSON.stringify([model.provider, model.id])}
-							value={JSON.stringify([model.provider, model.id])}
-						>
-							{model.provider} / {model.name || model.id}
-							{!model.keyConfigured ? "（未配置密钥）" : ""}
-						</option>
+					{[
+						{ label: "已配置", configured: true },
+						{ label: "未配置", configured: false },
+					].map(({ label, configured }) => (
+						<optgroup key={label} label={label}>
+							{!configured && selectedUnavailable && (
+								<option value={value} disabled>
+									{session.modelOverride?.providerId} / {session.modelOverride?.model}（未配置）
+								</option>
+							)}
+							{catalog?.models
+								.filter((model) => model.keyConfigured === configured)
+								.map((model) => (
+									<option
+										key={JSON.stringify([model.provider, model.id])}
+										value={JSON.stringify([model.provider, model.id])}
+									>
+										{model.provider} / {model.name || model.id}
+										{!model.keyConfigured ? "（未配置密钥）" : ""}
+									</option>
+								))}
+						</optgroup>
 					))}
 				</select>
 			</label>

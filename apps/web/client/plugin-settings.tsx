@@ -1,5 +1,6 @@
 import type { Plugin } from "@pie/runtime/protocol";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Icon } from "./icons.tsx";
 import { request } from "./request.ts";
 
 export function PluginSettings({ onClose }: { onClose: () => void }) {
@@ -51,6 +52,17 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 		>
 			<div className="settings-heading">
 				<h2 id="plugin-settings-title">插件</h2>
+				<button
+					type="button"
+					className="circle-button"
+					aria-label="关闭"
+					title="关闭"
+					disabled={pending}
+					onClick={onClose}
+				>
+					<Icon name="close" />
+					<span className="sr-only">关闭</span>
+				</button>
 			</div>
 			<p className="settings-note">导入后，在「编辑助手」中挂载插件。助手的最新挂载会在已有会话下一次提交时生效。</p>
 			<form
@@ -117,11 +129,6 @@ export function PluginSettings({ onClose }: { onClose: () => void }) {
 					</button>
 				</p>
 			)}
-			<div className="settings-actions">
-				<button type="button" className="event-toggle" disabled={pending} onClick={onClose}>
-					关闭
-				</button>
-			</div>
 		</dialog>
 	);
 }

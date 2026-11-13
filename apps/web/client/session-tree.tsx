@@ -1,5 +1,6 @@
 import type { SessionTree } from "@pie/runtime/protocol";
 import { useEffect, useRef } from "react";
+import { Icon } from "./icons.tsx";
 
 export function SessionTreeDialog({
 	tree,
@@ -56,8 +57,16 @@ export function SessionTreeDialog({
 					<h2 id="tree-title">会话树</h2>
 					<p>选择用户消息后可修改重发；选择回复可继续该分支。旧分支保留，不自动发送。</p>
 				</div>
-				<button type="button" aria-label="关闭会话树" disabled={disabled} onClick={onClose}>
-					×
+				<button
+					type="button"
+					className="circle-button"
+					aria-label="关闭会话树"
+					title="关闭"
+					disabled={disabled}
+					onClick={onClose}
+				>
+					<Icon name="close" />
+					<span className="sr-only">关闭</span>
 				</button>
 			</div>
 			<div className="fork-message-list">{renderBranch(null, 0)}</div>

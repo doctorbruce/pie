@@ -82,7 +82,7 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 
 `400` 为无效输入/真实模型不可用，`401` 为认证失败，`403` 为 Host/Origin 不允许，`404` 为助手/会话/接口不存在，`409` 为会话忙、turn 不匹配、删除约束或本地助手达到 32 个的限制，`413` 为请求过大，`415` 为 Content-Type 不支持，`503` 为服务关闭中或存储故障后拒绝写入。错误响应为 `{ "error": "说明", "reason"?: "稳定代码" }`；控制状态拒绝使用与 `execution.actions` 相同的原因码，另有 `turn_mismatch / invalid_request / recovery_validation_failed / external_executor_unavailable / external_job_running`。不要解析中文说明判断状态。
 
-助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。默认助手的 toolIds 为空，默认启用集合后续再定。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill_search` 和 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
+助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。未安装扩展时默认助手的 toolIds 为空；安装 DeepSeek 网页搜索扩展时默认加入 `deepseek-web-search`。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill_search` 和 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
 这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或旧 `task` 时自动向 Agent 加入 `job_output/job_kill`。`skill_search/skill` 按 Skill 绑定加入，普通会话的 `task` 按 Subagent 绑定加入；协调 Worker 会话改为 `communicate`，这些原生工具不属于可配置 toolIds。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
 
@@ -136,6 +136,42 @@ export default function createTool({ Type, sessionId }: ToolContext) {
 `examples/tools/memory-manage.ts` 适配 Astron 的 list/add/delete 记忆工具；它读取宿主注入的 ASTRON_RPA_ROUTE_BASE_URL 或 ASTRON_RPA_ROUTE_PORT，不硬编码端口。测试使用模拟服务；正式发行工具由 Astron adapter 管理。调用示例：`调用工具 memory-manage {"action":"list"}`。
 
 这些文件是与 Core 同进程执行的可信宿主代码；模块顶层会在启动加载时执行，创建函数只应组装工具，业务请求放在 execute 内。模块及依赖不能使用顶层 await，TS 仅支持 Node 可擦除语法。变更文件需要重启整个服务进程；会话只保存工具 ID 和历史，不冻结工具代码。重启时工具被移除，相关会话历史可读，继续执行会明确报错。
+
+### DeepSeek 网页搜索扩展
+
+`examples/tools/deepseek-web-search.ts` 调用官方 `POST https://api.deepseek.com/v1/tools/search`。工具优先复用 `models.json` 中 `providers.deepseek.apiKey`，因此 Web 的“配置模型提供商”页面保存一次即可同时供 DeepSeek 模型和网页搜索使用；没有该配置时回退到服务进程的 `DEEPSEEK_API_KEY`。接口和搜索语法见 [DeepSeek 网页搜索文档](https://api-docs.deepseek.com/zh-cn/guides/search/)。真实搜索会使用 DeepSeek 账户额度。
+
+在仓库根目录用 PowerShell 安装并启动：
+
+```powershell
+mkdir -Force .pie/tools | Out-Null
+Copy-Item examples/tools/deepseek-web-search.ts .pie/tools/deepseek-web-search.ts
+npm run serve -- --tools-dir .pie/tools
+```
+
+然后在 Web 的模型设置中新增或编辑 `deepseek` 提供商，填写其 API Key 并保存；该密钥写入服务端 `.pie/models.json`，Web 查询只显示“已配置”。安装该工具后，默认助手会自动启用 `deepseek-web-search`；其他助手仍需在 `toolIds` 中选择。只复制这个文件即可，无需安装同目录的 Astron 记忆示例或额外依赖。工具目录也可通过 `PI_TOOLS_DIR` 指定，省略时使用 `PI_DATA_DIR/tools`（默认 `.pie/tools`）。若不使用 Web 配置，也可把 `DEEPSEEK_API_KEY` 写入根目录 `.env`；模型配置中的密钥保存后新建会话即可，环境变量或工具代码变更后需重启服务。Sidecar 不打包此示例文件，使用时同样复制到实际工具目录；Cowork 的工具发行需由宿主另行接入。
+
+启动后在 `GET /tools` 中确认 `deepseek-web-search`，再将它加入助手的 `toolIds` 或宿主的 `runtime.toolIds`。需要续读长结果时同时启用 `read`。工具默认按需曝光，模型先通过 `tool_search` 搜索“DeepSeek 网页搜索”取得参数定义。每次搜索默认请求 `websearch` 权限确认；宿主可设置 `runtime.permissions: { "websearch": "allow" }` 放行。
+
+| 参数 | 说明 |
+| --- | --- |
+| `query` | 必填，1–128 个 Unicode 字符，不能全为空白；原样支持 `site:`、`-site:`、排除词、精确短语、`lang:`、`after:`、`before:` |
+| `count` | 返回条数，1–50，默认 10 |
+| `ori_question` | 可选的原始用户问题，1–128 个 Unicode 字符；`null` 视为未提供 |
+| `localization` | 可选的 IP 地址，用于优先返回本地化结果，默认空字符串 |
+| `need_content` | 是否返回网页正文，默认 `false` |
+
+例如按发布日期搜索 2026-11-06 之后、2026-11-14 之前的中文结果：
+
+```json
+{
+  "query": "DeepSeek site:github.com lang:zh after:2026-11-06 before:2026-11-14",
+  "count": 5,
+  "need_content": false
+}
+```
+
+结果包含标题、URL、摘要、可选正文及站点、日期和评分；外部网页内容应视为数据。请求和响应读取共用 30 秒超时，取消会中断请求；响应最多 5 MiB，模型预览最多 50 KiB。长结果以保留全部字段和正文的折行文本写入临时文件，路径通过 `details.logPath` 返回，可用 `read` 按行续读。HTTP 错误、无效响应和超限均返回工具错误；无搜索结果返回空列表。
 
 ### 工具按需曝光
 

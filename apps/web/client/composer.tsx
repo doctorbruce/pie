@@ -1,9 +1,19 @@
 import type { ImagePart } from "@pie/runtime/protocol";
 import { useEffect, useRef, useState } from "react";
+import { Icon } from "./icons.tsx";
 import { store, stored } from "./storage.ts";
 
 export type Draft = { text: string; images: ImagePart[] };
 const drafts = new Map<string, Draft>();
+
+export function readDraft(sessionId: string): Draft {
+	return drafts.get(sessionId) ?? { text: stored(`pie.draft.${sessionId}`), images: [] };
+}
+
+export function clearDraft(sessionId: string) {
+	drafts.delete(sessionId);
+	store(`pie.draft.${sessionId}`, "");
+}
 
 export function Composer({
 	sessionId,
@@ -26,14 +36,20 @@ export function Composer({
 	onSend: (draft: Draft) => Promise<boolean>;
 	onStop: () => void;
 }) {
-	const [draft, setDraft] = useState<Draft>(
-		() => initialDraft ?? drafts.get(sessionId) ?? { text: stored(`pie.draft.${sessionId}`), images: [] },
-	);
+	const [draft, setDraft] = useState<Draft>(() => initialDraft ?? readDraft(sessionId));
 	const [error, setError] = useState("");
 	const [reading, setReading] = useState(false);
 	const readingLock = useRef(false);
 	const input = useRef<HTMLTextAreaElement>(null);
 	const files = useRef<HTMLInputElement>(null);
+	const focusedSession = useRef("");
+	const restoreFocus = useRef(false);
+	useEffect(() => {
+		if (!initialDraft) return;
+		setDraft(initialDraft);
+		if (window.matchMedia("(min-width: 761px) and (pointer: fine)").matches && !input.current?.disabled)
+			input.current?.focus({ preventScroll: true });
+	}, [initialDraft]);
 	useEffect(() => {
 		drafts.set(sessionId, draft);
 		store(`pie.draft.${sessionId}`, draft.text);
@@ -42,6 +58,13 @@ export function Composer({
 			input.current.style.height = `${Math.min(180, input.current.scrollHeight)}px`;
 		}
 	}, [draft, sessionId]);
+	useEffect(() => {
+		if (pending || (focusedSession.current === sessionId && !restoreFocus.current)) return;
+		focusedSession.current = sessionId;
+		if (restoreFocus.current || window.matchMedia("(min-width: 761px) and (pointer: fine)").matches)
+			input.current?.focus({ preventScroll: true });
+		restoreFocus.current = false;
+	}, [pending, sessionId]);
 	async function addImages(selected: File[]) {
 		if (readingLock.current || pending || disabled) return;
 		readingLock.current = true;
@@ -72,9 +95,9 @@ export function Composer({
 	async function submit() {
 		if (disabled || pending || reading || (running && !canSteer) || (!draft.text.trim() && !draft.images.length))
 			return;
+		restoreFocus.current = true;
 		if (await onSend(draft)) {
-			drafts.delete(sessionId);
-			store(`pie.draft.${sessionId}`, "");
+			clearDraft(sessionId);
 			setDraft({ text: "", images: [] });
 			input.current?.focus();
 		}
@@ -104,7 +127,7 @@ export function Composer({
 									disabled={pending}
 									onClick={() => setDraft({ ...draft, images: draft.images.filter((_, i) => i !== index) })}
 								>
-									×
+									<Icon name="close" />
 								</button>
 							</div>
 						))}
@@ -118,7 +141,7 @@ export function Composer({
 					disabled={disabled || pending || reading}
 					onClick={() => files.current?.click()}
 				>
-					＋
+					<Icon name="plus" />
 				</button>
 				<input
 					ref={files}
@@ -144,7 +167,8 @@ export function Composer({
 					value={draft.text}
 					maxLength={16000}
 					disabled={pending}
-					rows={2}
+					rows={1}
+					title="Enter 发送，Shift + Enter 换行"
 					onChange={(event) => setDraft({ ...draft, text: event.target.value })}
 					onKeyDown={(event) => {
 						if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
@@ -161,7 +185,7 @@ export function Composer({
 					}}
 				/>
 				<div className="composer-footer">
-					<span>
+					<span className={reading || running ? "composer-hint" : "sr-only"}>
 						{reading ? "正在读取图片…" : running ? "追加要求将引导当前执行" : "Enter 发送 · Shift + Enter 换行"}
 					</span>
 					<div className="composer-controls">
@@ -173,7 +197,7 @@ export function Composer({
 								disabled={pending}
 								onClick={onStop}
 							>
-								■
+								<Icon name="stop" />
 							</button>
 						)}
 						<button
@@ -188,7 +212,7 @@ export function Composer({
 								(!draft.text.trim() && !draft.images.length)
 							}
 						>
-							↑
+							<Icon name="arrow-up" />
 						</button>
 					</div>
 				</div>

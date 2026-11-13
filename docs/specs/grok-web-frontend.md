@@ -1,6 +1,6 @@
 # Grok 风格 Web 前端
 
-状态：已完成（2026-11-12，真实桌面 CUA 复核通过）
+状态：已完成（2026-11-13，会话列表操作与日常交互细节复核）
 
 ## 问题与目标
 
@@ -12,7 +12,7 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 - 复用现有 HTTP/SSE 协议，支持会话列表、创建会话、流式消息、停止执行、模型与助手配置。
 - 补齐日常使用所需的会话重命名/归档/删除、历史分页、分支切换、失败重试和运行中追加输入。
 - 在 SSE 断线、版本缺口、服务重启和窄屏窗口下保持可恢复的状态与明确反馈。
-- 默认视觉使用浅灰侧栏、白色消息区、圆角输入栏和蓝色 Pie 标识，适配窄屏。
+- 默认视觉使用浅灰侧栏、白色消息区、蓝灰消息气泡、黑色 Bot 标识和圆角输入栏，适配窄屏。
 - 不修改 Runtime、Local、Server 的会话语义；不新增后端代理协议或账号系统。
 
 ## 实现思路
@@ -29,6 +29,27 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 - `npm run chat` 为日常入口；独立 `serve` / `web` 为开发入口。验收不调用付费模型。
 
 ## 实施记录
+
+### 2026-11-13 会话操作与交互细节
+
+- 问题：删除、重命名、归档藏在详情内，列表无法直接操作；搜索、模型入口和键盘反馈有遗漏。
+- 范围与思路：每条会话增加可发现的操作菜单，支持不切换会话进行重命名、归档/恢复、删除；删除使用明确显示目标与不可撤销范围的确认弹窗，失败保留弹窗和原列表，运行中阻止不允许的操作。复用现有 API，不改后端会话语义。
+- 同轮细节：清空搜索、当前模型入口、复制成功反馈、模型输入 Enter、详情面板的焦点与窄屏遮罩。保留已有功能，不增加依赖，不批量删除或修改用户数据。
+- 实际改动：新增 `session-actions.tsx`，列表提供原生 Popover 菜单与重命名/删除 Dialog；`main.tsx` 复用现有 API 按目标 ID 更新列表，删除成功后才清理草稿，取消或失败保留原数据。`style.css` / `icons.tsx` 补操作入口、危险操作与复制反馈；`model-settings.tsx` 防止添加模型时 Enter 误提交设置。
+- 验证：`npm run check` 通过；`node --conditions=source --test apps/web/test/session-title.test.ts packages/server/test/archive.test.ts` 6/6；`node --conditions=source --test --test-name-pattern='parent deletion discovers|child background job prevents deleting' packages/runtime/test/runtime.test.ts packages/server/test/background-jobs.test.ts` 2/2。
+- 实际浏览器自检 15 项通过：不切换当前会话的重命名/归档/恢复；删除取消、409 错误保留、成功后的列表与首页状态；运行中禁用不允许的操作；复制、清空搜索、模型入口、模型输入 Enter；菜单底部定位及方向键/Escape；详情焦点循环与返回；420×780、320×480 无横向溢出。控制台错误/警告 0。
+- 删除成功与拒绝响应在隔离临时数据代理中模拟，未实际删除用户或 fixture 的 Core 数据；真实后端删除保护由上述定向测试覆盖。自检记录与截图见同目录 `pie-session-ui-qa.json`、`pie-session-menu-desktop.jpg`、`pie-session-menu-mobile.jpg`、`pie-session-delete-dialog.jpg`（绝对目录见下一节）。未执行完整浏览器脚本、真实模型调用、构建、提交或推送；本次无已知阻塞项。
+
+### 2026-11-13 参考图对齐
+
+- 问题：此前验收偏重功能，界面仍像管理台；侧栏、气泡、字号与参考图有明显差距，首页不能直接输入，输入区状态和按钮拥挤。
+- 本次范围：重做助手身份区、会话行、消息气泡、紧凑输入栏和统一 SVG 图标；首条消息直接创建会话，保留失败草稿；完善键盘焦点、窄屏、短窗口及减少动态效果偏好。
+- 保留全部会话、模型、助手、插件、权限与恢复能力；沿用现有 HTTP/SSE，不增加依赖，不修改后端语义。
+- 实际改动：`main.tsx` 重做首页、助手身份、会话行、消息气泡和状态层级；`icons.tsx` 统一 SVG；`composer.tsx` 支持首页直接发送、建议追加并保留附件、桌面聚焦和连续发送后的焦点恢复；`style.css` 统一间距、字号、胶囊输入、动效与响应式布局。设置/详情面板统一关闭按钮，会话模型目录优先显示已配置项。
+- 检查中修复：首页首条创建成功即转移并清理首页草稿，避免失败重试后旧稿复活；建议追加文字而不覆盖已有输入或图片；输入恢复可用后再恢复发送焦点；窄屏关闭导航后不再残留侧栏阴影。
+- 验证：`npm run check` 通过；`node --conditions=source --test apps/web/test/messages.test.ts apps/web/test/session-connection.test.ts apps/web/test/session-title.test.ts apps/web/test/turn-submission.test.ts` 28/28。
+- 本轮实际 CUA：使用独立临时数据和本机假 HTTP 模型，验证首页首条仅创建一次会话、流式 Markdown/表格、图文首条、成功清稿、建议保留输入与附件、切换、新建、停止、分支重试、连续 Enter 发送焦点、设置关闭及模型分组。检查默认桌面、420×780、320×480，输入可见且无横向溢出；移动导航进入搜索并隔离背景焦点，控制台错误/警告为 0。
+- 截图与自检记录：`C:/Users/benyo/.codex/visualizations/2026/11/13/01a1d386-8eac-7ec2-9bd9-afeb8f4c097c/`。未重复前序全部权限/断线恢复操作，未运行 `browser.mjs` 或 Windows CLI SIGTERM 测试；未构建、提交、推送或调用真实提供商。无本次已知阻塞项。
 
 ### 真实桌面 CUA 复核
 
@@ -50,7 +71,7 @@ Pie 已提供 HTTP/SSE 会话服务，但没有可直接使用的聊天入口。
 
 ## 边界与剩余风险
 
-- 本轮仅扩展 Runtime 模型目录的可选 `input` 字段与 Local 有效能力投影，并增加 Server HTTP 测试；没有更改会话/Turn 语义。未重跑全部后端测试。11 月 11 日记录的后台作业/Worker/PowerShell 全量失败不在本次修复范围，不宣称已修复。
+- 前序实现扩展 Runtime 模型目录的可选 `input` 字段与 Local 有效能力投影，并增加 Server HTTP 测试；本轮视觉重做仅修改 Web 前端，没有更改会话/Turn 语义。未重跑全部后端测试。11 月 11 日记录的后台作业/Worker/PowerShell 全量失败不在本次修复范围，不宣称已修复。
 - 修改已有模型的能力/参数后，已加载的会话需重启聊天服务使用新配置；新会话立即使用。设置保存反馈已说明这一点。
 - Web 入口使用本机 Vite 服务，尚无桌面安装包、托盘或自动更新；本次未执行构建/Sidecar 打包或部署。
 - 已验证 Chromium；其他浏览器、Windows/macOS 原生窗口与真实提供商凭据/网络尚未实测。文本草稿保存在浏览器，图片草稿只在当前页面内存中保留；已发送历史由 Core 持久化。

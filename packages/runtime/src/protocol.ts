@@ -1,4 +1,7 @@
 // Wire types are independent of both the model SDK and the frontend framework.
+/** Maximum text characters accepted in one user Turn input. */
+export const MAX_USER_INPUT_TEXT_CHARS = 1 << 20;
+
 export type TextPart = { type: "text"; text: string };
 export type ImagePart = { type: "image"; data: string; mimeType: string };
 export type WireMessage =

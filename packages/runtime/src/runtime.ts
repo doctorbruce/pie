@@ -23,35 +23,36 @@ import {
 	BackgroundJobs,
 	summarizeBackgroundJob,
 } from "./jobs.ts";
-import type {
-	ActionUnavailableReason,
-	ActivityRecord,
-	Assistant,
-	CancellationReceipt,
-	ContextCompaction,
-	ControlRejectionReason,
-	ExecutionStreamEvent,
-	GlobalSessionEvent,
-	HostRuntimeDefinition,
-	ImagePart,
-	InteractionReply,
-	InteractionRequest,
-	PermissionGrant,
-	SessionAction,
-	SessionActions,
-	SessionCreationReceipt,
-	SessionEvent,
-	SessionExecution,
-	SessionSnapshot,
-	SessionState,
-	SessionSummary,
-	SessionTransfer,
-	SteerAdmission,
-	SteerReceipt,
-	SubagentBinding,
-	ToolActivity,
-	Turn,
-	TurnReceipt,
+import {
+	type ActionUnavailableReason,
+	type ActivityRecord,
+	type Assistant,
+	type CancellationReceipt,
+	type ContextCompaction,
+	type ControlRejectionReason,
+	type ExecutionStreamEvent,
+	type GlobalSessionEvent,
+	type HostRuntimeDefinition,
+	type ImagePart,
+	type InteractionReply,
+	type InteractionRequest,
+	MAX_USER_INPUT_TEXT_CHARS,
+	type PermissionGrant,
+	type SessionAction,
+	type SessionActions,
+	type SessionCreationReceipt,
+	type SessionEvent,
+	type SessionExecution,
+	type SessionSnapshot,
+	type SessionState,
+	type SessionSummary,
+	type SessionTransfer,
+	type SteerAdmission,
+	type SteerReceipt,
+	type SubagentBinding,
+	type ToolActivity,
+	type Turn,
+	type TurnReceipt,
 } from "./protocol.ts";
 import type {
 	RuntimeStore,
@@ -169,8 +170,8 @@ function optionalToolAvailability(value: unknown): Record<string, boolean> | und
 
 function turnContent(body: Record<string, unknown>): Extract<AgentMessage, { role: "user" }>["content"] {
 	const text = body.text === undefined ? "" : body.text;
-	if (typeof text !== "string" || text.length > 16000)
-		throw new RuntimeError(400, "text 需要字符串，最多 16000 个字符");
+	if (typeof text !== "string" || text.length > MAX_USER_INPUT_TEXT_CHARS)
+		throw new RuntimeError(400, `text 需要字符串，最多 ${MAX_USER_INPUT_TEXT_CHARS} 个字符`);
 	const values = body.images === undefined ? [] : body.images;
 	if (!Array.isArray(values)) throw new RuntimeError(400, "images 需要图片数组");
 	const images: ImagePart[] = [];

@@ -10,7 +10,7 @@
 
 ## HTTP
 
-请求体为 JSON 对象，必须带 `Content-Type: application/json`。普通请求最多 64 KiB；宿主 runtime 注册表最多 4 MiB；会话导入和 turn/steer 请求最多 32 MiB。设置 `PI_SERVER_TOKEN` 时，所有请求（含 health 和 SSE）需要 `Authorization: Bearer <token>`。无 Origin 的 SDK/HTTP 请求按原契约接入；带 Origin 的请求必须与显式配置的 `PI_SERVER_ORIGIN` 完全一致，默认全部拒绝。不提供 CORS 响应头或代理，浏览器宿主需自行桥接。
+请求体为 JSON 对象，必须带 `Content-Type: application/json`。普通请求最多 64 KiB；宿主 runtime 注册表最多 4 MiB；会话导入和 turn/steer 请求最多 32 MiB。Turn/steer 的用户 `text` 最多 1,048,576 个字符，`displayText` 最多 16,000 个字符。设置 `PI_SERVER_TOKEN` 时，所有请求（含 health 和 SSE）需要 `Authorization: Bearer <token>`。无 Origin 的 SDK/HTTP 请求按原契约接入；带 Origin 的请求必须与显式配置的 `PI_SERVER_ORIGIN` 完全一致，默认全部拒绝。不提供 CORS 响应头或代理，浏览器宿主需自行桥接。
 
 | 方法和路径 | 请求 | 响应 |
 | --- | --- | --- |

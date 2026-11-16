@@ -1,4 +1,4 @@
-import type { ImagePart } from "@pie/runtime/protocol";
+import { type ImagePart, MAX_USER_INPUT_TEXT_CHARS } from "@pie/runtime/protocol";
 import { useEffect, useRef, useState } from "react";
 import { Icon } from "./icons.tsx";
 import { store, stored } from "./storage.ts";
@@ -165,7 +165,7 @@ export function Composer({
 								: "给 Pie 发消息"
 					}
 					value={draft.text}
-					maxLength={16000}
+					maxLength={MAX_USER_INPUT_TEXT_CHARS}
 					disabled={pending}
 					rows={1}
 					title="Enter 发送，Shift + Enter 换行"

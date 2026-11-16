@@ -10,15 +10,16 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
-import type {
-	Assistant,
-	MaterializedSessionEvent,
-	ModelCatalog,
-	ProviderCatalog,
-	SessionEvent,
-	SessionHistoryPage,
-	SessionSnapshot,
-	SessionSummary,
+import {
+	type Assistant,
+	MAX_USER_INPUT_TEXT_CHARS,
+	type MaterializedSessionEvent,
+	type ModelCatalog,
+	type ProviderCatalog,
+	type SessionEvent,
+	type SessionHistoryPage,
+	type SessionSnapshot,
+	type SessionSummary,
 } from "@pie/runtime/protocol";
 import { createCoreServer } from "../src/server.ts";
 import { createSessionEventReader } from "./event-client.ts";
@@ -1414,7 +1415,10 @@ test("local service rejects foreign origins, malformed input, unavailable models
 	assert.equal((await core.post("/sessions", { mode: "unknown" })).status, 400);
 	const session = (await (await core.post("/sessions", {})).json()) as SessionSnapshot;
 	assert.equal((await core.post(`/sessions/${session.id}/turns`, { text: " " })).status, 400);
-	assert.equal((await core.post(`/sessions/${session.id}/turns`, { text: "x".repeat(16001) })).status, 400);
+	const oversizedResponse = await core.post(`/sessions/${session.id}/turns`, {
+		text: "x".repeat(MAX_USER_INPUT_TEXT_CHARS + 1),
+	});
+	assert.equal(oversizedResponse.status, 400, await oversizedResponse.text());
 	assert.equal(
 		(
 			await core.post(`/sessions/${session.id}/turns`, {
@@ -1424,6 +1428,7 @@ test("local service rejects foreign origins, malformed input, unavailable models
 		).status,
 		400,
 	);
+	assert.equal((await core.post(`/sessions/${session.id}/turns`, { text: "x".repeat(16001) })).status, 202);
 	const secured = await start({ PI_SERVER_TOKEN: "test-only-token" });
 	t.after(() => secured.close());
 	assert.equal((await fetch(`${secured.base}/health`)).status, 401);

@@ -234,7 +234,7 @@ function trackedAgents(onCall: (value: string) => void | Promise<void> = () => {
 	const current = new Map<string, WeakRef<ReturnType<typeof factory.create>>>();
 	const messages: WeakRef<AgentMessage>[] = [];
 	const configurations: WeakRef<Parameters<typeof factory.create>[2]>[] = [];
-	const native = new Map<string, NonNullable<Parameters<typeof factory.create>[9]>>();
+	const native = new Map<string, NonNullable<Parameters<typeof factory.create>[8]>>();
 	return {
 		created,
 		current,
@@ -248,7 +248,7 @@ function trackedAgents(onCall: (value: string) => void | Promise<void> = () => {
 				configurations.push(new WeakRef(args[2]));
 				created.push(new WeakRef(agent));
 				current.set(args[1], created[created.length - 1]);
-				if (args[9]) native.set(args[1], args[9]);
+				if (args[8]) native.set(args[1], args[8]);
 				agent.subscribe((event) => {
 					if (event.type === "message_end") messages.push(new WeakRef(event.message));
 				});
@@ -461,18 +461,6 @@ test("close waits for a cold waitForTurn snapshot before closing storage", async
 	assert.equal(memory.closes, 1);
 });
 
-const delegatingDefinitions: HostRuntimeDefinition[] = [
-	{
-		...definition,
-		runtime: {
-			...definition.runtime,
-			permissions: { "*": "allow" },
-			subagents: [{ id: "worker", name: "Worker", description: "SDK tasks", assistantId: "worker-assistant" }],
-		},
-	},
-	{ ...definition, assistantId: "worker-assistant" },
-];
-
 test("per-turn availability blocks historical deferred tools, isolates sessions and restores the next turn", async (context) => {
 	const memory = memoryStore();
 	const calls: string[] = [];
@@ -522,35 +510,6 @@ test("per-turn availability blocks historical deferred tools, isolates sessions 
 	});
 	await runtime.waitForTurn(restricted.id);
 	assert.deepEqual(calls, ["isolated", "restored", "restored"]);
-});
-
-test("availability is inherited by new and continued subagents without retaining an earlier turn's denial", async (context) => {
-	const memory = memoryStore();
-	const calls: string[] = [];
-	const runtime = await createRuntime({
-		store: memory.store,
-		agents: agents("unused", (value) => {
-			calls.push(value);
-		}),
-		hostRuntimes: delegatingDefinitions,
-	});
-	context.after(() => runtime.close());
-	const parent = await runtime.createSession({ assistantId: definition.assistantId });
-	let childId: string | undefined;
-	for (const enabled of [false, true, false]) {
-		await runtime.submitTurn(parent.id, {
-			text: `调用工具 task ${JSON.stringify({ description: "Availability", prompt: '调用工具 sdk_echo {"text":"child"}', subagent_type: "worker", task_id: childId })}`,
-			toolAvailability: { sdk_echo: enabled },
-		});
-		await runtime.waitForTurn(parent.id);
-		const children = (await runtime.listSessions({ includeSubagents: true })).sessions.filter(
-			(session) => session.kind === "subagent",
-		);
-		assert.equal(children.length, 1);
-		childId = children[0].id;
-		assert.deepEqual(memory.sessions.get(childId)?.runtime?.toolAvailability, { sdk_echo: enabled });
-	}
-	assert.deepEqual(calls, ["child"]);
 });
 
 test("availability survives checkpoint resume and rejects malformed maps before admission", async (context) => {
@@ -1120,9 +1079,9 @@ test(
 		const create = factory.create;
 		let held = false;
 		factory.create = (...args) => {
-			const compaction = args[8];
+			const compaction = args[7];
 			assert(compaction);
-			args[8] = {
+			args[7] = {
 				...compaction,
 				async update(...updateArgs) {
 					await compaction.update(...updateArgs);
@@ -2172,115 +2131,6 @@ test("settlement rejects submissions until readiness and background notification
 	assert.equal(users.length, 4);
 	assert.equal(users.filter((node) => JSON.stringify(node.message).includes("background-one")).length, 1);
 	assert.equal(users.filter((node) => JSON.stringify(node.message).includes("background-two")).length, 1);
-	if (global.gc) await assertCollected([...observed.created, ...observed.messages]);
-});
-
-test("foreground Subagents return their output before release and continue from durable history", async (context) => {
-	const memory = memoryStore();
-	const calls: string[] = [];
-	const observed = trackedAgents((value) => {
-		calls.push(value);
-	});
-	const runtime = await createRuntime({
-		store: memory.store,
-		agents: observed.factory,
-		sessionRetention: "release-after-turn",
-	});
-	context.after(() => runtime.close());
-	await runtime.registerHostRuntimes(delegatingDefinitions);
-	const parent = await runtime.createSession({ assistantId: definition.assistantId });
-	let childId: string | undefined;
-	for (let index = 0; index < 2; index++) {
-		await runtime.submitTurn(parent.id, {
-			text: `调用工具 task ${JSON.stringify({
-				description: "SDK task",
-				prompt: `调用工具 sdk_echo {"text":"part-${index}"}`,
-				subagent_type: "worker",
-				task_id: childId,
-			})}`,
-		});
-		const settled = await runtime.waitForTurn(parent.id);
-		assert.equal(settled.turn?.status, "completed");
-		const children = (await runtime.listSessions({ includeSubagents: true })).sessions.filter(
-			(session) => session.kind === "subagent",
-		);
-		assert.equal(children.length, 1);
-		childId = children[0].id;
-		const results = settled.messages.filter(
-			(message) => message.role === "toolResult" && message.toolName === "task",
-		);
-		assert(JSON.stringify(results.at(-1)).includes(`part-${index}`));
-		assert.equal(memory.trees.get(childId)!.nodes.length, (index + 1) * 4 + 1);
-		const journal = await runtime.readToolExecutions(parent.id, { turnId: settled.turn!.id, limit: 200 });
-		assert.deepEqual(
-			journal.entries.map((entry) => [entry.mode, entry.phase]),
-			[
-				["delegated", "started"],
-				["delegated", "completed"],
-			],
-		);
-		if (global.gc) await assertCollected([...observed.created, ...observed.messages]);
-	}
-	assert.deepEqual(calls, ["part-0", "part-1"]);
-});
-
-test("background Subagents pin active work and deliver completion before their parent releases", async (context) => {
-	const memory = memoryStore();
-	let resume = () => {};
-	const gate = new Promise<void>((resolve) => {
-		resume = resolve;
-	});
-	const calls: string[] = [];
-	const observed = trackedAgents(async (value) => {
-		calls.push(value);
-		await gate;
-	});
-	const runtime = await createRuntime({
-		store: memory.store,
-		agents: observed.factory,
-		sessionRetention: "release-after-turn",
-	});
-	context.after(() => {
-		resume();
-		return runtime.close();
-	});
-	await runtime.registerHostRuntimes(delegatingDefinitions);
-	const parent = await runtime.createSession({ assistantId: definition.assistantId });
-	let settledCount = 0;
-	let notified = () => {};
-	const notification = new Promise<void>((resolve) => {
-		notified = resolve;
-	});
-	runtime.subscribeAll((packet) => {
-		if (packet.sessionId === parent.id && packet.type === "turn.settled" && ++settledCount === 2) notified();
-	});
-	await runtime.submitTurn(parent.id, {
-		text: `调用工具 task ${JSON.stringify({
-			description: "Background SDK task",
-			prompt: '调用工具 sdk_echo {"text":"child-output"}',
-			subagent_type: "worker",
-			background: true,
-		})}`,
-	});
-	assert.equal((await runtime.waitForTurn(parent.id)).turn?.status, "completed");
-	const child = (await runtime.listSessions({ includeSubagents: true })).sessions.find(
-		(session) => session.kind === "subagent",
-	);
-	assert(child);
-	assert.equal(child.turn?.status, "running");
-	await delay(0);
-	global.gc?.();
-	assert(observed.current.get(parent.id)?.deref(), "Active background work must pin its parent");
-	assert(observed.current.get(child.id)?.deref(), "The running child must not unload");
-	resume();
-	await notification;
-	await runtime.waitForTurn(parent.id);
-	const notifications = memory.trees
-		.get(parent.id)!
-		.nodes.filter((node) => node.message.role === "user" && JSON.stringify(node.message).includes("<task_result>"));
-	assert.equal(notifications.length, 1);
-	assert(JSON.stringify(notifications[0].message).includes("child-output"));
-	assert.deepEqual(calls, ["child-output"]);
 	if (global.gc) await assertCollected([...observed.created, ...observed.messages]);
 });
 

@@ -26,7 +26,7 @@ function call(name: string, args: Record<string, unknown>) {
 	return fauxAssistantMessage([fauxToolCall(name, args)], { stopReason: "toolUse" });
 }
 
-async function fixture(context: TestContext, workerCompletes = false) {
+async function fixture(context: TestContext) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-background-cancel-"));
 	const script = join(directory, "work.cjs");
 	await writeFile(
@@ -38,7 +38,6 @@ async function fixture(context: TestContext, workerCompletes = false) {
 	const plans = new Map<string, AssistantMessage[]>();
 	const waiting = new Set<string>();
 	const requests = new Map<string, number>();
-	const workerPid = join(directory, "worker.pid");
 	let jobs: BackgroundJobs | undefined;
 	const factory = createAgentFactory({ PI_DATA_DIR: directory, PI_TOOL_STREAM_TRACE: "0" });
 	const store = createSqliteRuntimeStore(openStore({ PI_DATA_DIR: directory }));
@@ -49,13 +48,7 @@ async function fixture(context: TestContext, workerCompletes = false) {
 			create(...args: Parameters<typeof factory.create>) {
 				const agent = factory.create(...args);
 				const id = args[1];
-				jobs = args[9]?.jobs;
-				if (args[2].systemPrompt === "worker") {
-					plans.set(id, [
-						call("bash", { command: command(workerPid), yieldMs: 0 }),
-						...(workerCompletes ? [fauxAssistantMessage("done")] : []),
-					]);
-				}
+				jobs = args[8]?.jobs;
 				agent.streamFunction = (_model, _context, options) => {
 					requests.set(id, (requests.get(id) ?? 0) + 1);
 					const stream = createAssistantMessageEventStream();
@@ -81,24 +74,13 @@ async function fixture(context: TestContext, workerCompletes = false) {
 		},
 		hostRuntimes: [
 			{
-				assistantId: "worker",
-				assistantRevision: "1",
-				runtime: {
-					systemPrompt: "worker",
-					toolIds: ["bash"],
-					skills: [],
-					subagents: [],
-					permissions: { "*": "allow" },
-				},
-			},
-			{
 				assistantId: "parent",
 				assistantRevision: "1",
 				runtime: {
 					systemPrompt: "parent",
 					toolIds: ["bash"],
 					skills: [],
-					subagents: [{ id: "worker", name: "Worker", description: "Run work", assistantId: "worker" }],
+					subagents: [],
 					permissions: { "*": "allow" },
 				},
 			},
@@ -118,7 +100,7 @@ async function fixture(context: TestContext, workerCompletes = false) {
 		);
 		return Number(await readFile(path, "utf8"));
 	}
-	return { runtime, store, directory, command, plans, waiting, requests, workerPid, pid };
+	return { runtime, directory, command, plans, waiting, requests, pid };
 }
 
 test(
@@ -187,45 +169,6 @@ test(
 	},
 );
 
-for (const workerCompletes of [false, true]) {
-	test(
-		`parent cancellation stops child background work after its Task ${workerCompletes ? "completes" : "detaches"}`,
-		{ timeout: 15000 },
-		async (context) => {
-			const host = await fixture(context, workerCompletes);
-			const session = await host.runtime.createSession({ assistantId: "parent", workspacePath: host.directory });
-			host.plans.set(session.id, [
-				call("task", {
-					description: "Child work",
-					prompt: "start",
-					subagent_type: "worker",
-					background: !workerCompletes,
-				}),
-			]);
-			const turn = await host.runtime.submitTurn(session.id, { text: "delegate" });
-			await until(async () => host.waiting.has(session.id));
-			const child = (await host.runtime.listSessions({ includeSubagents: true })).sessions.find(
-				(entry) => entry.kind === "subagent",
-			);
-			assert(child);
-			if (workerCompletes) assert.equal((await host.runtime.waitForTurn(child.id)).turn?.status, "completed");
-			else await until(async () => host.waiting.has(child.id));
-			const processId = await host.pid(host.workerPid);
-			assert.equal((await host.runtime.listBackgroundJobs(child.id)).jobs[0].status, "running");
-			await host.runtime.cancelTurn(session.id, { turnId: turn.turnId });
-			assert.equal((await host.runtime.waitForTurn(session.id)).turn?.status, "cancelled");
-			assert.equal((await host.runtime.listBackgroundJobs(child.id)).jobs[0].status, "cancelled");
-			assert.equal(
-				(await host.runtime.getSession(child.id)).turn?.status,
-				workerCompletes ? "completed" : "cancelled",
-			);
-			assert.throws(() => process.kill(processId, 0), { code: "ESRCH" });
-			assert.equal((await host.runtime.getSession(session.id)).turn?.id, turn.turnId);
-			assert.equal(host.requests.get(session.id), 2);
-		},
-	);
-}
-
 test(
 	"host stop cleans up a completed Turn's shell without cancelling another session or waking the model",
 	{ timeout: 15000 },
@@ -261,80 +204,3 @@ test(
 		assert.equal(host.requests.get(session.id), 2);
 	},
 );
-
-test("host stop of a detached Task waits for its child Turn and shell cleanup", { timeout: 15000 }, async (context) => {
-	const host = await fixture(context);
-	const session = await host.runtime.createSession({ assistantId: "parent", workspacePath: host.directory });
-	host.plans.set(session.id, [
-		call("task", { description: "Detached child", prompt: "start", subagent_type: "worker", background: true }),
-		fauxAssistantMessage("done"),
-	]);
-	await host.runtime.submitTurn(session.id, { text: "delegate" });
-	assert.equal((await host.runtime.waitForTurn(session.id)).turn?.status, "completed");
-	const child = (await host.runtime.listSessions({ includeSubagents: true })).sessions.find(
-		(entry) => entry.kind === "subagent",
-	);
-	assert(child);
-	await until(async () => host.waiting.has(child.id));
-	const processId = await host.pid(host.workerPid);
-	const observed = await host.runtime.listBackgroundJobs(session.id);
-	const receipt = await host.runtime.cancelBackgroundJob(session.id, {
-		instanceId: observed.instanceId,
-		jobId: child.id,
-		executionId: observed.jobs.find((job) => job.id === child.id)!.executionId,
-	});
-	assert.equal(receipt.job.status, "cancelled");
-	assert.equal((await host.runtime.getSession(child.id)).turn?.status, "cancelled");
-	assert.equal((await host.runtime.listBackgroundJobs(child.id)).jobs[0].status, "cancelled");
-	assert.throws(() => process.kill(processId, 0), { code: "ESRCH" });
-	assert.equal((await host.runtime.getSession(session.id)).turn?.status, "completed");
-	assert.equal(host.requests.get(session.id), 2);
-});
-
-test("cancellation racing with child admission never starts the child's work", { timeout: 15000 }, async (context) => {
-	const host = await fixture(context);
-	let entered = () => {};
-	let release = () => {};
-	const saving = new Promise<void>((resolve) => {
-		entered = resolve;
-	});
-	const blocked = new Promise<void>((resolve) => {
-		release = resolve;
-	});
-	context.after(release);
-	const save = host.store.saveSession;
-	let pending = true;
-	context.mock.method(host.store, "saveSession", async (...args: Parameters<typeof save>) => {
-		if (pending && args[0].kind === "subagent") {
-			pending = false;
-			entered();
-			await blocked;
-		}
-		return save(...args);
-	});
-	const session = await host.runtime.createSession({ assistantId: "parent", workspacePath: host.directory });
-	host.plans.set(session.id, [
-		call("task", { description: "Late child", prompt: "start", subagent_type: "worker", background: true }),
-	]);
-	const turn = await host.runtime.submitTurn(session.id, { text: "delegate" });
-	try {
-		await saving;
-		await host.runtime.cancelTurn(session.id, { turnId: turn.turnId });
-		assert.equal((await host.runtime.waitForTurn(session.id)).turn?.status, "cancelled");
-	} finally {
-		release();
-	}
-	await until(async () =>
-		(await host.runtime.listSessions({ includeSubagents: true })).sessions.some(
-			(entry) => entry.kind === "subagent" && entry.turn?.status === "cancelled",
-		),
-	);
-	const child = (await host.runtime.listSessions({ includeSubagents: true })).sessions.find(
-		(entry) => entry.kind === "subagent",
-	);
-	assert(child);
-	assert.equal(host.requests.get(child.id) ?? 0, 0);
-	assert.deepEqual((await host.runtime.listBackgroundJobs(child.id)).jobs, []);
-	await assert.rejects(readFile(host.workerPid), { code: "ENOENT" });
-	assert.equal((await host.runtime.getSession(session.id)).turn?.id, turn.turnId);
-});

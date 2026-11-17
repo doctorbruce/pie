@@ -1,10 +1,4 @@
-import {
-	Agent,
-	type AgentMessage,
-	type AgentTool,
-	type AgentToolResult,
-	type StreamFn,
-} from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import {
 	contentText,
 	createModels,
@@ -31,13 +25,12 @@ import type {
 	ModelSelection,
 	RuntimeConfig,
 	ServerInfo,
-	SubagentBinding,
 	ToolActivity,
 } from "./protocol.ts";
 import { createSkillSearch, skillDescription } from "./skills.ts";
 import { withToolProgress } from "./tool-progress.ts";
 import { toolRepetitionReminder } from "./tool-repetition.ts";
-import { createToolSearch } from "./tool-search.ts";
+import { createToolSearch, discoveredToolNames } from "./tool-search.ts";
 import { applyPermissionPolicy, parseToolIds, ToolConfigError, type ToolRuntime } from "./tools.ts";
 import type { WorkerSessionCommunication } from "./worker-communication.ts";
 
@@ -128,22 +121,6 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			ask: (request: Omit<InteractionRequest, "id">, signal?: AbortSignal) => Promise<void> = async () => {
 				throw new Error("当前运行时不支持工具交互");
 			},
-			delegate?: (
-				toolCallId: string,
-				binding: SubagentBinding,
-				description: string,
-				prompt: string,
-				options: { taskId?: string; background?: boolean },
-				signal?: AbortSignal,
-			) => Promise<
-				AgentToolResult<{
-					childSessionId: string;
-					targetAssistantId: string;
-					subagentType: string;
-					background?: boolean;
-					jobId?: string;
-				}>
-			>,
 			compaction?: {
 				current?: ContextCompaction;
 				update: (next: ContextCompaction, messages: AgentMessage[], projected: AgentMessage[]) => unknown;
@@ -174,67 +151,6 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			if (tools.some((tool) => !toolIds.includes(tool.name)))
 				throw new ToolConfigError("工具实现未在 catalog 中注册");
 			let skillTools = options.skills(runtime, record);
-			const taskParameters = Type.Object(
-				{
-					description: Type.String({ description: "Short description of the delegated task" }),
-					prompt: Type.String({ description: "Complete instructions for the target assistant" }),
-					subagent_type: Type.String({ description: "Exact subagent ID from the available catalog" }),
-					task_id: Type.Optional(
-						Type.String({ description: "Existing child session ID to continue instead of creating a new task" }),
-					),
-					background: Type.Optional(
-						Type.Boolean({ description: "Run asynchronously and notify this session when it finishes" }),
-					),
-				},
-				{ additionalProperties: false },
-			);
-			const taskTool:
-				| AgentTool<
-						typeof taskParameters,
-						{
-							childSessionId: string;
-							targetAssistantId: string;
-							subagentType: string;
-							background?: boolean;
-							jobId?: string;
-						}
-				  >
-				| undefined =
-				!communication && delegate && runtime.subagents.length
-					? {
-							name: "task",
-							label: "调用助手",
-							description: `Delegate only when the user explicitly requests another assistant or the task clearly matches an available subagent's description. Pass task_id to continue an earlier child session. background=true returns immediately and completion is injected automatically. Available subagents: ${JSON.stringify(runtime.subagents.map(({ id, name, description }) => ({ id, name, description })))}`,
-							parameters: taskParameters,
-							executionMode: "sequential" as const,
-							async execute(toolCallId, args, signal) {
-								const binding = runtime.subagents.find((candidate) => candidate.id === args.subagent_type);
-								if (!binding) throw new Error(`不可调用的 Subagent：${args.subagent_type}`);
-								await requestInteraction(
-									{
-										type: "confirmation",
-										title: "调用助手",
-										message: `${args.description}\n\n${args.prompt}`,
-										metadata: {
-											permission: "task",
-											subagentType: args.subagent_type,
-											taskId: args.task_id,
-											background: args.background === true,
-										},
-									},
-									signal,
-								);
-								return delegate(
-									toolCallId,
-									binding,
-									args.description,
-									args.prompt,
-									{ taskId: args.task_id, background: args.background },
-									signal,
-								);
-							},
-						}
-					: undefined;
 			const communicationTools: AgentTool[] = [];
 			if (communication) {
 				const targets = JSON.stringify(
@@ -396,7 +312,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 			const modelHeaders = mode === "real" && realModel ? headers?.(realModel) : undefined;
 			const selectedNativeTools = new Set(runtime.toolIds);
 			const toolAvailable = (tool: Pick<AgentTool, "name">) => runtime.toolAvailability?.[tool.name] !== false;
-			if (taskTool || selectedNativeTools.has("bash")) {
+			if (selectedNativeTools.has("bash")) {
 				selectedNativeTools.add("job_output");
 				selectedNativeTools.add("job_kill");
 			}
@@ -404,7 +320,6 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 				...tools.filter((tool) => selectedNativeTools.has(tool.name)),
 				...skillTools.tools,
 				...(runtime.skills.length ? [createSkillSearch(runtime)] : []),
-				...(taskTool ? [taskTool] : []),
 				...communicationTools,
 			].filter(toolAvailable);
 			const deferredToolNames = [
@@ -418,6 +333,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 						? resolveCompactionSettings({ compaction: runtime.compaction }, realModel)
 						: (options.compactionSettings?.(realModel) ?? resolveCompactionSettings({}, realModel))
 					: undefined;
+			let latestCompaction = compaction?.current;
 			const compactContext =
 				mode === "real" && realModel && compaction
 					? createCompactionTransform({
@@ -427,14 +343,21 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 							supportsImages: realModel.input.includes("image"),
 							imageBudgetBytes: runtime.maxHistoryImageBytes,
 							onCompacted: async (next, source, projected) => {
-								next.loadedToolNames = toolSearch.loadedToolNames;
+								next.loadedToolNames = [
+									...new Set([
+										...(latestCompaction?.loadedToolNames ?? []),
+										...toolSearch.loadedToolNames,
+										...discoveredToolNames(source),
+									]),
+								];
 								await compaction.update(next, source, projected);
+								latestCompaction = next;
 								sessionAgent.replaceMessages(projected);
 								source.length = 0;
 								for (const message of projected) source.push(message);
 							},
 							report: compaction.report,
-							summarize: async ({ prompt, maxTokens, images }, signal) => {
+							summarize: async ({ prompt, maxTokens, images, reason }, signal) => {
 								const response = await retryAssistantCall(
 									() =>
 										models.completeSimple(
@@ -467,6 +390,7 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 										onRetryScheduled: async (attempt, maxAttempts, delayMs, error) => {
 											await compaction.report?.({
 												type: "compaction.retry",
+												reason,
 												attempt,
 												maxAttempts,
 												delayMs,
@@ -618,10 +542,22 @@ export function createAgentFactory(options: AgentFactoryOptions) {
 					mcpLease?.instructions,
 				);
 				toolSearch.restoreLoaded(loadedToolNames);
+				toolSearch.restoreLoaded(latestCompaction?.loadedToolNames);
 				toolSearch.restore(sessionAgent.state.messages);
 				sessionAgent.state.tools = toolSearch.tools.filter(toolAvailable).map(withToolProgress);
 			}
 			return Object.assign(sessionAgent, {
+				async compact(signal?: AbortSignal) {
+					if (!compactContext) throw new ModelSettingsError("手动压缩需要真实模型和会话持久化");
+					const previous = latestCompaction;
+					await compactContext([...sessionAgent.state.messages], signal, {
+						manual: true,
+						systemPrompt: sessionAgent.state.systemPrompt,
+						tools: sessionAgent.state.tools,
+					});
+					const compacted = latestCompaction !== previous;
+					return { compacted, ...(compacted ? { compaction: latestCompaction } : {}) };
+				},
 				refreshSkills(skills: RuntimeConfig["skills"], systemPrompt: string, capabilityCatalog?: string) {
 					runtime.skills = structuredClone(skills);
 					runtime.capabilityCatalog = capabilityCatalog;

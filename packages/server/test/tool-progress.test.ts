@@ -41,7 +41,7 @@ async function notificationRuntime(context: TestContext) {
 	const directory = await mkdtemp(join(tmpdir(), "pie-job-notifications-"));
 	const factory = createAgentFactory({ PI_DATA_DIR: directory });
 	const first = createAssistantMessageEventStream();
-	let native!: NonNullable<Parameters<typeof factory.create>[9]>;
+	let native!: NonNullable<Parameters<typeof factory.create>[8]>;
 	let agent!: ReturnType<typeof factory.create>;
 	let requests = 0;
 	const runtime = await createRuntime({
@@ -49,7 +49,7 @@ async function notificationRuntime(context: TestContext) {
 		agents: {
 			...factory,
 			create(...args: Parameters<typeof factory.create>) {
-				native = args[9]!;
+				native = args[8]!;
 				agent = factory.create(...args);
 				agent.streamFunction = () => {
 					if (++requests === 1) return first;
@@ -535,7 +535,6 @@ test("factory job heartbeats reach Agent events but never model requests or fina
 		{ systemPrompt: "", toolIds: ["bash"], skills: [], subagents: [] },
 		undefined,
 		[],
-		undefined,
 		undefined,
 		undefined,
 		undefined,

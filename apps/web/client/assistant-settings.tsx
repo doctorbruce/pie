@@ -151,7 +151,7 @@ export function AssistantSettings({
 					))}
 					{!plugins.length && <p className="settings-note">暂无插件，先从主界面的「插件」导入。</p>}
 					<p className="settings-note">
-						可调用助手（自动提供 task）。每次调用创建独立子会话，并使用目标助手的最新配置。
+						可协作助手（通过 communicate 联系）。各助手使用独立会话，按工作关联收发请求和结果。
 					</p>
 					{assistants
 						.filter((candidate) => candidate.id !== assistant?.id)

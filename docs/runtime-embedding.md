@@ -14,7 +14,7 @@
 
 | Pie 维护方 | 服务端维护方 |
 | --- | --- |
-| 会话、消息树、Turn、压缩、Subagent 与运行事件 | `agent-service` 的认证、产品会话绑定、请求增强与事件协议转换 |
+| 会话、消息树、Turn、压缩、助手通信与运行事件 | `agent-service` 的认证、产品会话绑定、请求增强与事件协议转换 |
 | `RuntimeStore` 契约与 SQLite 适配 | 服务数据库事务、作用域过滤与启动恢复接入 |
 | `AgentFactoryOptions` 的能力注入与工具契约 | tools-sdk 适配、租户模型配置与凭据解析、文件 / Skill 资源部署 |
 | 不同宿主共用的回归测试 | 真实数据库、SDK / Worker、权限与故障场景的云端验收 |
@@ -29,7 +29,7 @@
 
 ## 可选 Worker 内部调度
 
-`WorkerScheduler` 复用 `createRuntime` 的 Session/Turn API，另注入 `WorkerCoordinationStore`；协调模块不拥有或关闭共享 Runtime。Local HTTP 宿主已自动装配，嵌入宿主可按需启用：
+所有根 Session 使用所属 Assistant 的 Worker 身份；不存在普通/Worker 会话模式开关。`WorkerScheduler` 复用 `createRuntime` 的 Session/Turn API，另注入 `WorkerCoordinationStore`；协调模块不拥有或关闭共享 Runtime。Local HTTP 宿主已自动装配，嵌入宿主通过以下方式提供通信服务；未提供时不能使用助手通信，也不会获得 `task` 回退：
 
 ```ts
 import { createRuntime, WorkerScheduler } from "@pie/runtime";
@@ -45,7 +45,13 @@ const runtime = await createRuntime({
     inputs: (...args) => workers.inputs(...args),
   },
 });
-workers = new WorkerScheduler({ runtime, store: coordinationStore });
+workers = new WorkerScheduler({
+  runtime,
+  store: {
+    ...coordinationStore,
+    readSession: (id) => runtimeStore.readSession(id),
+  },
+});
 await runtime.registerHostRuntimes(definitions);
 await workers.syncHostRuntimes(definitions);
 const received = await workers.enqueueWorkerMessage({
@@ -65,9 +71,11 @@ const delivery = await workers.getWorkerDelivery(received.delivery.deliveryId);
 
 同一 `assistantId` 对应一个逻辑 Worker，注册刷新只更新配置关联，已有 Session 的 Turn 继续遵循 Runtime 配置边界。Local 助手的创建、更新、删除会同步 Worker 的创建、配置刷新和删除；Local Runtime 启动时也会为已保存助手补齐 Worker。这个 Worker 记录是长期身份，不代表进程或 Session；具体工作仍在首次收件时懒创建或复用 Worker Session。新工作使用目标 Worker 的默认选择或消息中宿主明确提供的目录/模型，`productBinding` 字符串或对象的 `astronSessionId` 写入 Session 创建身份并随导出保留；不继承来源 Session 的历史、权限或目录。补充传 `workId`（唯一关联）、`targetSessionId` 或合法 `replyTo`；关联不唯一保持 pending，不猜测最近会话。HTTP 入口的来源身份仍仅由可信宿主填写，不能把此入口直接作为模型工具。
 
-启用模型通信时，在 `createRuntime` 注入可选 `workers: WorkerCommunication`；Local 已自动装配。上述闭包将调用转给稍后创建的 `WorkerScheduler`，存储需同时实现 `WorkerCommunicationStore`、`SessionWriteOptions.workerInputs` 和 `SessionWriteOptions.workerWait` 的原子提交。Worker 根 Session 持久保存 `workerId === assistantId`；这些 Session 的助手协作工具为 `communicate`，不提供 `task`。普通会话未启用此标记，历史兼容路径保持原状。
+嵌入宿主在 `createRuntime` 注入 `workers: WorkerCommunication`；Local 已自动装配。上述闭包将调用转给稍后创建的 `WorkerScheduler`，存储需同时实现 `WorkerCommunicationStore`、`SessionWriteOptions.workerInputs` 和 `SessionWriteOptions.workerWait` 的原子提交。每个 Assistant 是同 ID 的 Worker，根 Session 使用该身份，助手协作统一为 `communicate`。`task` 及父子派发已移除，旧工具记录、子会话和账本仍可读取。
 
-Local 的 `createSession({ assistantId, workerId: assistantId, ... })` 经调度器创建空 Worker Session，随后补齐确定性的 WorkItem 和 Assignment；不提交 Turn、不启动模型。共享 Runtime 本身不隐式建立协调关联，嵌入宿主可调用 `workers.createWorkerSession(input)`，再用 Runtime 查询 Session。Session 创建身份、WorkItem 和 Assignment 分步保存；同一 `creationKey`、相同参数重试会复用原 Session 并补齐已中断的关联步骤，不承诺跨步骤事务。省略 `creationKey` 的重试仍可能创建另一个 Session。
+`createSession({ assistantId, ... })` 创建空根 Session，不提交 Turn 或启动模型，也不为普通聊天预建工作项。通信时按需为会话建立 WorkItem 与 Assignment；调度器显式创建工作会话时仍可提前建立这些关联。Session 创建身份、WorkItem 和 Assignment 分步保存，重试复用稳定创建键与关联身份，不承诺跨步骤事务。省略 `creationKey` 的创建重试仍可能产生另一个 Session。
+
+懒关联要求调度存储提供与 Runtime 相同授权域的 `readSession`；存储分离时须如上透传，缺少该方法时返回 405。`createAssignment(assignment, { requireSession: true })` 必须在关联写入的同一事务中确认 Session 仍存在、属于该 Worker 且为根会话，不能忽略第二参数或只在写入前异步检查。删除或停止的关联不能被重试复活。懒关联不固定会话模型，后续来信仍使用 Session 当前的模型选择。
 
 `communicate({ to, content, kind?, session_id?, reply_to?, new_session?, wait? })` 的 to 是获准助手的 assistantId。宿主可独立注册 `runtime.workerTargets: [{ assistantId, name, description }]`，不必提供 legacy `subagents` 绑定；仅省略 `workerTargets` 时回退到 `subagents`，显式空数组禁止主动目标。注册时拒绝重复或不在同一注册表的目标。发送时取本 Turn 已装配目录与最新授权的交集：撤销后的目标不能继续发送，新增目标需到下一 Turn 配置应用后才进入目录。来源 Worker/Session/Turn 和稳定工具调用键由 Runtime 注入。保存后立即发布发送回执，request/question 默认继续等待；`wait: false` 仅发送，reply/result/progress 默认仅发送。有效 reply_to 按双方 Worker、Session 与原消息因果链返回准确的来源 Session，不要求反向主动授权。跨工作会话的合法通信不合并工作归属。
 
@@ -93,7 +101,7 @@ Runtime 注册表提交与 Worker 配置同步是两个保存边界；后者失�
 
 调度使用 `waitForTurn(sessionId, { onWait, onSettled })` 的可选同步回调：分别取得等待起点及同一 Turn 结算时的独立副本，完整快照仍可能在异步读取后观察到后续 Turn。嵌入宿主若自行适配这三个 Runtime 方法，必须保留该观察语义。取消截止据准确结算切面固定；取消前排队的补充不能复活，取消后的显式新请求可执行。受理 Turn 在等待登记前已被其他 Turn 替换时，保留 accepted 并明确要求对账。
 
-`WorkerCommunicationStore.recordWorkerTurnCutoff(sessionId, turnId, workerId, sequence)` 按 Session/Turn 固定截止点，返回该 Session 的累计截止序号；`readWorkerTurnCutoff(sessionId)` 读取它。持久适配器须在保存 cancelled/failed/interrupted 终态（含启动恢复）时同事务冻结对应 Worker 的当前收件序号，并在 `workerInputs` 原子接纳时拒绝截止前输入；重复保存或取消重试不能扩大截止点。只有持久 interrupted → 同 Turn running 的显式续跑才重新武装下一终态的冻结，保留原截止点；续跑后再次取消覆盖其间排队输入。SQLite 已实现，普通未启用 Worker 的存储契约不变。
+`WorkerCommunicationStore.recordWorkerTurnCutoff(sessionId, turnId, workerId, sequence)` 按 Session/Turn 固定截止点，返回该 Session 的累计截止序号；`readWorkerTurnCutoff(sessionId)` 读取它。通信存储须在保存 cancelled/failed/interrupted 终态（含启动恢复）时同事务冻结对应 Worker 的当前收件序号，并在 `workerInputs` 原子接纳时拒绝截止前输入；重复保存或取消重试不能扩大截止点。只有持久 interrupted → 同 Turn running 的显式续跑才重新武装下一终态的冻结，保留原截止点；续跑后再次取消覆盖其间排队输入。SQLite 已实现；嵌入宿主提供通信能力时须保持这一原子边界。
 
 模型外发消息须在保存前核对来源 Worker、Session 关联及其工作项尚未停止，合法因果回信同样校验；已保存同键重试仍返回原收据。暂停仅阻止新执行接纳，不阻止已运行 Session 回信。系统生成的明确失败通知不作为模型外发处理。
 
@@ -170,11 +178,11 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 
 `env` 为可选的工厂环境快照，Runtime 不默认读取 `process.env`。`compactionSettings(model)` 可选；省略时仅使用纯计算的预算默认值，不读文件。本地工厂注入文件配置读取实现。
 
-宿主可以在 `AgentRuntimeConfig.compaction` 提供 `{ thresholdTokens }`，空对象表示使用模型预算默认值。参数随 host runtime revision 在下一 Turn 生效，并传入对应的 Subagent；该模式直接使用宿主参数，不读取本地 `settings.json`。未提供该字段的独立运行模式仍使用工厂注入的 `compactionSettings(model)`。阈值必须为正整数，实际压缩预算仍受模型上下文窗口与保留量约束。
+宿主可以在 `AgentRuntimeConfig.compaction` 提供 `{ thresholdTokens }`，空对象表示使用模型预算默认值。参数随 host runtime revision 在下一 Turn 生效，协作目标使用自己的配置；该模式直接使用宿主参数，不读取本地 `settings.json`。未提供该字段的独立运行模式仍使用工厂注入的 `compactionSettings(model)`。阈值必须为正整数，实际压缩预算仍受模型上下文窗口与保留量约束。
 
-`AgentRuntimeConfig.maxHistoryImageBytes` 可选，必须为正安全整数，默认 16 MiB。它控制请求中图片 base64 字符串的编码总量目标，不是完整 HTTP 请求的大小上限；最新真实用户的图片全部保留，可能超过目标。宿主更新配置后随 host runtime revision 在下一 Turn 重建时生效；Subagent 使用目标助手自身的配置。独立本地模式使用同一默认值，本轮没有新增 `settings.json` 或环境变量开关。投影顺序、摘要图片与原始历史保留规则见 [图片上下文](compaction-integration.md#图片上下文)。
+`AgentRuntimeConfig.maxHistoryImageBytes` 可选，必须为正安全整数，默认 16 MiB。它控制请求中图片 base64 字符串的编码总量目标，不是完整 HTTP 请求的大小上限；最新真实用户的图片全部保留，可能超过目标。宿主更新配置后随 host runtime revision 在下一 Turn 重建时生效；协作目标使用自身配置。独立本地模式使用同一默认值，本轮没有新增 `settings.json` 或环境变量开关。投影顺序、摘要图片与原始历史保留规则见 [图片上下文](compaction-integration.md#图片上下文)。
 
-宿主可通过 `AgentRuntimeConfig.allowedDirectories` 提供最多 128 个绝对目录，作为会话工作区之外默认可访问的路径范围。注册时校验并规范化，Agent 工厂通过工具上下文传递；本地文件读写、命令工作目录和参数路径共用此范围，不跳过命令、凭据或业务确认策略。Subagent 使用目标助手自身的目录授权，不继承父助手范围；目录只由宿主配置下发，模型工具参数不能新增授权。云端工具由对应宿主实现相同的授权语义，不自动获得本机文件访问能力。
+宿主可通过 `AgentRuntimeConfig.allowedDirectories` 提供最多 128 个绝对目录，作为会话工作区之外默认可访问的路径范围。注册时校验并规范化，Agent 工厂通过工具上下文传递；本地文件读写、命令工作目录和参数路径共用此范围，不跳过命令、凭据或业务确认策略。协作目标使用自身目录授权，不继承来源助手范围；目录只由宿主配置下发，模型工具参数不能新增授权。云端工具由对应宿主实现相同的授权语义，不自动获得本机文件访问能力。
 
 目前 Skill 绑定仍采用目录字段；对象存储引用、Worker 路径映射和跨环境资源协议尚未实现。这是后续接入工作，不要用虚构路径绕过它。
 
@@ -209,9 +217,9 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 ## 事件、隔离与生命周期
 
 - `submitTurn` / `resumeTurn` 返回 `TurnReceipt`：包含会话、Turn、可选 request ID，以及 `accepted / started / settled`。启动表示已发起本实例的执行，不表示模型完成；用 `turn.settled` 或 `waitForTurn` 读取实际结果。
-- `waitForTurn(sessionId)` 等待调用时取得的本实例 Turn 执行 Promise 并返回完整快照。正常完成不等待后台作业；显式取消则等待本轮所属的本地 Shell/Task 及子任务作业清理。不等待其他 Turn 的作业、后续通知引发的 Turn 或外部持久任务。`turn.settled` 同样只报告当前 Turn；下一轮准入仍以 `execution.actions.submit` 为准。
+- `waitForTurn(sessionId)` 等待调用时取得的本实例 Turn 执行 Promise 并返回完整快照。正常完成不等待后台作业；显式取消则等待本轮所属的本地 Shell 作业清理，不沿通信关系等待或停止对端。不等待其他 Turn 的作业、后续通知引发的 Turn 或外部持久任务。`turn.settled` 同样只报告当前 Turn；下一轮准入仍以 `execution.actions.submit` 为准。
 - 普通模型重试通过 `model.retry` 事件携带 `event: { type: "model.retry", retryId, status, attempt, message, next? }`，`status` 为 `started/completed/failed`；同次模型调用保持稳定 ID，不同模型调用各用新 ID。仅 `started` 带下一次尝试的 Unix 毫秒时间 `next`；终态先于 `turn.settled` 发布。事件归属发布时固定的 `sessionId/turnId/snapshot.turn`，可用 request/canonical 身份区分共用 native Turn 的 Steer；关闭压缩不影响通知。重试状态不替代 Turn 结果，取消等待时重试为 `failed`、Turn 仍为 `cancelled`。
-- `listBackgroundJobs(sessionId)` 返回 `{ instanceId, sessionId, jobs }`，只查会话元信息和进程内作业表，不读历史；Local 同名透传，HTTP 对应 `GET /sessions/:id/jobs`。`jobs` 包含直接拥有的 Shell/Task（含前台等待 task 和近期终态），每项只有身份、类型、标题、状态、起止时间及可选错误；标题/错误分别截至 512/2048 字符，不含输出正文和任意 details。标题可能来自命令，摘要不提供脱敏保证。
+- `listBackgroundJobs(sessionId)` 返回 `{ instanceId, sessionId, jobs }`，只查会话元信息和进程内作业表，不读历史；Local 同名透传，HTTP 对应 `GET /sessions/:id/jobs`。`jobs` 包含直接拥有的本地 Shell 作业及近期终态，不把助手通信登记成内存作业；每项只有身份、类型、标题、状态、起止时间及可选错误。标题/错误分别截至 512/2048 字符，不含输出正文和任意 details。标题可能来自命令，摘要不提供脱敏保证。
 - 作业观察是读取瞬间的事实，不属于会话 revision 投影，不消费结果、不确认通知。它不汇总后代，不查询外部持久执行器，也不是完整作业历史；重启后以新 `instanceId` 观察空表，不能推断旧进程副作用已停止。宿主应区分本轮已结算、直接作业仍运行及业务目标完成，不能把空表当成所有工作完成。父会话删除也会拒绝尚有活跃本地作业的子会话。
 - `TurnInput.canonicalTurnId` 可选，非空且最多 256 字符，原样保存到 Turn、快照、事件和回执。有 canonical 时按当前 native Turn 的原始身份或 `steerAdmissions` 去重，且必须绑定同一原 requestId，否则返回 409；不同 canonical 即使 requestId 相同也作为新轮准入。Steer 保留 native Turn ID 与 `rootCanonicalTurnId/rootRequestId`；`turn.canonicalTurnId/requestId` 只代表实际消费输入的 owner，受理入队不覆盖它。受理回执的 `replacesCanonicalTurnId` 指向最近受理者，`turn.applied` 中 Turn 的前驱指向实际被接替者；宿主只在 applied 后完成执行交接，不把 handoff 当成 native cancelled。
 - `SteerReceipt` 在受理时返回 `queued: true, applied/started: false, settled: false, durable: false` 与本条 `admission`。`Turn.steerAdmissions` 按受理顺序保留 `canonicalTurnId/requestId/replacesCanonicalTurnId`、`status: queued|applied|settled`、`applied`、时间及终结原因；同身份重试查询当前记录，不追加消息。消费 user 消息时，在同次存储提交保存历史、实际 owner 与 applied，再发布 `turn.applied`，顶层 `steerAdmission` 指明本条。连续队列逐条应用，两种 Agent 队列模式均保留输入顺序。
@@ -221,17 +229,23 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 - Steer 回执在同步排队准入时固定身份和 admission，后续应用、取消或结算可能先于 HTTP 回执到达。排队后的保存失败仍返回 503，不能据此推断未受理；当前实例 snapshot/SSE 的 `turn.steerAdmissions` 可精确核对 queued、applied 和 settled，普通新操作因存储屏障拒绝。队列继续是 `durable: false`，重启后不能用身份记录推断消息仍在。
 - HTTP 会话 SSE 用最近 50 条消息的快照启动，后续发送增量；每个全局包保留 `snapshot: { turn, execution }`，`turn.applied / steer.settled` 保留顶层 `steerAdmission`，不包含完整历史或 assistant partial。每次发布同步固定 `revision / execution / turn / leafId`；异步完整快照和有界快照都读取该叶子，存储等待期间不以旧 revision 暴露新的执行摘要。跨会话写入失败会为已装载会话发布新的禁用摘要；卸载后保留整数版本水位，重新装载不复用旧版本。相同 `instanceId / sessionId / revision` 的摘要与会话流、全局流一致。
 - `await subscribe(...)` 装载目标元信息并返回取消订阅函数；`subscribeAll(...)` 仍同步返回。两者不自动发送初始快照。需要全局重连对齐时使用 `await subscribeExecutions(sessionIds, next)`：1–200 个已授权会话 ID，首包 `execution.baseline` 含实例 ID 与各会话的 `sessionId / revision / turn / execution`，随后只发送指定会话高于基线水位的事件。装载元信息后，订阅、基线捕获和交付之间没有异步等待，先前的变化直接由基线覆盖，不积压冷读取期间的内容事件；不读历史、不扫描全部会话、不持久重放。HTTP 对应 `GET /events?sessionId=A&sessionId=B`，无参数 `/events` 仍只发送后续全局事件。订阅回调不应阻塞或抛错，异步投递与背压由宿主承担。
-- `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。活跃 Turn 的取消在内存中校验身份后立即向 Agent / MCP 和本轮所属的本地 Shell/Task 发出停止信号，不等待普通命令队列、历史读取或持久化；重复请求复用同一取消操作。子任务已经返回时，其遗留 Shell 仍在父 Turn 的取消范围内；先前正常结束 Turn 及其他会话的作业不受影响。所属作业的完成通知被抑制，取消结算等待其清理，见 [后台作业取消 SPEC](specs/background-job-cancellation.md)。取消确认仍等待意图保存与必要清理，外部任务仍先保存意图再请求执行器取消；SDK / Worker 必须核对实际停止状态。
+- `cancelTurn` 需要当前 `turnId`，确认回复用 `replyInteraction`，运行中追加输入用 `steer`。活跃 Turn 的取消在内存中校验身份后立即向 Agent / MCP 和本轮所属的本地 Shell 发出停止信号，不等待普通命令队列、历史读取或持久化；重复请求复用同一取消操作。先前正常结束 Turn、其他会话和通信对端的作业不受影响。所属作业的完成通知被抑制，取消结算等待其清理，见 [后台作业取消 SPEC](specs/background-job-cancellation.md)。取消确认仍等待意图保存与必要清理，外部任务仍先保存意图再请求执行器取消；SDK / Worker 必须核对实际停止状态。
 - 存储故障时普通新控制操作返回 `storage_unavailable`；显式 `cancelTurn(id, { turnId, bestEffort: true })` 只对当前活跃根 Turn 尽力停止本实例的 Agent / MCP 和所属本地作业、清空队列和交互，回执 `durable: false`。它不保存取消意图，也不请求外部持久执行器取消；终态可能因保存失败为 `failed`，不能当成可靠取消。存储正常时此选项仍执行普通持久取消。
 - 当前单实例按顺序接纳普通控制操作，避免异步存储下重复提交；不同会话的模型执行可并行。活跃取消独立于该队列，其清理仍属于当前回合的生命周期屏障，下一 Turn、会话卸载和关闭不能越过；未激活会话与中断 Turn 的取消继续串行处理。此处不是分布式锁，也不是跨节点调度器。
 - Local 封装直接转交 `cancelTurn`，不经过助手管理和会话读取的外层队列；关闭开始后仍拒绝新的取消请求，Runtime 继续负责取消身份校验、持久化与关闭屏障。
-- 宿主可调用 `cancelBackgroundJob(sessionId, { instanceId, jobId, executionId })` 停止直接归属的本机 Shell/Task；三项身份来自 `listBackgroundJobs`。`executionId` 每次启动重新生成，防止续跑 Task 复用 jobId 时，迟到停止误取消新执行。错误实例/执行返回 409，错误归属或未知作业返回 404。入口绕过 Runtime/Local 普通队列，存储故障后也可使用；抑制完成通知，等待作业清理后返回 `{ instanceId, sessionId, accepted, durable: false, job }`，job 是同源有界摘要。终态重复停止 `accepted: false`，不修改原 Turn 结果、不启动模型。只控制本实例直接作业；已完成 Task 遗留的子 Session Shell 需按实际 owner 分别停止，不代表停止整个 Session、工作项或外部持久任务。关闭会等待已受理的作业停止；进程重启后不能凭旧作业表判断副作用已停止。
+- 宿主可调用 `cancelBackgroundJob(sessionId, { instanceId, jobId, executionId })` 停止直接归属的本机 Shell；三项身份来自 `listBackgroundJobs`。`executionId` 每次启动重新生成，防止迟到停止误取消新执行。错误实例/执行返回 409，错误归属或未知作业返回 404。入口绕过 Runtime/Local 普通队列，存储故障后也可使用；抑制完成通知，等待作业清理后返回 `{ instanceId, sessionId, accepted, durable: false, job }`，job 是同源有界摘要。终态重复停止 `accepted: false`，不修改原 Turn 结果、不启动模型。只控制本实例直接作业，不代表停止整个 Session、通信对端、工作项或外部持久任务。关闭会等待已受理的作业停止；进程重启后不能凭旧作业表判断副作用已停止。
 - Steer 受理持久化后发布新 `snapshot`，保留旧 execution owner 与 queued admission；实际应用后发布 `turn.applied`。发布队列入口固定 Turn、执行摘要、历史叶子和载荷，后续投递不读取可变 owner。`turn.settled` 发出时执行清理可能尚未结束，`actions.submit.available` 仍为 false；清理结束后再发布可提交的 `snapshot`，宿主据此发起下一轮。
 - `sessionRetention` 默认 `"retain"`，本地继续复用内存中的 Agent 和工作历史；宿主可显式传入 `"release-after-turn"`，在回合结果提交、事件收尾完成后解除 Agent 和消息引用，下一轮通过 `store.readWorkingPath` 加载 checkpoint 工作窗口并重建。该策略不选择数据库，Redis / SQL 仍由宿主实现 `RuntimeStore`。
 - 卸载不调用 `deleteSession`、不关闭共享 MCP / 存储。没有执行、后台工作、确认、读操作或订阅引用时，从实例缓存移除整个 Session；下一次访问通过 `readSession` 重建元信息。订阅期间保留轻量 Session，但仍回收已提交工作正文。创建、导入、分叉、分支选择和闲置元信息写入遵循同一策略。完整历史浏览和导出仍临时读取持久数据；本地 HTTP 默认完整会话列表由 Local 分页汇总，不因此预载执行对象。
-- 运行中、排队输入、待确认或相关后台任务会阻止卸载；Subagent 先提取结果再释放，后台完成通知进入同一接纳通道。成功、失败和取消都以最终保存成功为释放前提；写入失败保留内存并停止接受后续写入。调用方自行持有的快照不受此策略管理，也不保证 RSS 立即下降。
+- 运行中、排队输入、待确认或相关后台任务会阻止卸载；助手通信与后台完成通知沿各自的持久输入或接纳通道处理。成功、失败和取消都以最终保存成功为释放前提；写入失败保留内存并停止接受后续写入。调用方自行持有的快照不受此策略管理，也不保证 RSS 立即下降。
 - 一个实例对应一个已经限定权限的运行范围；存储、模型配置和工具实现都必须来自该范围。不得把不同租户的全局配置与数据放进同一实例，再依靠请求正文里的租户 ID 做隔离。
 - `close` 幂等，停止本实例的在途执行并关闭注入的 MCP 与存储；外部持久任务只解除等待，不发取消请求。不要让多个实例共享同一个有独立关闭语义的 Agent 工厂；共享数据库连接池的适配器只释放自己拥有的资源。
+
+## 手动压缩
+
+`runtime.compactSession(sessionId, { model? }, { signal? })` 复用已有摘要与 checkpoint 管线，等待存储和完成事件落定后返回；模型等待不占用全局控制队列。显式 model 只作用于这次摘要，不改写会话模型选择。会话运行、准备、其他写入或已有手动压缩时拒绝；取消与关闭等待持久化边界和 finally 清理，不生成普通 Turn 或消息。空历史和没有旧内容可压缩时不调用模型，不发完成事件。
+
+共享请求/结果类型位于 `@pie/runtime/protocol`；字段、HTTP 取消与状态码以 [HTTP 契约](../packages/server/README.md#http) 为准，算法和自动压缩关系见[压缩接入](compaction-integration.md)。
 
 ## 中断 Turn 的显式恢复
 
@@ -247,7 +261,7 @@ Local 的默认记录器设有跨会话容量、条数、期限及单条上限�
 
 ### 工具执行账本
 
-所有工具调用统一归属 `Turn -> ToolExecution`，Job 只是外部执行器适配名称。普通工具默认 `inline`，内置 Task 使用 `delegated`，已通过 `runJob` 关联外部执行的调用使用 `durable`。外部工具可以声明 `toolExecutionMode`；这个字段不同于控制并行/串行的 `executionMode`，也不会让普通 Promise 自动获得跨实例恢复能力。
+所有工具调用统一归属 `Turn -> ToolExecution`，Job 只是外部执行器适配名称。普通工具和 `communicate` 默认 `inline`，旧 Task 历史保留 `delegated`，已通过 `runJob` 关联外部执行的调用使用 `durable`。外部工具可以声明 `toolExecutionMode`；这个字段不同于控制并行/串行的 `executionMode`，也不会让普通 Promise 自动获得跨实例恢复能力。
 
 共享 Runtime 通过 Agent 的可等待事件记录调用开始，在最终后处理后的 `toolResult` 提交时记录 `completed` / `failed`；外部提交额外记录 `submission_intent` / `submitted`，结果不确定时保留 `recovery_required`。它是账本阶段，不是新的公开 Turn 状态。
 
@@ -259,7 +273,7 @@ Store 适配须实现新的提交与读取契约：
 
 `resumeTurn` 在查询外部任务前检查账本身份、历史调用/结果和 checkpoint 关联。提交响应丢失不等于没提交，重启后不会因缺少 `submitted` 就重提。账本不提供工具内部断点、自动重放或恰好一次副作用；Cloud 仍负责授权、租约和旧执行者隔离。SQLite 适配已提供独立表和原子提交，Cloud 的 MySQL/Redis 适配须增量接入，不要直接覆盖同事代码。
 
-`RuntimeOptions.jobs` 可注入 `DurableJobExecutor`；未注入时不提供 `context.runJob`，原本地 `BackgroundJobs`、Shell 和 Subagent 不变。外部工具在权限确认后调用 `context.runJob(toolCallId, signal)`，Runtime 从已提交的工具调用取得工具名和参数，不保存或转移执行函数。即使工具省略可选 signal，Runtime 也会关联当前 Turn 的停止信号；外部结果只承载 `content/details/usage`，不传递工具动态注册或提前终止指令。
+`RuntimeOptions.jobs` 可注入 `DurableJobExecutor`；未注入时不提供 `context.runJob`，本地 `BackgroundJobs` 和 Shell 保持独立，助手协作仍走 `communicate`。外部工具在权限确认后调用 `context.runJob(toolCallId, signal)`，Runtime 从已提交的工具调用取得工具名和参数，不保存或转移执行函数。即使工具省略可选 signal，Runtime 也会关联当前 Turn 的停止信号；外部结果只承载 `content/details/usage`，不传递工具动态注册或提前终止指令。
 
 执行器需要实现：
 
@@ -271,7 +285,7 @@ Store 适配须实现新的提交与读取契约：
 
 新实例先由宿主取得有效归属，再调用 `resumeTurn`。PIE 只查询未提交结果的原任务；仍运行返回 409，缺失/未知/身份不匹配也拒绝，查询故障向调用方传播。全部缺失结果明确后，结果与 Turn 准入原子提交，再用原配置调用模型。已落盘结果不重复消费，无需依赖旧实例回调或收到通知；宿主可通过通知唤醒后重复查询。
 
-显式取消先保存意图再请求执行器；历史补入带任务身份的“取消已请求、最终结果需核对”错误结果，不能据此宣称任务已被取消。未关联的本地异步函数、后台 Subagent、持久确认和工具内部 checkpoint 不在本阶段范围，详见 [外部任务 SPEC](specs/durable-jobs.md)。
+显式取消先保存意图再请求执行器；历史补入带任务身份的“取消已请求、最终结果需核对”错误结果，不能据此宣称任务已被取消。未关联的本地异步函数、助手通信自动续跑、持久确认和工具内部 checkpoint 不在本阶段范围，详见 [外部任务 SPEC](specs/durable-jobs.md)。
 
 ## 骨架验收
 
@@ -282,4 +296,4 @@ npm run test:runtime
 node --expose-gc --conditions=source --test packages/runtime/test/runtime.test.ts
 ```
 
-使用延迟存储替身、注入工具与 faux 模型，覆盖无 HTTP / SQLite 的工具循环、进度、历史恢复、并发提交拒绝、写入失败、用户确认和取消，以及两种保留策略、checkpoint 重建、Subagent / 后台通知和历史分支。第二条命令额外用 WeakRef 与显式 GC 验证 Agent 和工作正文可回收；不以 RSS 变化代替引用验证。不使用真实云端服务或付费模型；这不替代第二阶段的云端闭环验收。
+使用延迟存储替身、注入工具与 faux 模型，覆盖无 HTTP / SQLite 的工具循环、进度、历史恢复、并发提交拒绝、写入失败、用户确认和取消，以及两种保留策略、checkpoint 重建、后台通知和历史分支。助手通信另由真实 Runtime、Scheduler 和 SQLite 回归覆盖。第二条命令额外用 WeakRef 与显式 GC 验证 Agent 和工作正文可回收；不以 RSS 变化代替引用验证。不使用真实云端服务或付费模型；这不替代第二阶段的云端闭环验收。

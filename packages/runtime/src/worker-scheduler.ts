@@ -12,6 +12,7 @@ import {
 } from "./coordination.ts";
 import type { HostRuntimeDefinition, Turn, TurnReceipt } from "./protocol.ts";
 import { type CreateSessionInput, RuntimeError, type TurnInput } from "./runtime.ts";
+import type { RuntimeStore } from "./runtime-store.ts";
 import type {
 	WorkerCallContext,
 	WorkerCommunication,
@@ -54,7 +55,8 @@ function productSessionId(binding: WorkerProductBinding | undefined) {
  */
 export class WorkerScheduler implements WorkerCommunication {
 	private readonly runtime: WorkerSchedulerRuntime;
-	private readonly store: WorkerCoordinationStore & Partial<WorkerCommunicationStore>;
+	private readonly store: WorkerCoordinationStore &
+		Partial<WorkerCommunicationStore & Pick<RuntimeStore, "readSession">>;
 	private readonly coordination: WorkerCoordinationService;
 	private inbox = Promise.resolve();
 	private routes = Promise.resolve();
@@ -72,7 +74,7 @@ export class WorkerScheduler implements WorkerCommunication {
 
 	constructor(options: {
 		runtime: WorkerSchedulerRuntime;
-		store: WorkerCoordinationStore & Partial<WorkerCommunicationStore>;
+		store: WorkerCoordinationStore & Partial<WorkerCommunicationStore & Pick<RuntimeStore, "readSession">>;
 	}) {
 		this.runtime = options.runtime;
 		this.store = options.store;
@@ -159,11 +161,48 @@ export class WorkerScheduler implements WorkerCommunication {
 		return created;
 	}
 
+	private async sessionAssignment(workerId: string, sessionId: string) {
+		const existing = await this.store.findAssignmentBySession(sessionId);
+		if (existing) {
+			if (existing.workerId !== workerId) throw new CoordinationError(403, "Session 不属于指定助手");
+			return existing;
+		}
+		if (!this.store.readSession) throw new CoordinationError(405, "当前协调存储不支持会话懒关联");
+		const session = await this.store.readSession(sessionId);
+		if (
+			!session ||
+			session.kind !== "root" ||
+			session.assistantId !== workerId ||
+			(session.workerId !== undefined && session.workerId !== workerId)
+		)
+			throw new CoordinationError(403, "Session 不属于指定助手");
+		const identity = createHash("sha256")
+			.update(JSON.stringify([workerId, sessionId]))
+			.digest("hex");
+		const workId = `worker-work:${identity}`;
+		if (!(await this.coordination.readWorkItem(workId)))
+			await this.coordination.createWorkItem({
+				workId,
+				title: session.title,
+				sourceWorkerId: workerId,
+				sourceSessionId: sessionId,
+			});
+		return this.coordination.createAssignment(
+			{
+				assignmentId: `worker-assignment:${identity}`,
+				workId,
+				workerId,
+				sessionId,
+				workspacePath: session.workspacePath,
+				productBinding: { assistantId: workerId, astronSessionId: session.astronSessionId ?? sessionId },
+			},
+			{ requireSession: true },
+		);
+	}
+
 	async send(context: WorkerCallContext, input: WorkerSendInput, signal?: AbortSignal): Promise<WorkerEnqueueResult> {
 		signal?.throwIfAborted();
-		const assignment = await this.store.findAssignmentBySession(context.sessionId);
-		if (!assignment || assignment.workerId !== context.workerId)
-			throw new CoordinationError(403, "来源 Session 不属于当前 Worker");
+		const assignment = await this.sessionAssignment(context.workerId, context.sessionId);
 		if (await this.store.isWorkerTurnCancelled?.(context.sessionId, context.turnId))
 			throw new CoordinationError(409, "来源 Turn 已取消");
 		if (!input || typeof input !== "object" || typeof input.to !== "string")
@@ -183,9 +222,7 @@ export class WorkerScheduler implements WorkerCommunication {
 		} else if (!context.targets.some((target) => target.assistantId === input.to)) {
 			throw new CoordinationError(403, "目标助手未获准通信");
 		} else if (input.session_id !== undefined) {
-			const targetAssignment = await this.store.findAssignmentBySession(input.session_id);
-			if (!targetAssignment || targetAssignment.workerId !== input.to)
-				throw new CoordinationError(403, "目标 Session 不属于获准 Worker");
+			const targetAssignment = await this.sessionAssignment(input.to, input.session_id);
 			workId = targetAssignment.workId;
 		}
 		const messageId = `worker-message:${createHash("sha256")
@@ -739,6 +776,7 @@ export class WorkerScheduler implements WorkerCommunication {
 					!(error instanceof RuntimeError) ||
 					error.status !== 409 ||
 					(error.reason !== "turn_running" &&
+						error.reason !== "session_compacting" &&
 						error.reason !== "cancellation_requested" &&
 						error.reason !== "cancellation_in_progress")
 				)
@@ -749,7 +787,7 @@ export class WorkerScheduler implements WorkerCommunication {
 					error: undefined,
 					updatedAt: Date.now(),
 				});
-				rejectedWhileBusy = true;
+				if (error.reason !== "session_compacting") rejectedWhileBusy = true;
 			}
 		}
 		return { delivery: await this.getWorkerDelivery(delivery.deliveryId) };

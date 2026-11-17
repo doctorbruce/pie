@@ -97,7 +97,6 @@ test("managed directories allow native file access and shell paths without grant
 			throw new Error(`denied:${request.metadata?.permission}`);
 		},
 		undefined,
-		undefined,
 		{ directory: workspace, jobs },
 	);
 	const tools = new Map(agent.state.tools.map((tool) => [tool.name, tool]));

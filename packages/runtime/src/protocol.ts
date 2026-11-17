@@ -159,7 +159,7 @@ export type SessionCreationReceipt = {
 
 export type SessionSummary = {
 	id: string;
-	/** Opt-in logical Worker identity; ordinary chat and legacy tasks omit it. */
+	/** Root Sessions use assistantId; historical child Sessions may omit this identity. */
 	workerId?: string;
 	archived?: boolean;
 	kind: "root" | "subagent";
@@ -271,6 +271,7 @@ export type ControlRejectionReason =
 	| ActionUnavailableReason
 	| "turn_mismatch"
 	| "invalid_request"
+	| "session_compacting"
 	| "recovery_validation_failed"
 	| "external_executor_unavailable"
 	| "external_job_running";
@@ -290,6 +291,12 @@ export type ContextCompaction = {
 	estimatedTokensAfter: number;
 	compactedAt: number;
 	generation: number;
+};
+export type SessionCompactionInput = { model?: ModelSelection };
+export type SessionCompactionResult = {
+	completed: true;
+	compacted: boolean;
+	compaction?: ContextCompaction;
 };
 export type InteractionRequest = {
 	id: string;

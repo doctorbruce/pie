@@ -19,6 +19,7 @@ import type {
 	GlobalSessionEvent,
 	HostRuntimeDefinition,
 	InteractionReply,
+	SessionCompactionInput,
 	SessionEvent,
 } from "@pie/runtime/protocol";
 import { historyMessageId } from "@pie/runtime/session-tree";
@@ -335,7 +336,7 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 				);
 			}
 			const match =
-				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|interactions|export|import|fork|tree|model-override|archive|workspace)(?:\/([^/]+))?)?$/.exec(
+				/^\/sessions\/([^/]+)(?:\/(events|history|jobs|turns|resume|steer|cancel|compact|interactions|export|import|fork|tree|model-override|archive|workspace)(?:\/([^/]+))?)?$/.exec(
 					path,
 				);
 			if (!match) throw new RuntimeError(404, "会话或接口不存在");
@@ -378,6 +379,23 @@ export function createCoreServer(environment: NodeJS.ProcessEnv = process.env) {
 			if (req.method === "PATCH" && !action) return json(200, await runtime.renameSession(id, await readJson(req)));
 			if (req.method === "POST" && action === "archive")
 				return json(200, await runtime.archiveSession(id, await readJson(req)));
+			if (req.method === "POST" && action === "compact") {
+				const controller = new AbortController();
+				const onClose = () => {
+					if (!res.writableEnded) controller.abort();
+				};
+				res.once("close", onClose);
+				try {
+					return json(
+						200,
+						await runtime.compactSession(id, (await readJson(req)) as SessionCompactionInput, {
+							signal: controller.signal,
+						}),
+					);
+				} finally {
+					res.off("close", onClose);
+				}
+			}
 			if (req.method === "POST" && action === "cancel")
 				return json(
 					202,

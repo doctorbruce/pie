@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import {
 	type AssignmentRecord,
+	type AssignmentWriteOptions,
 	CoordinationError,
 	type InputBatch,
 	type WorkerCoordinationStore,
@@ -1169,7 +1170,19 @@ export function openStore(env: NodeJS.ProcessEnv, defaultToolIds: readonly strin
 				const row = db.prepare("SELECT payload FROM assignments WHERE session_id = ?").get(sessionId);
 				return row ? (JSON.parse(String(row.payload)) as AssignmentRecord) : undefined;
 			},
-			async createAssignment(assignment: AssignmentRecord) {
+			async createAssignment(assignment: AssignmentRecord, options?: AssignmentWriteOptions) {
+				if (options?.requireSession) {
+					// The synchronous check and insert share this store's single SQLite writer.
+					const row = db.prepare("SELECT payload FROM sessions WHERE id = ?").get(assignment.sessionId);
+					if (!row) throw new CoordinationError(404, "会话不存在，不能建立通信关联");
+					const session = parseMetadata(row.payload);
+					if (
+						session.kind !== "root" ||
+						session.assistantId !== assignment.workerId ||
+						(session.workerId !== undefined && session.workerId !== assignment.workerId)
+					)
+						throw new CoordinationError(403, "Session 不属于指定助手");
+				}
 				const existing = db
 					.prepare("SELECT payload FROM assignments WHERE assignment_id = ?")
 					.get(assignment.assignmentId);

@@ -16,10 +16,11 @@ async function listen(core: ReturnType<typeof createCoreServer>) {
 }
 
 async function submitAndWait(base: string, sessionId: string, text: string) {
+	// Keep the tiny context budget focused on history, excluding the default communication tool schema.
 	const response = await fetch(`${base}/sessions/${sessionId}/turns`, {
 		method: "POST",
 		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify({ text }),
+		body: JSON.stringify({ text, toolAvailability: { communicate: false } }),
 	});
 	assert.equal(response.status, 202);
 	for (let attempt = 0; attempt < 200; attempt++) {

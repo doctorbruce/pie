@@ -1,4 +1,4 @@
-# Pie 自动压缩接入与 Amio 对比
+# Pie 上下文压缩接入与 Amio 对比
 
 ## 来源和适配范围
 
@@ -9,7 +9,13 @@
 - `packages/coding-agent/src/core/compaction/utils.ts`：移植摘要专用系统提示、文本序列化、工具结果截断，以及 read/write/edit 文件列表。原版 codemode nestedCalls 尚无对应的 Pie 消息契约，未接入。
 - `packages/coding-agent/src/core/compaction/compaction.ts`：适配用量分量回退、压缩后旧用量失效、工具调用安全边界和旧摘要合并。Pie 沿用已有结构化 checkpoint 格式，不搬入 CodingAgent 的树形 SessionManager。
 
-当前仍是原生 Pie Core + SQLite 完整历史。手动压缩、slash 命令、CLI/TUI、扩展 hooks、分支树摘要和 context-edit 不在本轮范围内；未导入一套平行运行时。
+当前仍是原生 Pie Core + SQLite 完整历史。手动压缩由共享 Runtime 与 HTTP 的独立会话操作接入，复用下述摘要、工具边界、图片和持久化流程；slash 命令由宿主解析。CLI/TUI、扩展 hooks、分支树摘要和 context-edit 不在本轮范围内；未导入一套平行运行时。
+
+## 手动路径
+
+`compactSession` 和 `POST /sessions/:id/compact` 在空闲会话上生成 checkpoint，不提交普通 Turn 或 user/assistant 消息。手动操作绕过自动阈值及 enabled 开关，以 `manual` 区分自动的 threshold/overflow 原因；沿用近期 token 窗口及工具安全切点，另保留最近真实用户输入及图片，单个长工具轮次也可压缩。无旧历史可压缩时直接返回无需压缩，不调用模型或伪造完成事件。模型选择、取消、并发、响应和存储边界见 [HTTP 契约](../packages/server/README.md#http) 与 [嵌入接口](runtime-embedding.md#手动压缩)。
+
+checkpoint 保留已发现的原生及 MCP 工具名称。手动摘要不连接 MCP；下一轮正常准备 MCP 后，只按当前允许的实际工具恢复 schema，未挂载或停用的工具不会因历史名单获得调用权限。
 
 ## 自动路径
 
@@ -80,7 +86,7 @@
 
 ## 事件与验证
 
-会话 SSE 和全局 SSE 提供 `compaction.started`、`compaction.retry`、`compaction.finished`（completed/failed/cancelled）。会话的 `compaction.updated` 和 `snapshot.compaction` 保持持久 checkpoint 的事实来源。
+会话 SSE 和全局 SSE 提供 `compaction.started`、`compaction.retry`、`compaction.finished`（completed/failed/cancelled）。completed 的 finished 事件携带本次已持久化的 `compaction`，可与 HTTP 返回的 checkpoint 按 generation/compactedAt 合并，避免晚到事件绑定后一次摘要。会话的 `compaction.updated` 和 `snapshot.compaction` 保持持久 checkpoint 的事实来源。
 
 采用服务边界契约测试：本地 HTTP 模拟 Provider + 真实 SDK + SQLite，验证超限重试、HTTP / SSE 413、摘要退避、额度失败、不完整摘要、取消、重启和图片保留；无需真实凭据或付费请求。确定性预算、用量、工具边界与摘要投影使用行为级单测。
 

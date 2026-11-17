@@ -7,7 +7,7 @@ import type { ToolRuntime } from "@pie/runtime/tools";
 
 const parameters = Type.Object(
 	{
-		job_id: Type.String({ description: "Background job ID returned by bash or task" }),
+		job_id: Type.String({ description: "Background job ID returned by bash" }),
 		wait_ms: Type.Optional(
 			Type.Integer({
 				minimum: 0,
@@ -88,7 +88,7 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 		name: "job_output",
 		label: "后台任务输出",
 		description: [
-			"Read new output from a background job started by bash or task.",
+			"Read new output from a background job started by bash.",
 			"Reads are incremental: each call returns only output produced since the previous call, or (no new output), plus the current status.",
 			"Pass wait_ms to block until the job settles or the bounded wait elapses, which is how you wait without ending your turn. If it is still running and you are blocked on it, continue waiting in chunks (for example 30000).",
 			"Completion is also reported automatically, so you can keep working on something else instead of waiting.",
@@ -134,7 +134,7 @@ export function jobTools(runtime: ToolRuntime): AgentTool[] {
 	const kill: AgentTool<typeof parameters, JobDetails> = {
 		name: "job_kill",
 		label: "停止后台任务",
-		description: "Cancel a running background bash or task job owned by this session.",
+		description: "Cancel a running background bash job owned by this session.",
 		parameters,
 		async execute(_id, { job_id }) {
 			const current = runtime.jobs.get(job_id);

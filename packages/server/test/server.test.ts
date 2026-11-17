@@ -10,6 +10,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
+import type { WorkerEnqueueResult } from "@pie/runtime/coordination";
 import {
 	type Assistant,
 	MAX_USER_INPUT_TEXT_CHARS,
@@ -570,9 +571,9 @@ test("Pi models.json configuration persists, reloads atomically and drives a rea
 			.slice(0, 2)
 			.every((call) => call.body.messages.some((message) => message.content === assistant.systemPrompt)),
 	);
-	assert(
-		calls.slice(0, 2).every((call) => call.body.tools.length === 1 && call.body.tools[0].function.name === "read"),
-	);
+	for (const call of calls.slice(0, 2)) {
+		assert.deepEqual(call.body.tools.map((tool) => tool.function.name).sort(), ["communicate", "read"]);
+	}
 	assert(
 		calls
 			.slice(0, 2)
@@ -882,7 +883,7 @@ test("host runtime keeps the language and localized skill summaries for the prom
 		assert.equal((await core.put("/host-runtimes", registry("bad", invalid))).status, 400);
 });
 
-test("task delegates to fresh child sessions using the latest host assistant binding", async (t) => {
+test("communicate uses independent sessions and the latest host assistant binding", async (t) => {
 	const core = await start();
 	t.after(() => core.close());
 	const registry = (assistantRevision: string, workerRevision: string) => ({
@@ -924,21 +925,18 @@ test("task delegates to fresh child sessions using the latest host assistant bin
 	const parent = (await created.json()) as SessionSnapshot;
 	assert.equal(parent.kind, "root");
 
-	async function delegate(
-		assistantRevision: string,
-		workerRevision: string,
-		options: { taskId?: string; background?: boolean } = {},
-	) {
+	const runtime = await core.ready;
+	async function communicate(assistantRevision: string, workerRevision: string, sessionId?: string) {
 		assert.equal((await core.put("/host-runtimes", registry(assistantRevision, workerRevision))).status, 200);
 		const stream = events(`${core.base}/sessions/${parent.id}/events`);
 		await stream.next();
 		const response = await core.post(`/sessions/${parent.id}/turns`, {
-			text: `调用工具 task ${JSON.stringify({
-				description: `任务 ${workerRevision}`,
-				prompt: `请处理 ${workerRevision}`,
-				subagent_type: "assistant-worker-writer",
-				task_id: options.taskId,
-				background: options.background,
+			text: `调用工具 communicate ${JSON.stringify({
+				to: "writer",
+				content: `请处理 ${workerRevision}`,
+				session_id: sessionId,
+				new_session: sessionId === undefined,
+				wait: false,
 			})}`,
 		});
 		assert.equal(response.status, 202, await response.clone().text());
@@ -955,26 +953,22 @@ test("task delegates to fresh child sessions using the latest host assistant bin
 			assert.equal(packet.snapshot?.turn?.status, "completed", packet.snapshot?.turn?.error);
 			const result = [...packet.snapshot.messages]
 				.reverse()
-				.find((message) => message.role === "toolResult" && message.toolName === "task");
+				.find((message) => message.role === "toolResult" && message.toolName === "communicate");
 			assert(result?.role === "toolResult");
-			return result.details as {
-				childSessionId: string;
-				targetAssistantId: string;
-				subagentType: string;
-				background?: boolean;
-				jobId?: string;
-			};
+			assert.equal(result.isError, false, JSON.stringify(result));
+			const { sent } = result.details as { sent: WorkerEnqueueResult };
+			const delivery = await runtime.waitWorkerDelivery(sent.delivery.deliveryId);
+			assert.equal(delivery.status, "consumed", delivery.error);
+			assert(delivery.sessionId);
+			return runtime.getSession(delivery.sessionId);
 		}
 		throw new Error("父会话未结算");
 	}
 
-	const first = await delegate("2", "worker-1");
-	assert.equal(first.targetAssistantId, "writer");
-	assert.equal(first.subagentType, "assistant-worker-writer");
-	const firstChild = (await (await fetch(`${core.base}/sessions/${first.childSessionId}`)).json()) as SessionSnapshot;
-	assert.equal(firstChild.kind, "subagent");
-	assert.equal(firstChild.parentSessionId, parent.id);
-	assert.equal(firstChild.subagentType, "assistant-worker-writer");
+	const firstChild = await communicate("2", "worker-1");
+	assert.equal(firstChild.kind, "root");
+	assert.equal(firstChild.parentSessionId, undefined);
+	assert.equal(firstChild.workerId, "writer");
 	assert.equal(firstChild.assistantRevision, "worker-1");
 	assert.equal(firstChild.runtime?.systemPrompt, "写作助手 worker-1");
 	assert.deepEqual(firstChild.runtime?.subagents, []);
@@ -982,45 +976,27 @@ test("task delegates to fresh child sessions using the latest host assistant bin
 		firstChild.messages.map((message) => message.role),
 		["user", "assistant"],
 	);
-	assert.equal((await core.post(`/sessions/${first.childSessionId}/turns`, { text: "继续" })).status, 409);
-	const resumed = await delegate("2", "worker-1", { taskId: first.childSessionId });
-	assert.equal(resumed.childSessionId, first.childSessionId);
-	const resumedChild = (await (
-		await fetch(`${core.base}/sessions/${first.childSessionId}`)
-	).json()) as SessionSnapshot;
+	const resumedChild = await communicate("2", "worker-1", firstChild.id);
+	assert.equal(resumedChild.id, firstChild.id);
 	assert.deepEqual(
 		resumedChild.messages.map((message) => message.role),
 		["user", "assistant", "user", "assistant"],
 	);
 
-	const second = await delegate("3", "worker-2");
-	const secondChild = (await (
-		await fetch(`${core.base}/sessions/${second.childSessionId}`)
-	).json()) as SessionSnapshot;
+	const secondChild = await communicate("3", "worker-2");
 	assert.equal(secondChild.assistantRevision, "worker-2");
 	assert.equal(secondChild.runtime?.systemPrompt, "写作助手 worker-2");
-	const background = await delegate("4", "worker-2", { background: true });
-	assert.equal(background.background, true);
-	assert.equal(background.jobId, background.childSessionId);
-	const backgroundChild = (await (
-		await fetch(`${core.base}/sessions/${background.childSessionId}`)
-	).json()) as SessionSnapshot;
-	assert.equal(backgroundChild.turn?.status, "completed");
 	const roots = (await (await fetch(`${core.base}/sessions`)).json()) as { sessions: SessionSummary[] };
 	assert.deepEqual(
-		roots.sessions.map((session) => session.id),
-		[parent.id],
+		new Set(roots.sessions.map((session) => session.id)),
+		new Set([parent.id, firstChild.id, secondChild.id]),
 	);
-	const all = (await (await fetch(`${core.base}/sessions?includeSubagents=true`)).json()) as {
-		sessions: SessionSummary[];
-	};
-	assert.equal(all.sessions.length, 4);
 	assert.equal((await fetch(`${core.base}/sessions/${parent.id}`, { method: "DELETE" })).status, 200);
-	assert.equal((await fetch(`${core.base}/sessions/${first.childSessionId}`)).status, 404);
-	assert.equal((await fetch(`${core.base}/sessions/${second.childSessionId}`)).status, 404);
+	assert.equal((await fetch(`${core.base}/sessions/${firstChild.id}`)).status, 200);
+	assert.equal((await fetch(`${core.base}/sessions/${secondChild.id}`)).status, 200);
 });
 
-test("local assistants expose selected assistants as dynamically refreshed subagents", async (t) => {
+test("local assistants communicate with selected assistants using their current configuration", async (t) => {
 	const core = await start();
 	t.after(() => core.close());
 	const worker = (await (
@@ -1052,16 +1028,18 @@ test("local assistants expose selected assistants as dynamically refreshed subag
 	const created = (await (await core.post("/sessions", { assistantId: parent.id })).json()) as SessionSnapshot;
 	assert.equal(created.runtime?.subagents[0].id, `assistant-worker-${worker.id}`);
 
-	async function delegate(label: string) {
+	const runtime = await core.ready;
+	async function communicate(label: string) {
 		const stream = events(`${core.base}/sessions/${created.id}/events`);
 		await stream.next();
 		assert.equal(
 			(
 				await core.post(`/sessions/${created.id}/turns`, {
-					text: `调用工具 task ${JSON.stringify({
-						description: label,
-						prompt: label,
-						subagent_type: `assistant-worker-${worker.id}`,
+					text: `调用工具 communicate ${JSON.stringify({
+						to: worker.id,
+						content: label,
+						new_session: true,
+						wait: false,
 					})}`,
 				})
 			).status,
@@ -1079,14 +1057,19 @@ test("local assistants expose selected assistants as dynamically refreshed subag
 			if (packet.type !== "turn.settled") continue;
 			const result = [...packet.snapshot.messages]
 				.reverse()
-				.find((message) => message.role === "toolResult" && message.toolName === "task");
+				.find((message) => message.role === "toolResult" && message.toolName === "communicate");
 			assert(result?.role === "toolResult");
-			return (result.details as { childSessionId: string }).childSessionId;
+			assert.equal(result.isError, false, JSON.stringify(result));
+			const { sent } = result.details as { sent: WorkerEnqueueResult };
+			const delivery = await runtime.waitWorkerDelivery(sent.delivery.deliveryId);
+			assert.equal(delivery.status, "consumed", delivery.error);
+			assert(delivery.sessionId);
+			return delivery.sessionId;
 		}
 		throw new Error("父会话未结算");
 	}
 
-	const firstId = await delegate("第一版任务");
+	const firstId = await communicate("第一版任务");
 	const first = (await (await fetch(`${core.base}/sessions/${firstId}`)).json()) as SessionSnapshot;
 	assert.equal(first.runtimeSource, "local");
 	assert.equal(first.runtime?.systemPrompt, "写作助手 v1");
@@ -1097,7 +1080,7 @@ test("local assistants expose selected assistants as dynamically refreshed subag
 			body: JSON.stringify({ ...worker, systemPrompt: "写作助手 v2" }),
 		})
 	).json()) as Assistant;
-	const secondId = await delegate("第二版任务");
+	const secondId = await communicate("第二版任务");
 	const second = (await (await fetch(`${core.base}/sessions/${secondId}`)).json()) as SessionSnapshot;
 	assert.equal(second.assistantRevision, String(updatedWorker.updatedAt));
 	assert.equal(second.runtime?.systemPrompt, "写作助手 v2");
@@ -1113,6 +1096,8 @@ test("local assistants expose selected assistants as dynamically refreshed subag
 		200,
 	);
 	assert.equal((await fetch(`${core.base}/sessions/${created.id}`, { method: "DELETE" })).status, 200);
+	for (const id of [firstId, secondId])
+		assert.equal((await fetch(`${core.base}/sessions/${id}`, { method: "DELETE" })).status, 200);
 	assert.equal((await fetch(`${core.base}/assistants/${parent.id}`, { method: "DELETE" })).status, 200);
 	assert.equal((await fetch(`${core.base}/assistants/${worker.id}`, { method: "DELETE" })).status, 200);
 });

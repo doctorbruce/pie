@@ -18,7 +18,6 @@ import { DurableJobError, type DurableJobExecutor, durableJobResult, pendingDura
 import { projectSessionAgentEvent } from "./event-projection.ts";
 import {
 	type BackgroundJobCancellationReceipt,
-	type BackgroundJobInfo,
 	type BackgroundJobList,
 	BackgroundJobs,
 	summarizeBackgroundJob,
@@ -40,6 +39,8 @@ import {
 	type PermissionGrant,
 	type SessionAction,
 	type SessionActions,
+	type SessionCompactionInput,
+	type SessionCompactionResult,
 	type SessionCreationReceipt,
 	type SessionEvent,
 	type SessionExecution,
@@ -49,7 +50,6 @@ import {
 	type SessionTransfer,
 	type SteerAdmission,
 	type SteerReceipt,
-	type SubagentBinding,
 	type ToolActivity,
 	type Turn,
 	type TurnReceipt,
@@ -416,13 +416,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 		waiters?: number;
 		executionObservers?: number;
 		mcpAbort?: AbortController;
-		parentJobSignals?: readonly AbortSignal[];
 		agent?: ReturnType<typeof factory.create>;
 		cancelRequested: boolean;
 		modelStreaming?: boolean;
 		activeTools?: Map<string, SessionExecution["activeTools"][number]>;
 		clients: Set<RuntimeSubscriber>;
-		runPromise?: Promise<string | undefined>;
+		runPromise?: Promise<void>;
 		cancelPromise?: Promise<CancellationReceipt>;
 		writePromise?: Promise<void>;
 		publishPromise?: Promise<void>;
@@ -443,6 +442,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 	// Retain only a watermark after eviction, never Agent state or history.
 	const revisionFloors = new Map<string, number>();
 	const pendingWaits = new Set<Promise<unknown>>();
+	const manualCompactions = new Map<
+		string,
+		{ controller: AbortController; signal: AbortSignal; promise: Promise<SessionCompactionResult> }
+	>();
+	const pendingSessionWrites = new Map<string, number>();
 	let commandActive = false;
 	let queuedCommands = 0;
 	const pendingInteractions = new Map<string, PendingInteraction>();
@@ -529,6 +533,23 @@ async function initializeRuntime(options: RuntimeOptions) {
 			durable: accepted,
 		};
 	}
+	function assertCompactIdle(session: Session) {
+		if (session.kind !== "root") throw new RuntimeError(409, "子会话由父会话管理");
+		if (session.mode !== "real") throw new RuntimeError(400, "仅真实模型会话支持手动压缩");
+		if (
+			session.runPromise ||
+			session.turn?.status === "running" ||
+			session.turn?.status === "interrupted" ||
+			session.turn?.yield ||
+			session.agent?.state.isStreaming ||
+			session.agent?.hasQueuedMessages() ||
+			jobs.list(session.id).some((job) => job.status === "running") ||
+			[...pendingInteractions.values()].some(
+				(interaction) => interaction.sessionId === session.id || interaction.executionSessionId === session.id,
+			)
+		)
+			throw new RuntimeError(409, "请先结束当前执行、后台任务及交互", "turn_running");
+	}
 	function actionAvailability(session: Session): SessionActions {
 		const unavailable = (reason: ActionUnavailableReason) => ({ available: false, reason });
 		const available = { available: true };
@@ -539,6 +560,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 				steer: unavailable(blocked),
 				cancel: unavailable(blocked),
 				resume: unavailable(blocked),
+			};
+		if (manualCompactions.has(session.id))
+			return {
+				submit: unavailable("turn_running"),
+				steer: unavailable("turn_running"),
+				cancel: unavailable("turn_running"),
+				resume: unavailable("turn_running"),
 			};
 		if (session.kind === "subagent") {
 			const reason = "subagent_managed_by_parent" as const;
@@ -607,7 +635,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				storage_unavailable: "存储不可用，请检查后重启运行时",
 				turn_running: "当前会话正在执行",
 				turn_interrupted: "请先恢复或取消中断的 Turn",
-				subagent_managed_by_parent: "子会话由父会话通过 task 管理，请取消父会话",
+				subagent_managed_by_parent: "子会话由父会话管理，请取消父会话",
 			};
 			throw new RuntimeError(
 				reason === "storage_unavailable" || reason === "runtime_closing" ? 503 : 409,
@@ -622,6 +650,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		if (
 			options.sessionRetention !== "release-after-turn" ||
 			storageFailed ||
+			manualCompactions.has(session.id) ||
 			session.waiters ||
 			session.runPromise ||
 			session.turn?.status === "running" ||
@@ -704,7 +733,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 	function summary(session: SessionSummary): SessionSummary {
 		return {
 			id: session.id,
-			workerId: session.workerId,
+			workerId: session.kind === "root" ? session.assistantId : session.workerId,
 			archived: session.archived === true,
 			kind: session.kind,
 			forkedFromSessionId: session.forkedFromSessionId,
@@ -763,6 +792,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		const forked: Session = {
 			id,
 			kind: "root",
+			workerId: source.assistantId,
 			forkedFromSessionId: source.id,
 			assistantId: source.assistantId,
 			assistantRevision: source.assistantRevision,
@@ -813,6 +843,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		toolExecutions: readonly ToolExecutionRecord[] = [],
 		permissionGrants?: PermissionGrant[],
 		writeOptions?: SessionWriteOptions,
+		signal?: AbortSignal,
 	) {
 		const pending = (session.writePromise ?? Promise.resolve()).then(async () => {
 			assertStorageAvailable();
@@ -822,6 +853,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				? session.messages
 				: (session.agent?.state.messages ?? session.messages);
 			const { tree, identities } = update ?? historyUpdate(session, messages);
+			signal?.throwIfAborted();
 			try {
 				await store.saveSession(
 					{
@@ -879,9 +911,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			? "durable"
 			: declared === "durable" || declared === "delegated" || declared === "inline"
 				? declared
-				: toolName === "task"
-					? "delegated"
-					: "inline";
+				: "inline";
 		return createToolExecutionRecord({
 			sessionId: session.id,
 			turnId: session.turn.id,
@@ -928,12 +958,13 @@ async function initializeRuntime(options: RuntimeOptions) {
 		const previous = session.compaction;
 		session.compaction = next;
 		try {
-			await persist(session, false, update);
+			await persist(session, false, update, [], undefined, undefined, manualCompactions.get(session.id)?.signal);
 		} catch (error) {
 			session.compaction = previous;
 			throw error;
 		}
 		session.messages = projected;
+		if (manualCompactions.has(session.id)) session.agent = undefined;
 		await publish(session, "compaction.updated");
 	}
 	async function settleInteraction(id: string, approved: boolean, error?: Error) {
@@ -1006,7 +1037,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 		});
 	}
 	function jobCancellationSignals(session: Session): readonly AbortSignal[] {
-		return [...(session.parentJobSignals ?? []), ...(session.mcpAbort ? [session.mcpAbort.signal] : [])];
+		return session.mcpAbort ? [session.mcpAbort.signal] : [];
 	}
 	function workerCommunication(
 		getSession: () => Session,
@@ -1080,13 +1111,12 @@ async function initializeRuntime(options: RuntimeOptions) {
 			messages,
 			async (activity) => await recordActivity(session, activity),
 			(request, signal) => requestInteraction(session, request, signal),
-			session.kind === "root"
-				? (toolCallId, binding, description, prompt, options, signal) =>
-						runSubagent(session, toolCallId, binding, description, prompt, options, signal)
-				: undefined,
 			{
 				current: session.compaction,
-				update: async (next, source, projected) => await updateCompaction(session, next, source, projected),
+				update: async (next, source, projected) => {
+					const update = () => updateCompaction(session, next, source, projected);
+					return manualCompactions.has(session.id) ? await execute(update, true) : await update();
+				},
 				report: async (event) => await publish(session, event.type, event),
 			},
 			{
@@ -1099,7 +1129,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 				runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 			},
 			async (event) => await publish(session, event.type, event),
-			session.workerId ? workerCommunication(() => session, runtime) : undefined,
+			options.workers && session.kind === "root" ? workerCommunication(() => session, runtime) : undefined,
 		);
 	}
 	async function runJob(session: Session, toolCallId: string, signal?: AbortSignal) {
@@ -1241,7 +1271,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 		const pending = Promise.allSettled([running, cancellation])
 			.then(([result]) => {
 				if (result.status === "rejected") throw result.reason;
-				return result.value;
 			})
 			.finally(async () => {
 				if (session.runPromise !== pending) return;
@@ -1258,28 +1287,33 @@ async function initializeRuntime(options: RuntimeOptions) {
 		return cancellation;
 	}
 	async function notifyBackground(session: Session, text: string, jobId?: string) {
+		while (manualCompactions.has(session.id)) await manualCompactions.get(session.id)!.promise.catch(() => {});
 		if (closing) return;
-		const started = await execute(async () => {
-			if (jobId && !jobs.shouldNotify(jobId)) return;
-			session = await requireSession(session.id);
-			if (session.turn?.status !== "running") await session.runPromise;
-			if (session.turnCheckpoint) {
-				session.turnCheckpoint.blockedReason = "包含尚未持久化的后台通知队列";
+		const started = await execute(
+			async () => {
+				if (jobId && !jobs.shouldNotify(jobId)) return;
+				session = await requireSession(session.id);
+				if (session.turn?.status !== "running") await session.runPromise;
+				if (session.turnCheckpoint) {
+					session.turnCheckpoint.blockedReason = "包含尚未持久化的后台通知队列";
+					await persist(session);
+				}
+				const agent = await attachAgent(session);
+				if (jobId && !jobs.shouldNotify(jobId)) return;
+				const content = [{ type: "text" as const, text, synthetic: true as const, backgroundJobId: jobId }];
+				agent.followUp({ role: "user", content, timestamp: Date.now() });
+				if (agent.state.isStreaming || session.turn?.status === "running") return;
+				session.turn = { id: randomUUID(), status: "running" };
+				session.turnCheckpoint = undefined;
+				session.cancelRequested = false;
+				session.updatedAt = Date.now();
 				await persist(session);
-			}
-			const agent = await attachAgent(session);
-			if (jobId && !jobs.shouldNotify(jobId)) return;
-			const content = [{ type: "text" as const, text, synthetic: true as const, backgroundJobId: jobId }];
-			agent.followUp({ role: "user", content, timestamp: Date.now() });
-			if (agent.state.isStreaming || session.turn?.status === "running") return;
-			session.turn = { id: randomUUID(), status: "running" };
-			session.turnCheckpoint = undefined;
-			session.cancelRequested = false;
-			session.updatedAt = Date.now();
-			await persist(session);
-			await publish(session, "snapshot");
-			return { runPromise: startRun(session) };
-		}, true);
+				await publish(session, "snapshot");
+				return { runPromise: startRun(session) };
+			},
+			true,
+			session.id,
+		);
 		await started?.runPromise;
 	}
 	function bindAgent(session: Session, agent: ReturnType<typeof factory.create>) {
@@ -1718,169 +1752,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 		await Promise.all([...sessions.values()].map((session) => publish(session, "snapshot")));
 	}
 
-	async function runSubagent(
-		parent: Session,
-		toolCallId: string,
-		binding: SubagentBinding,
-		description: string,
-		prompt: string,
-		options: { taskId?: string; background?: boolean },
-		signal?: AbortSignal,
-	) {
-		if (parent.kind !== "root" || !parent.turn || parent.turn.status !== "running")
-			throw new Error("父会话当前不能调用 Subagent");
-		const cancellationSignals = jobCancellationSignals(parent);
-		signal?.throwIfAborted();
-		if (parent.turnCheckpoint) {
-			parent.turnCheckpoint.blockedReason = "包含 Subagent 执行，尚不支持级联恢复";
-			await persist(parent);
-		}
-		const child = await execute(async () => {
-			signal?.throwIfAborted();
-			const runtime = {
-				...structuredClone(binding.runtime),
-				subagents: [],
-				...(parent.runtime?.toolAvailability
-					? { toolAvailability: structuredClone(parent.runtime.toolAvailability) }
-					: {}),
-			};
-			let child: Session;
-			if (options.taskId) {
-				const existing = await requireSession(options.taskId);
-				if (existing.kind !== "subagent" || existing.parentSessionId !== parent.id)
-					throw new Error(`不可继续的 task_id：${options.taskId}`);
-				if (existing.subagentType !== binding.id || existing.assistantId !== binding.assistantId)
-					throw new Error("task_id 与指定 Subagent 不匹配");
-				if (existing.turn?.status === "running" || jobs.get(existing.id)?.status === "running")
-					throw new Error(`Subagent 仍在运行：${existing.id}`);
-				await existing.runPromise;
-				child = existing;
-				await loadHistory(child);
-				if (JSON.stringify(child.runtime) !== JSON.stringify(runtime)) {
-					const agent = createSessionAgent(child, runtime);
-					child.runtime = runtime;
-					bindAgent(child, agent);
-				}
-				const agent = await attachAgent(child);
-				agent.state.messages = [...agent.state.messages, { role: "user", content: prompt, timestamp: Date.now() }];
-				child.turn = { id: randomUUID(), status: "running" };
-				child.cancelRequested = false;
-				child.updatedAt = Date.now();
-				await persist(child);
-				await publish(
-					child,
-					"snapshot",
-					projectSessionAgentEvent({ type: "message_end", message: agent.state.messages.at(-1) }),
-				);
-			} else {
-				const id = randomUUID();
-				const now = Date.now();
-				const selected =
-					binding.model ??
-					(parent.mode === "real" && parent.provider
-						? { provider: parent.provider, id: parent.model }
-						: undefined);
-				child = {
-					id,
-					kind: "subagent",
-					parentSessionId: parent.id,
-					parentToolCallId: toolCallId,
-					subagentType: binding.id,
-					assistantId: binding.assistantId,
-					assistantRevision: binding.assistantRevision,
-					runtimeSource: parent.runtimeSource,
-					title: description.trim().slice(0, 100) || binding.name,
-					workspacePath: parent.workspacePath,
-					mode: parent.mode,
-					model: selected?.id ?? parent.model,
-					provider: selected?.provider ?? parent.provider,
-					createdAt: now,
-					updatedAt: now,
-					turn: { id: randomUUID(), status: "running" },
-					messages: [{ role: "user", content: prompt, timestamp: now }],
-					runtime,
-					activities: [],
-					revision: 0,
-					cancelRequested: false,
-					clients: new Set(),
-				};
-				bindAgent(child, createSessionAgent(child, runtime));
-				await persist(child);
-				sessions.set(id, child);
-			}
-			child.parentJobSignals = cancellationSignals;
-			return child;
-		}, true);
-		const background = options.background === true;
-		const started = jobs.start({
-			id: child.id,
-			ownerSessionId: parent.id,
-			cancellationSignals,
-			type: "task",
-			title: child.title,
-			async run(jobSignal) {
-				const abortChild = () => {
-					child.cancelRequested = true;
-					void rejectSessionInteractions(child.id, new Error("Subagent 已取消")).catch(console.error);
-					child.agent?.abort();
-					child.mcpAbort?.abort();
-				};
-				jobSignal.addEventListener("abort", abortChild, { once: true });
-				if (jobSignal.aborted) abortChild();
-				let output: string | undefined;
-				try {
-					output = await startRun(child);
-				} finally {
-					jobSignal.removeEventListener("abort", abortChild);
-				}
-				if (child.turn?.status !== "completed")
-					throw new Error(
-						`Subagent 执行${child.turn?.status === "cancelled" ? "已取消" : "失败"}（${child.id}）：${child.turn?.error ?? "没有完成"}`,
-					);
-				return { output };
-			},
-			async onSettled(job) {
-				if (!background) return;
-				const state = job.status === "completed" ? "completed" : "error";
-				await notifyBackground(
-					parent,
-					`<task id="${child.id}" state="${state}">\n<summary>${state === "completed" ? "Background task completed" : "Background task failed"}: ${description}</summary>\n<task_result>\n${job.error ?? job.output}\n</task_result>\n</task>`,
-					job.id,
-				);
-			},
-		});
-		if (background) {
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `<task id="${child.id}" state="running">\n后台 Subagent 已启动，完成后会自动通知。\n</task>`,
-					},
-				],
-				details: {
-					childSessionId: child.id,
-					targetAssistantId: binding.assistantId,
-					subagentType: binding.id,
-					background: true,
-					jobId: started.id,
-				},
-			};
-		}
-		const abort = () => jobs.cancel(started.id);
-		signal?.addEventListener("abort", abort, { once: true });
-		if (signal?.aborted) abort();
-		let job: BackgroundJobInfo | undefined;
-		try {
-			job = await jobs.wait(started.id);
-		} finally {
-			signal?.removeEventListener("abort", abort);
-		}
-		if (!job || job.status !== "completed") throw new Error(job?.error ?? "Subagent 没有完成");
-		return {
-			content: [{ type: "text" as const, text: job.output || "Subagent 已完成任务。" }],
-			details: { childSessionId: child.id, targetAssistantId: binding.assistantId, subagentType: binding.id },
-		};
-	}
 	async function run(session: Session) {
 		const turn = session.turn;
 		const agent = session.agent;
@@ -1966,12 +1837,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 				turn.error = "无法读取会话结果，请检查存储后重启运行时。";
 			}
 		}
-		if (session.kind === "subagent") {
-			const message = [...agent.state.messages].reverse().find((item) => item.role === "assistant");
-			return message?.role === "assistant"
-				? contentText(message.content) || "Subagent 已完成任务。"
-				: "Subagent 已完成任务。";
-		}
 	}
 	function startRun(session: Session) {
 		const pending = run(session).finally(async () => {
@@ -1985,18 +1850,34 @@ async function initializeRuntime(options: RuntimeOptions) {
 	}
 
 	let commands = Promise.resolve();
-	function execute<Result>(operation: () => Promise<Result>, mutating: boolean): Promise<Result> {
+	function execute<Result>(
+		operation: () => Promise<Result>,
+		mutating: boolean,
+		writeSessionId?: string,
+	): Promise<Result> {
+		if (writeSessionId !== undefined) {
+			if (manualCompactions.has(writeSessionId))
+				return Promise.reject(new RuntimeError(409, "当前会话正在压缩上下文", "session_compacting"));
+			pendingSessionWrites.set(writeSessionId, (pendingSessionWrites.get(writeSessionId) ?? 0) + 1);
+		}
 		queuedCommands++;
 		const result = commands.then(async () => {
 			try {
 				if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
 				if (mutating) assertStorageAvailable();
+				if (writeSessionId !== undefined && manualCompactions.has(writeSessionId))
+					throw new RuntimeError(409, "当前会话正在压缩上下文", "session_compacting");
 				commandActive = true;
 				return await operation();
 			} finally {
 				await publishStorageFailure();
 				commandActive = false;
 				queuedCommands--;
+				if (writeSessionId !== undefined) {
+					const count = pendingSessionWrites.get(writeSessionId)! - 1;
+					if (count) pendingSessionWrites.set(writeSessionId, count);
+					else pendingSessionWrites.delete(writeSessionId);
+				}
 				if (options.sessionRetention === "release-after-turn" && queuedCommands === 0)
 					for (const session of sessions.values()) releaseSession(session);
 			}
@@ -2007,6 +1888,9 @@ async function initializeRuntime(options: RuntimeOptions) {
 		);
 		return result;
 	}
+	function executeSession<Result>(sessionId: string, operation: () => Promise<Result>, mutating: boolean) {
+		return execute(operation, mutating, sessionId);
+	}
 	async function requireSession(id: string): Promise<Session> {
 		const session = sessions.get(id);
 		if (session) return session;
@@ -2016,6 +1900,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 			throw new RuntimeError(409, "持久会话仍有运行中回合，请由宿主完成归属核对与启动恢复后重试");
 		const loaded: Session = {
 			...structuredClone(metadata),
+			workerId: metadata.kind === "root" ? metadata.assistantId : metadata.workerId,
 			revision: revisionFloors.has(id)
 				? Math.max(metadata.revision, revisionFloors.get(id)!) + 1
 				: metadata.revision,
@@ -2083,10 +1968,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 			return structuredClone(factory.toolCatalog);
 		},
 		createInputBatch(sessionId: string, input: Omit<InputBatchCreate, "sessionId">) {
-			return execute(async () => {
-				await requireSession(sessionId);
-				return requireCoordination().createInputBatch({ ...input, sessionId });
-			}, false);
+			return executeSession(
+				sessionId,
+				async () => {
+					await requireSession(sessionId);
+					return requireCoordination().createInputBatch({ ...input, sessionId });
+				},
+				false,
+			);
 		},
 		readInputBatch(batchId: string) {
 			return execute(async () => {
@@ -2096,29 +1985,41 @@ async function initializeRuntime(options: RuntimeOptions) {
 			}, false);
 		},
 		acceptInputBatch(sessionId: string, batchId: string, turnId: string) {
-			return execute(async () => {
-				const batch = await requireCoordination().readInputBatch(batchId);
-				if (!batch || batch.sessionId !== sessionId) throw new RuntimeError(404, "输入批次不存在");
-				await requireSession(sessionId);
-				return requireCoordination().acceptInputBatch(batchId, turnId);
-			}, false);
+			return executeSession(
+				sessionId,
+				async () => {
+					const batch = await requireCoordination().readInputBatch(batchId);
+					if (!batch || batch.sessionId !== sessionId) throw new RuntimeError(404, "输入批次不存在");
+					await requireSession(sessionId);
+					return requireCoordination().acceptInputBatch(batchId, turnId);
+				},
+				false,
+			);
 		},
 		consumeInputBatch(sessionId: string, batchId: string, turnId: string) {
-			return execute(async () => {
-				const batch = await requireCoordination().readInputBatch(batchId);
-				if (!batch || batch.sessionId !== sessionId) throw new RuntimeError(404, "输入批次不存在");
-				return requireCoordination().consumeInputBatch(batchId, turnId);
-			}, false);
+			return executeSession(
+				sessionId,
+				async () => {
+					const batch = await requireCoordination().readInputBatch(batchId);
+					if (!batch || batch.sessionId !== sessionId) throw new RuntimeError(404, "输入批次不存在");
+					return requireCoordination().consumeInputBatch(batchId, turnId);
+				},
+				false,
+			);
 		},
 		yieldTurn(
 			sessionId: string,
 			input: Omit<YieldRecord, "sessionId" | "yieldId" | "createdAt" | "status"> & { yieldId?: string },
 		) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (session.turn?.id !== input.turnId) throw new RuntimeError(409, "Turn 不存在或已切换");
-				return requireCoordination().yieldTurn({ ...input, sessionId });
-			}, false);
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (session.turn?.id !== input.turnId) throw new RuntimeError(409, "Turn 不存在或已切换");
+					return requireCoordination().yieldTurn({ ...input, sessionId });
+				},
+				false,
+			);
 		},
 		listSessionMetadata() {
 			return execute(async () => {
@@ -2128,7 +2029,7 @@ async function initializeRuntime(options: RuntimeOptions) {
 					const page = await store.listSessions({ limit: 200, cursor });
 					for (const saved of page.sessions) {
 						const loaded = sessions.get(saved.id);
-						result.push(loaded ? metadata(loaded) : saved);
+						result.push(loaded ? metadata(loaded) : { ...saved, ...summary(saved) });
 					}
 					cursor = page.nextCursor ?? undefined;
 				} while (cursor);
@@ -2234,10 +2135,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 				if (body.workerId !== undefined) {
 					if (typeof body.workerId !== "string" || body.workerId !== body.assistantId)
 						throw new RuntimeError(400, "workerId 必须等于显式 assistantId");
-					if (!options.workers || !store.readWorker) throw new RuntimeError(405, "当前宿主未启用 Worker 通信");
-					const worker = await store.readWorker(body.workerId);
-					if (!worker || worker.assistantId !== body.assistantId)
-						throw new RuntimeError(409, "助手尚未注册 Worker");
 				}
 				const requestFingerprint = createHash("sha256")
 					.update(
@@ -2285,8 +2182,6 @@ async function initializeRuntime(options: RuntimeOptions) {
 					[],
 					async (activity) => await recordActivity(session, activity),
 					(request, signal) => requestInteraction(session, request, signal),
-					(toolCallId, binding, description, prompt, options, signal) =>
-						runSubagent(session, toolCallId, binding, description, prompt, options, signal),
 					{
 						update: async (next, source, projected) => await updateCompaction(session, next, source, projected),
 						report: async (event) => await publish(session, event.type, event),
@@ -2301,14 +2196,14 @@ async function initializeRuntime(options: RuntimeOptions) {
 						runJob: options.jobs ? (toolCallId, signal) => runJob(session, toolCallId, signal) : undefined,
 					},
 					async (event) => await publish(session, event.type, event),
-					body.workerId ? workerCommunication(() => session, runtime) : undefined,
+					options.workers ? workerCommunication(() => session, runtime) : undefined,
 				);
 				session = {
 					id,
 					kind: "root",
 					mode,
 					assistantId,
-					workerId: body.workerId,
+					workerId: assistantId,
 					assistantRevision,
 					astronSessionId,
 					runtimeSource: hostDefinition ? "host" : "local",
@@ -2360,6 +2255,59 @@ async function initializeRuntime(options: RuntimeOptions) {
 				return await snapshot(session, options);
 			}, false);
 		},
+		async compactSession(
+			sessionId: string,
+			body: SessionCompactionInput = {},
+			options?: { signal?: AbortSignal },
+		): Promise<SessionCompactionResult> {
+			if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
+			if (!body || typeof body !== "object" || Array.isArray(body)) throw new RuntimeError(400, "压缩参数需要对象");
+			const selected = body.model;
+			if (
+				selected !== undefined &&
+				(!selected ||
+					typeof selected !== "object" ||
+					typeof selected.provider !== "string" ||
+					!selected.provider.trim() ||
+					typeof selected.id !== "string" ||
+					!selected.id.trim())
+			)
+				throw new RuntimeError(400, "model 需要 provider 和 id");
+			if (manualCompactions.has(sessionId) || pendingSessionWrites.has(sessionId))
+				throw new RuntimeError(409, "当前会话正在写入或压缩上下文", "turn_running");
+			const loaded = sessions.get(sessionId);
+			if (loaded) assertCompactIdle(loaded);
+			const controller = new AbortController();
+			const signal = options?.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
+			let session: Session | undefined;
+			const pending = (async (): Promise<SessionCompactionResult> => {
+				try {
+					const agent = await execute(async () => {
+						signal.throwIfAborted();
+						session = await requireSession(sessionId);
+						assertCompactIdle(session);
+						await loadHistory(session);
+						signal.throwIfAborted();
+						const messages = [...(session.agent?.state.messages ?? session.messages)];
+						if (!completeToolHistory(messages)) throw new RuntimeError(409, "不能压缩未完成的工具调用");
+						const runtime = session.runtime ?? resolveTurnConfiguration(session, {}).runtime;
+						return createSessionAgent(session, runtime, messages, selected);
+					}, true);
+					// Summary generation owns only this session; cancellation and other sessions must keep progressing.
+					const result = await agent.compact(signal);
+					return { completed: true, ...result };
+				} finally {
+					manualCompactions.delete(sessionId);
+					if (!commandActive) await publishStorageFailure();
+					if (session) {
+						if (!closing) await publish(session, "snapshot");
+						releaseSession(session);
+					}
+				}
+			})();
+			manualCompactions.set(sessionId, { controller, signal, promise: pending });
+			return pending;
+		},
 		listBackgroundJobs(sessionId: string): Promise<BackgroundJobList> {
 			return execute(async () => {
 				const session = await requireSession(sessionId);
@@ -2409,21 +2357,25 @@ async function initializeRuntime(options: RuntimeOptions) {
 			}, false);
 		},
 		forkSession(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if ("beforeMessageId" in body) {
-					const messages = await fullHistory(session);
-					const index =
-						body.beforeMessageId === null
-							? messages.length
-							: messages.findIndex((message) => historyMessageId(message) === body.beforeMessageId);
-					if (index < 0) throw new RuntimeError(400, "分叉边界消息不存在");
-					return await forkSession(session, index, body.title, true);
-				}
-				if (typeof body.messageIndex !== "number")
-					throw new RuntimeError(400, "messageIndex 需要指向有效的用户消息");
-				return await forkSession(session, body.messageIndex, body.title);
-			}, true);
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if ("beforeMessageId" in body) {
+						const messages = await fullHistory(session);
+						const index =
+							body.beforeMessageId === null
+								? messages.length
+								: messages.findIndex((message) => historyMessageId(message) === body.beforeMessageId);
+						if (index < 0) throw new RuntimeError(400, "分叉边界消息不存在");
+						return await forkSession(session, index, body.title, true);
+					}
+					if (typeof body.messageIndex !== "number")
+						throw new RuntimeError(400, "messageIndex 需要指向有效的用户消息");
+					return await forkSession(session, body.messageIndex, body.title);
+				},
+				true,
+			);
 		},
 		getTree(sessionId: string) {
 			return execute(async () => {
@@ -2462,188 +2414,212 @@ async function initializeRuntime(options: RuntimeOptions) {
 			}, false);
 		},
 		selectTree(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (session.kind !== "root") throw new RuntimeError(409, "子会话不能切换分支");
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (session.kind !== "root") throw new RuntimeError(409, "子会话不能切换分支");
 
-				if (session.turn?.status === "running" || session.turn?.status === "interrupted")
-					throw new RuntimeError(409, "请先结束或取消当前 Turn，再切换分支");
-				await session.runPromise;
-				const tree = await store.readTree(session.id);
-				const selected = tree.nodes.find((node) =>
-					"entryId" in body ? node.id === body.entryId : historyMessageId(node.message) === body.messageId,
-				);
-				if (!selected) throw new RuntimeError(400, "会话树节点不存在");
-				const leafId = selected.message.role === "user" ? selected.parentId : selected.id;
-				const path = treePath(tree, leafId);
-				const messages = path.map((node) => structuredClone(node.message));
-				for (const [index, message] of messages.entries()) entryIds.set(message, path[index].id);
-				if (!completeToolHistory(messages)) throw new RuntimeError(409, "不能切换到未完成的工具调用");
-				const previous = { ...session };
-				session.tree = { leafId, nodes: [] };
-				session.historyLoaded = true;
-				session.agent = undefined;
-				session.messages = messages;
-				session.turn = undefined;
-				session.turnCheckpoint = undefined;
-				session.compaction = undefined;
-				session.transferBase = undefined;
-				session.transferBaseMessageCount = undefined;
-				session.updatedAt = Date.now();
-				try {
-					await persist(session);
-				} catch (error) {
-					Object.assign(session, previous);
-					throw error;
-				}
-				await publish(session, "snapshot", { type: "history.reset" });
-				const displayed = displayAgentMessages([selected.message])[0];
-				return {
-					session: await snapshot(session),
-					selectedText: selected.message.role === "user" && displayed ? contentText(displayed.content) : "",
-				};
-			}, true);
+					if (session.turn?.status === "running" || session.turn?.status === "interrupted")
+						throw new RuntimeError(409, "请先结束或取消当前 Turn，再切换分支");
+					await session.runPromise;
+					const tree = await store.readTree(session.id);
+					const selected = tree.nodes.find((node) =>
+						"entryId" in body ? node.id === body.entryId : historyMessageId(node.message) === body.messageId,
+					);
+					if (!selected) throw new RuntimeError(400, "会话树节点不存在");
+					const leafId = selected.message.role === "user" ? selected.parentId : selected.id;
+					const path = treePath(tree, leafId);
+					const messages = path.map((node) => structuredClone(node.message));
+					for (const [index, message] of messages.entries()) entryIds.set(message, path[index].id);
+					if (!completeToolHistory(messages)) throw new RuntimeError(409, "不能切换到未完成的工具调用");
+					const previous = { ...session };
+					session.tree = { leafId, nodes: [] };
+					session.historyLoaded = true;
+					session.agent = undefined;
+					session.messages = messages;
+					session.turn = undefined;
+					session.turnCheckpoint = undefined;
+					session.compaction = undefined;
+					session.transferBase = undefined;
+					session.transferBaseMessageCount = undefined;
+					session.updatedAt = Date.now();
+					try {
+						await persist(session);
+					} catch (error) {
+						Object.assign(session, previous);
+						throw error;
+					}
+					await publish(session, "snapshot", { type: "history.reset" });
+					const displayed = displayAgentMessages([selected.message])[0];
+					return {
+						session: await snapshot(session),
+						selectedText: selected.message.role === "user" && displayed ? contentText(displayed.content) : "",
+					};
+				},
+				true,
+			);
 		},
 		importSession(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话不能导入历史");
-				if (session.turn?.status === "running" || session.turn?.status === "interrupted")
-					throw new RuntimeError(409, "请先结束或取消当前 Turn，再导入历史");
-				await session.runPromise;
-				const transfer = parseSessionTransfer(body);
-				const importedMessages = transferToAgentMessages(transfer);
-				const previous = {
-					agent: session.agent,
-					historyLoaded: session.historyLoaded,
-					astronSessionId: session.astronSessionId,
-					title: session.title,
-					workspacePath: session.workspacePath,
-					createdAt: session.createdAt,
-					updatedAt: session.updatedAt,
-					messages: session.messages,
-					tree: session.tree,
-					activities: session.activities,
-					compaction: session.compaction,
-					transferBase: session.transferBase,
-					transferBaseMessageCount: session.transferBaseMessageCount,
-					modelOverride: session.modelOverride,
-				};
-				session.agent = undefined;
-				session.astronSessionId = transfer.source.astronSessionId;
-				session.title = transfer.title ?? session.title;
-				session.workspacePath = transfer.workspacePath ?? session.workspacePath;
-				session.createdAt = transfer.createdAt ?? session.createdAt;
-				session.updatedAt = transfer.updatedAt ?? Date.now();
-				session.messages = importedMessages;
-				session.historyLoaded = true;
-				session.tree = undefined;
-				session.activities = [];
-				session.compaction = undefined;
-				session.transferBase = structuredClone(transfer.transcript);
-				session.transferBaseMessageCount = importedMessages.length;
-				session.modelOverride = transfer.modelOverride ?? null;
-				try {
-					await persist(session, true);
-				} catch (error) {
-					Object.assign(session, previous);
-					throw error;
-				}
-				await publish(session, "snapshot", { type: "history.reset" });
-				const result: SessionTransfer = exportSession({ ...session, messages: await fullHistory(session) });
-				return { session: await snapshot(session), transfer: result };
-			}, true);
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (session.kind === "subagent") throw new RuntimeError(409, "子会话不能导入历史");
+					if (session.turn?.status === "running" || session.turn?.status === "interrupted")
+						throw new RuntimeError(409, "请先结束或取消当前 Turn，再导入历史");
+					await session.runPromise;
+					const transfer = parseSessionTransfer(body);
+					const importedMessages = transferToAgentMessages(transfer);
+					const previous = {
+						agent: session.agent,
+						historyLoaded: session.historyLoaded,
+						astronSessionId: session.astronSessionId,
+						title: session.title,
+						workspacePath: session.workspacePath,
+						createdAt: session.createdAt,
+						updatedAt: session.updatedAt,
+						messages: session.messages,
+						tree: session.tree,
+						activities: session.activities,
+						compaction: session.compaction,
+						transferBase: session.transferBase,
+						transferBaseMessageCount: session.transferBaseMessageCount,
+						modelOverride: session.modelOverride,
+					};
+					session.agent = undefined;
+					session.astronSessionId = transfer.source.astronSessionId;
+					session.title = transfer.title ?? session.title;
+					session.workspacePath = transfer.workspacePath ?? session.workspacePath;
+					session.createdAt = transfer.createdAt ?? session.createdAt;
+					session.updatedAt = transfer.updatedAt ?? Date.now();
+					session.messages = importedMessages;
+					session.historyLoaded = true;
+					session.tree = undefined;
+					session.activities = [];
+					session.compaction = undefined;
+					session.transferBase = structuredClone(transfer.transcript);
+					session.transferBaseMessageCount = importedMessages.length;
+					session.modelOverride = transfer.modelOverride ?? null;
+					try {
+						await persist(session, true);
+					} catch (error) {
+						Object.assign(session, previous);
+						throw error;
+					}
+					await publish(session, "snapshot", { type: "history.reset" });
+					const result: SessionTransfer = exportSession({ ...session, messages: await fullHistory(session) });
+					return { session: await snapshot(session), transfer: result };
+				},
+				true,
+			);
 		},
 		setModelOverride(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
 
-				if (!("modelOverride" in body)) throw new RuntimeError(400, "需要 modelOverride 字段");
-				const selection = parseSessionModelOverride(body.modelOverride);
-				if (body.initializeOnly === true && "modelOverride" in session) return await snapshot(session);
-				const previous = { modelOverride: session.modelOverride, updatedAt: session.updatedAt };
-				const initialized = "modelOverride" in session;
-				session.modelOverride = selection ?? null;
-				session.updatedAt = Date.now();
-				try {
-					await persist(session);
-				} catch (error) {
-					Object.assign(session, previous);
-					if (!initialized) delete session.modelOverride;
-					throw error;
-				}
-				await publish(session, "snapshot");
-				return await snapshot(session);
-			}, true);
+					if (!("modelOverride" in body)) throw new RuntimeError(400, "需要 modelOverride 字段");
+					const selection = parseSessionModelOverride(body.modelOverride);
+					if (body.initializeOnly === true && "modelOverride" in session) return await snapshot(session);
+					const previous = { modelOverride: session.modelOverride, updatedAt: session.updatedAt };
+					const initialized = "modelOverride" in session;
+					session.modelOverride = selection ?? null;
+					session.updatedAt = Date.now();
+					try {
+						await persist(session);
+					} catch (error) {
+						Object.assign(session, previous);
+						if (!initialized) delete session.modelOverride;
+						throw error;
+					}
+					await publish(session, "snapshot");
+					return await snapshot(session);
+				},
+				true,
+			);
 		},
 		archiveSession(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				if (typeof body.archived !== "boolean") throw new RuntimeError(400, "archived 必须为布尔值");
-				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
-				const previous = { archived: session.archived, updatedAt: session.updatedAt };
-				session.archived = body.archived;
-				session.updatedAt = Date.now();
-				try {
-					await persist(session);
-				} catch (error) {
-					Object.assign(session, previous);
-					throw error;
-				}
-				await publish(session, "snapshot");
-				return await snapshot(session);
-			}, true);
+			return executeSession(
+				sessionId,
+				async () => {
+					if (typeof body.archived !== "boolean") throw new RuntimeError(400, "archived 必须为布尔值");
+					const session = await requireSession(sessionId);
+					if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
+					const previous = { archived: session.archived, updatedAt: session.updatedAt };
+					session.archived = body.archived;
+					session.updatedAt = Date.now();
+					try {
+						await persist(session);
+					} catch (error) {
+						Object.assign(session, previous);
+						throw error;
+					}
+					await publish(session, "snapshot");
+					return await snapshot(session);
+				},
+				true,
+			);
 		},
 		setSessionWorkspace(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				const workspacePath = sessionWorkspacePath(body.workspacePath);
-				const session = await requireSession(sessionId);
-				if (session.workspacePath === workspacePath) return structuredClone(summary(session));
-				assertAction(session, "submit");
-				if (
-					session.agent?.hasQueuedMessages() ||
-					jobs.list(session.id).some((job) => job.status === "running") ||
-					[...pendingInteractions.values()].some(
-						(pending) => pending.sessionId === session.id || pending.executionSessionId === session.id,
+			return executeSession(
+				sessionId,
+				async () => {
+					const workspacePath = sessionWorkspacePath(body.workspacePath);
+					const session = await requireSession(sessionId);
+					if (session.workspacePath === workspacePath) return structuredClone(summary(session));
+					assertAction(session, "submit");
+					if (
+						session.agent?.hasQueuedMessages() ||
+						jobs.list(session.id).some((job) => job.status === "running") ||
+						[...pendingInteractions.values()].some(
+							(pending) => pending.sessionId === session.id || pending.executionSessionId === session.id,
+						)
 					)
-				)
-					throw new RuntimeError(409, "请先结束当前执行、后台任务及交互");
-				const previous = { workspacePath: session.workspacePath, updatedAt: session.updatedAt };
-				session.workspacePath = workspacePath;
-				session.updatedAt = Date.now();
-				try {
-					await persist(session);
-				} catch (error) {
-					Object.assign(session, previous);
-					throw error;
-				}
-				session.agent = undefined;
-				await publish(session, "snapshot");
-				return structuredClone(summary(session));
-			}, true);
+						throw new RuntimeError(409, "请先结束当前执行、后台任务及交互");
+					const previous = { workspacePath: session.workspacePath, updatedAt: session.updatedAt };
+					session.workspacePath = workspacePath;
+					session.updatedAt = Date.now();
+					try {
+						await persist(session);
+					} catch (error) {
+						Object.assign(session, previous);
+						throw error;
+					}
+					session.agent = undefined;
+					await publish(session, "snapshot");
+					return structuredClone(summary(session));
+				},
+				true,
+			);
 		},
 		renameSession(sessionId: string, body: Record<string, unknown>) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (session.kind === "subagent") throw new RuntimeError(409, "子会话为只读会话");
 
-				if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100)
-					throw new RuntimeError(400, "会话标题需要 1–100 个字符");
-				if (session.turn?.status === "running") throw new RuntimeError(409, "请在执行结束后重命名");
-				await session.runPromise;
-				const previous = session.title;
-				session.title = body.title.trim();
-				session.updatedAt = Date.now();
-				try {
-					await persist(session);
-				} catch (error) {
-					session.title = previous;
-					throw error;
-				}
-				await publish(session, "snapshot");
-				return await snapshot(session);
-			}, true);
+					if (typeof body.title !== "string" || !body.title.trim() || body.title.length > 100)
+						throw new RuntimeError(400, "会话标题需要 1–100 个字符");
+					if (session.turn?.status === "running") throw new RuntimeError(409, "请在执行结束后重命名");
+					await session.runPromise;
+					const previous = session.title;
+					session.title = body.title.trim();
+					session.updatedAt = Date.now();
+					try {
+						await persist(session);
+					} catch (error) {
+						session.title = previous;
+						throw error;
+					}
+					await publish(session, "snapshot");
+					return await snapshot(session);
+				},
+				true,
+			);
 		},
 		async cancelTurn(sessionId: string, body: { turnId: string; bestEffort?: boolean }) {
 			if (closing) throw new RuntimeError(503, "运行时正在关闭", "runtime_closing");
@@ -2673,31 +2649,276 @@ async function initializeRuntime(options: RuntimeOptions) {
 				}
 				return cancelRunningTurn(active);
 			}
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				assertAction(session, "cancel", body.turnId, ["turn_terminal"]);
-				const turn = session.turn!;
-				if (session.workerId && (turn.yield || turn.status === "interrupted"))
-					await options.workers?.cancel(session.id, turn.id);
-				if (turn.status === "running") {
-					return await cancelRunningTurn(session);
-				} else if (turn.status === "interrupted" || turn.yield) {
-					let records: ToolExecutionRecord[] = [];
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					assertAction(session, "cancel", body.turnId, ["turn_terminal"]);
+					const turn = session.turn!;
+					if (session.workerId && (turn.yield || turn.status === "interrupted"))
+						await options.workers?.cancel(session.id, turn.id);
+					if (turn.status === "running") {
+						return await cancelRunningTurn(session);
+					} else if (turn.status === "interrupted" || turn.yield) {
+						let records: ToolExecutionRecord[] = [];
+						const previous = {
+							turn: session.turn,
+							turnCheckpoint: session.turnCheckpoint,
+							updatedAt: session.updatedAt,
+						};
+						if (session.turnCheckpoint?.jobs?.length) {
+							session.turnCheckpoint.cancelRequested = true;
+							await persist(session);
+							await cancelJobs(session);
+							records = await closeCancelledJobs(session);
+						}
+						session.turn = { ...turn, status: "cancelled", error: undefined };
+						delete session.turn.yield;
+						session.yieldRequested = undefined;
+						session.turnCheckpoint = undefined;
+						session.updatedAt = Date.now();
+						try {
+							await persist(session, false, undefined, records);
+						} catch (error) {
+							Object.assign(session, previous);
+							throw error;
+						}
+						await publish(session, "turn.settled");
+						return cancellationReceipt(session);
+					}
+					return cancellationReceipt(session, false);
+				},
+				false,
+			);
+		},
+		steer(sessionId: string, body: TurnInput & { turnId: string }): Promise<SteerReceipt> {
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					const content = turnContent(body);
+					assertAction(session, "steer", body.turnId);
+					const requestId = optionalRequestId(body);
+					const canonicalTurnId = optionalCanonicalTurnId(body);
+					const retry =
+						canonicalTurnId === undefined ? undefined : retryTurnReceipt(session, requestId, canonicalTurnId);
+					if (retry)
+						return { ...retry, queued: retry.queued ?? false, durable: false, applied: retry.applied ?? true };
+					const messageIdentity = optionalMessageIdentity(body);
+					if (session.turnCheckpoint) {
+						session.turnCheckpoint.blockedReason = "包含尚未持久化的 Steer 队列";
+						await persist(session);
+					}
+					const agent = await attachAgent(session);
+					assertAction(session, "steer", body.turnId);
+					const userMessage: Extract<AgentMessage, { role: "user" }> & {
+						displayContent?: string;
+					} & UserMessageIdentity = {
+						role: "user",
+						content,
+						timestamp: Date.now(),
+						...messageIdentity,
+					};
+					if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
+					const turn = session.turn!;
+					const predecessor = turn.steerAdmissions?.at(-1);
+					const previousCanonicalTurnId = predecessor ? predecessor.canonicalTurnId : turn.canonicalTurnId;
+					const admission: SteerAdmission = {
+						...(canonicalTurnId !== undefined ? { canonicalTurnId } : {}),
+						...(requestId !== undefined ? { requestId } : {}),
+						...(canonicalTurnId !== undefined &&
+						canonicalTurnId !== previousCanonicalTurnId &&
+						previousCanonicalTurnId !== undefined
+							? { replacesCanonicalTurnId: previousCanonicalTurnId }
+							: {}),
+						status: "queued",
+						applied: false,
+						acceptedAtMs: userMessage.timestamp,
+					};
+					turn.steerAdmissions ??= [];
+					turn.steerAdmissions.push(admission);
+					queuedSteers.set(userMessage, admission);
+					agent.steer(userMessage);
+					const receipt = steerReceipt(session, admission);
+					await persist(session);
+					await publish(session, "snapshot");
+					return receipt;
+				},
+				false,
+			);
+		},
+		replyInteraction(sessionId: string, interactionId: string, body: InteractionReply) {
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (!interactionId) throw new RuntimeError(404, "交互不存在");
+
+					if (
+						!body ||
+						typeof body.approved !== "boolean" ||
+						(body.remember !== undefined && typeof body.remember !== "boolean") ||
+						(body.remember === true && !body.approved)
+					)
+						throw new RuntimeError(400, "approved、remember 必须为布尔值，且仅允许记忆同意的操作");
+					const pending = pendingInteractions.get(interactionId);
+					if (!pending || pending.sessionId !== session.id) throw new RuntimeError(404, "交互不存在");
+					if (pending.turnId !== session.turn?.id) throw new RuntimeError(409, "交互已失效");
+					if (body.remember) {
+						pending.signal?.throwIfAborted();
+						const grant = interactionPermission(pending.request);
+						if (!grant) throw new RuntimeError(400, "此操作不支持记忆授权");
+						const execution = await requireSession(pending.executionSessionId);
+						const existing = execution.permissionGrants ?? [];
+						const patterns = grant.patterns.filter(
+							(pattern) => !hasPermissionGrant(execution, { permission: grant.permission, patterns: [pattern] }),
+						);
+						if (patterns.length) {
+							if (
+								existing.reduce((count, saved) => count + saved.patterns.length, 0) + patterns.length >
+								MAX_SAVED_PERMISSION_PATTERNS
+							)
+								throw new RuntimeError(400, "会话记忆授权范围不能超过 1024 项");
+							await persist(
+								execution,
+								false,
+								undefined,
+								[],
+								[...existing, { permission: grant.permission, patterns }],
+							);
+						}
+						for (const [id, candidate] of pendingInteractions) {
+							if (
+								candidate.executionSessionId === execution.id &&
+								candidate.turnId === sessions.get(candidate.sessionId)?.turn?.id &&
+								!candidate.signal?.aborted &&
+								candidate.request.remember &&
+								hasPermissionGrant(execution, candidate.request.remember)
+							)
+								await settleInteraction(id, true);
+						}
+					}
+					await settleInteraction(
+						interactionId,
+						body.approved,
+						body.approved ? undefined : new Error("用户拒绝了操作"),
+					);
+					return { sessionId: session.id, interactionId, approved: body.approved };
+				},
+				true,
+			);
+		},
+		resumeTurn(sessionId: string, body: { turnId: string }) {
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					assertAction(session, "resume", body.turnId);
+					const turn = session.turn!;
+					await session.runPromise;
+					const tree = session.turnCheckpoint?.inputEntryId
+						? await store.readTurnPath(session.id, session.turnCheckpoint.inputEntryId)
+						: await store.readPath(session.id);
+					const recovered = recoverInterruptedTurn({ ...session, leafId: tree.leafId }, tree);
+					if (!recovered || (recovered.status !== "interrupted" && recovered.status !== "completed"))
+						throw new RuntimeError(
+							409,
+							recovered?.error ?? "当前 Turn 不在可恢复边界",
+							"recovery_validation_failed",
+						);
+					const calls = new Map(
+						tree.nodes.flatMap(({ message }) =>
+							message.role === "assistant"
+								? message.content.flatMap((part) =>
+										part.type === "toolCall" ? [[part.id, part.name] as const] : [],
+									)
+								: [],
+						),
+					);
+					const savedResults = new Map(
+						tree.nodes.flatMap(({ message }) =>
+							message.role === "toolResult" ? [[message.toolCallId, message] as const] : [],
+						),
+					);
+					const externalIds = new Map((session.turnCheckpoint?.jobs ?? []).map((job) => [job.toolCallId, job.id]));
+					let afterSeq: number | undefined;
+					do {
+						const page = await store.readToolExecutions(session.id, {
+							turnId: turn.id,
+							limit: 200,
+							afterSeq,
+						});
+						for (const record of page.entries) {
+							try {
+								validateToolExecutionRecord(record, session.id, turn.id);
+								const result = savedResults.get(record.toolCallId);
+								if (
+									calls.get(record.toolCallId) !== record.toolName ||
+									(record.externalId !== undefined &&
+										record.externalId !== externalIds.get(record.toolCallId)) ||
+									((record.phase === "completed" || record.phase === "failed") &&
+										(!result ||
+											result.toolName !== record.toolName ||
+											result.isError !== (record.phase === "failed")))
+								)
+									throw new Error("工具执行账本与历史或外部关联不一致");
+							} catch (error) {
+								throw new RuntimeError(
+									409,
+									error instanceof Error ? error.message : String(error),
+									"recovery_validation_failed",
+								);
+							}
+						}
+						afterSeq = page.nextAfterSeq ?? undefined;
+					} while (afterSeq !== undefined);
+					const results: AgentMessage[] = [];
+					const records: ToolExecutionRecord[] = [];
+					for (const reference of await pendingJobs(session)) {
+						if (!options.jobs)
+							throw new RuntimeError(409, "宿主未配置外部任务执行器", "external_executor_unavailable");
+						const job = await options.jobs.get(reference);
+						let result: ReturnType<typeof durableJobResult>;
+						try {
+							result = durableJobResult(reference, job);
+						} catch (error) {
+							if (error instanceof DurableJobError)
+								throw new RuntimeError(409, error.message, "recovery_validation_failed");
+							throw error;
+						}
+						if (!result)
+							throw new RuntimeError(409, "外部任务仍在运行，请稍后查询后恢复", "external_job_running");
+						results.push(result);
+						records.push(
+							executionRecord(
+								session,
+								reference.toolCallId,
+								reference.toolName,
+								result.isError ? "failed" : "completed",
+							),
+						);
+					}
+					await loadHistory(session);
 					const previous = {
 						turn: session.turn,
 						turnCheckpoint: session.turnCheckpoint,
+						agent: session.agent,
 						updatedAt: session.updatedAt,
+						messages: session.messages,
+						jobInterruption: session.jobInterruption,
 					};
-					if (session.turnCheckpoint?.jobs?.length) {
-						session.turnCheckpoint.cancelRequested = true;
-						await persist(session);
-						await cancelJobs(session);
-						records = await closeCancelledJobs(session);
+					session.jobInterruption = undefined;
+					if (recovered.status === "interrupted") {
+						session.messages = [...session.messages, ...results];
+						const agent = createSessionAgent(session, session.runtime!);
+						agent.state.systemPrompt = session.turnCheckpoint!.systemPrompt;
+						bindAgent(session, agent);
+						session.turn = { ...recovered, status: "running" };
+					} else {
+						session.turn = recovered;
+						session.turnCheckpoint = undefined;
 					}
-					session.turn = { ...turn, status: "cancelled", error: undefined };
-					delete session.turn.yield;
-					session.yieldRequested = undefined;
-					session.turnCheckpoint = undefined;
+					session.cancelRequested = false;
 					session.updatedAt = Date.now();
 					try {
 						await persist(session, false, undefined, records);
@@ -2705,450 +2926,237 @@ async function initializeRuntime(options: RuntimeOptions) {
 						Object.assign(session, previous);
 						throw error;
 					}
-					await publish(session, "turn.settled");
-					return cancellationReceipt(session);
-				}
-				return cancellationReceipt(session, false);
-			}, false);
-		},
-		steer(sessionId: string, body: TurnInput & { turnId: string }): Promise<SteerReceipt> {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				const content = turnContent(body);
-				assertAction(session, "steer", body.turnId);
-				const requestId = optionalRequestId(body);
-				const canonicalTurnId = optionalCanonicalTurnId(body);
-				const retry =
-					canonicalTurnId === undefined ? undefined : retryTurnReceipt(session, requestId, canonicalTurnId);
-				if (retry)
-					return { ...retry, queued: retry.queued ?? false, durable: false, applied: retry.applied ?? true };
-				const messageIdentity = optionalMessageIdentity(body);
-				if (session.turnCheckpoint) {
-					session.turnCheckpoint.blockedReason = "包含尚未持久化的 Steer 队列";
-					await persist(session);
-				}
-				const agent = await attachAgent(session);
-				assertAction(session, "steer", body.turnId);
-				const userMessage: Extract<AgentMessage, { role: "user" }> & {
-					displayContent?: string;
-				} & UserMessageIdentity = {
-					role: "user",
-					content,
-					timestamp: Date.now(),
-					...messageIdentity,
-				};
-				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
-				const turn = session.turn!;
-				const predecessor = turn.steerAdmissions?.at(-1);
-				const previousCanonicalTurnId = predecessor ? predecessor.canonicalTurnId : turn.canonicalTurnId;
-				const admission: SteerAdmission = {
-					...(canonicalTurnId !== undefined ? { canonicalTurnId } : {}),
-					...(requestId !== undefined ? { requestId } : {}),
-					...(canonicalTurnId !== undefined &&
-					canonicalTurnId !== previousCanonicalTurnId &&
-					previousCanonicalTurnId !== undefined
-						? { replacesCanonicalTurnId: previousCanonicalTurnId }
-						: {}),
-					status: "queued",
-					applied: false,
-					acceptedAtMs: userMessage.timestamp,
-				};
-				turn.steerAdmissions ??= [];
-				turn.steerAdmissions.push(admission);
-				queuedSteers.set(userMessage, admission);
-				agent.steer(userMessage);
-				const receipt = steerReceipt(session, admission);
-				await persist(session);
-				await publish(session, "snapshot");
-				return receipt;
-			}, false);
-		},
-		replyInteraction(sessionId: string, interactionId: string, body: InteractionReply) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (!interactionId) throw new RuntimeError(404, "交互不存在");
-
-				if (
-					!body ||
-					typeof body.approved !== "boolean" ||
-					(body.remember !== undefined && typeof body.remember !== "boolean") ||
-					(body.remember === true && !body.approved)
-				)
-					throw new RuntimeError(400, "approved、remember 必须为布尔值，且仅允许记忆同意的操作");
-				const pending = pendingInteractions.get(interactionId);
-				if (!pending || pending.sessionId !== session.id) throw new RuntimeError(404, "交互不存在");
-				if (pending.turnId !== session.turn?.id) throw new RuntimeError(409, "交互已失效");
-				if (body.remember) {
-					pending.signal?.throwIfAborted();
-					const grant = interactionPermission(pending.request);
-					if (!grant) throw new RuntimeError(400, "此操作不支持记忆授权");
-					const execution = await requireSession(pending.executionSessionId);
-					const existing = execution.permissionGrants ?? [];
-					const patterns = grant.patterns.filter(
-						(pattern) => !hasPermissionGrant(execution, { permission: grant.permission, patterns: [pattern] }),
-					);
-					if (patterns.length) {
-						if (
-							existing.reduce((count, saved) => count + saved.patterns.length, 0) + patterns.length >
-							MAX_SAVED_PERMISSION_PATTERNS
-						)
-							throw new RuntimeError(400, "会话记忆授权范围不能超过 1024 项");
-						await persist(
-							execution,
-							false,
-							undefined,
-							[],
-							[...existing, { permission: grant.permission, patterns }],
-						);
-					}
-					for (const [id, candidate] of pendingInteractions) {
-						if (
-							candidate.executionSessionId === execution.id &&
-							candidate.turnId === sessions.get(candidate.sessionId)?.turn?.id &&
-							!candidate.signal?.aborted &&
-							candidate.request.remember &&
-							hasPermissionGrant(execution, candidate.request.remember)
-						)
-							await settleInteraction(id, true);
-					}
-				}
-				await settleInteraction(
-					interactionId,
-					body.approved,
-					body.approved ? undefined : new Error("用户拒绝了操作"),
-				);
-				return { sessionId: session.id, interactionId, approved: body.approved };
-			}, true);
-		},
-		resumeTurn(sessionId: string, body: { turnId: string }) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				assertAction(session, "resume", body.turnId);
-				const turn = session.turn!;
-				await session.runPromise;
-				const tree = session.turnCheckpoint?.inputEntryId
-					? await store.readTurnPath(session.id, session.turnCheckpoint.inputEntryId)
-					: await store.readPath(session.id);
-				const recovered = recoverInterruptedTurn({ ...session, leafId: tree.leafId }, tree);
-				if (!recovered || (recovered.status !== "interrupted" && recovered.status !== "completed"))
-					throw new RuntimeError(
-						409,
-						recovered?.error ?? "当前 Turn 不在可恢复边界",
-						"recovery_validation_failed",
-					);
-				const calls = new Map(
-					tree.nodes.flatMap(({ message }) =>
-						message.role === "assistant"
-							? message.content.flatMap((part) =>
-									part.type === "toolCall" ? [[part.id, part.name] as const] : [],
-								)
-							: [],
-					),
-				);
-				const savedResults = new Map(
-					tree.nodes.flatMap(({ message }) =>
-						message.role === "toolResult" ? [[message.toolCallId, message] as const] : [],
-					),
-				);
-				const externalIds = new Map((session.turnCheckpoint?.jobs ?? []).map((job) => [job.toolCallId, job.id]));
-				let afterSeq: number | undefined;
-				do {
-					const page = await store.readToolExecutions(session.id, {
-						turnId: turn.id,
-						limit: 200,
-						afterSeq,
-					});
-					for (const record of page.entries) {
-						try {
-							validateToolExecutionRecord(record, session.id, turn.id);
-							const result = savedResults.get(record.toolCallId);
-							if (
-								calls.get(record.toolCallId) !== record.toolName ||
-								(record.externalId !== undefined && record.externalId !== externalIds.get(record.toolCallId)) ||
-								((record.phase === "completed" || record.phase === "failed") &&
-									(!result ||
-										result.toolName !== record.toolName ||
-										result.isError !== (record.phase === "failed")))
-							)
-								throw new Error("工具执行账本与历史或外部关联不一致");
-						} catch (error) {
-							throw new RuntimeError(
-								409,
-								error instanceof Error ? error.message : String(error),
-								"recovery_validation_failed",
-							);
-						}
-					}
-					afterSeq = page.nextAfterSeq ?? undefined;
-				} while (afterSeq !== undefined);
-				const results: AgentMessage[] = [];
-				const records: ToolExecutionRecord[] = [];
-				for (const reference of await pendingJobs(session)) {
-					if (!options.jobs)
-						throw new RuntimeError(409, "宿主未配置外部任务执行器", "external_executor_unavailable");
-					const job = await options.jobs.get(reference);
-					let result: ReturnType<typeof durableJobResult>;
-					try {
-						result = durableJobResult(reference, job);
-					} catch (error) {
-						if (error instanceof DurableJobError)
-							throw new RuntimeError(409, error.message, "recovery_validation_failed");
-						throw error;
-					}
-					if (!result) throw new RuntimeError(409, "外部任务仍在运行，请稍后查询后恢复", "external_job_running");
-					results.push(result);
-					records.push(
-						executionRecord(
+					await publish(session, recovered.status === "completed" ? "turn.settled" : "snapshot");
+					for (const result of results)
+						await publish(
 							session,
-							reference.toolCallId,
-							reference.toolName,
-							result.isError ? "failed" : "completed",
-						),
-					);
-				}
-				await loadHistory(session);
-				const previous = {
-					turn: session.turn,
-					turnCheckpoint: session.turnCheckpoint,
-					agent: session.agent,
-					updatedAt: session.updatedAt,
-					messages: session.messages,
-					jobInterruption: session.jobInterruption,
-				};
-				session.jobInterruption = undefined;
-				if (recovered.status === "interrupted") {
-					session.messages = [...session.messages, ...results];
-					const agent = createSessionAgent(session, session.runtime!);
-					agent.state.systemPrompt = session.turnCheckpoint!.systemPrompt;
-					bindAgent(session, agent);
-					session.turn = { ...recovered, status: "running" };
-				} else {
-					session.turn = recovered;
-					session.turnCheckpoint = undefined;
-				}
-				session.cancelRequested = false;
-				session.updatedAt = Date.now();
-				try {
-					await persist(session, false, undefined, records);
-				} catch (error) {
-					Object.assign(session, previous);
-					throw error;
-				}
-				await publish(session, recovered.status === "completed" ? "turn.settled" : "snapshot");
-				for (const result of results)
-					await publish(
-						session,
-						"agent.event",
-						projectSessionAgentEvent({ type: "message_end", message: result }),
-					);
-				if (session.turn.status === "running") {
-					startRun(session);
-					return turnReceipt(session, { started: true, settled: false });
-				}
-				return turnReceipt(session, { started: false });
-			}, false);
+							"agent.event",
+							projectSessionAgentEvent({ type: "message_end", message: result }),
+						);
+					if (session.turn.status === "running") {
+						startRun(session);
+						return turnReceipt(session, { started: true, settled: false });
+					}
+					return turnReceipt(session, { started: false });
+				},
+				false,
+			);
 		},
 		submitTurn(sessionId: string, body: TurnInput) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				const content = turnContent(body);
-				const requestId = optionalRequestId(body);
-				let workerInput: { deliveryId: string; messageId: string } | undefined;
-				let workerMessage: WorkerMessage | undefined;
-				if (body.workerDeliveryId !== undefined) {
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					const content = turnContent(body);
+					const requestId = optionalRequestId(body);
+					let workerInput: { deliveryId: string; messageId: string } | undefined;
+					let workerMessage: WorkerMessage | undefined;
+					if (body.workerDeliveryId !== undefined) {
+						if (
+							typeof body.workerDeliveryId !== "string" ||
+							!session.workerId ||
+							!store.readWorkerDelivery ||
+							!store.readWorkerMessage
+						)
+							throw new RuntimeError(400, "Worker 输入需要受协调 Session 和有效投递身份");
+						const delivery = await store.readWorkerDelivery(body.workerDeliveryId);
+						const message = delivery && (await store.readWorkerMessage(delivery.messageId));
+						if (
+							!delivery ||
+							!message ||
+							delivery.sessionId !== session.id ||
+							delivery.workerId !== session.workerId ||
+							requestId !== message.messageId ||
+							body.text !== message.content ||
+							body.images?.length
+						)
+							throw new RuntimeError(409, "Worker 投递与输入归属不一致");
+						if (delivery.status === "consumed" && delivery.acceptedTurnId)
+							return {
+								sessionId,
+								turnId: delivery.acceptedTurnId,
+								requestId,
+								accepted: true,
+								started: false,
+								settled: true,
+							};
+						if (delivery.status !== "dispatched" && delivery.status !== "resolved")
+							throw new RuntimeError(409, "Worker 投递不接受重复准入");
+						workerInput = { deliveryId: delivery.deliveryId, messageId: message.messageId };
+						workerMessage = message;
+					}
+					const canonicalTurnId = optionalCanonicalTurnId(body);
+					const retry =
+						session.kind === "root" ? retryTurnReceipt(session, requestId, canonicalTurnId) : undefined;
+					if (retry) return retry;
+					assertAction(session, "submit");
 					if (
-						typeof body.workerDeliveryId !== "string" ||
-						!session.workerId ||
-						!store.readWorkerDelivery ||
-						!store.readWorkerMessage
+						body.systemPrompt !== undefined &&
+						(typeof body.systemPrompt !== "string" || body.systemPrompt.length > 60000)
 					)
-						throw new RuntimeError(400, "Worker 输入需要受协调 Session 和有效投递身份");
-					const delivery = await store.readWorkerDelivery(body.workerDeliveryId);
-					const message = delivery && (await store.readWorkerMessage(delivery.messageId));
-					if (
-						!delivery ||
-						!message ||
-						delivery.sessionId !== session.id ||
-						delivery.workerId !== session.workerId ||
-						requestId !== message.messageId ||
-						body.text !== message.content ||
-						body.images?.length
-					)
-						throw new RuntimeError(409, "Worker 投递与输入归属不一致");
-					if (delivery.status === "consumed" && delivery.acceptedTurnId)
-						return {
-							sessionId,
-							turnId: delivery.acceptedTurnId,
-							requestId,
-							accepted: true,
-							started: false,
-							settled: true,
-						};
-					if (delivery.status !== "dispatched" && delivery.status !== "resolved")
-						throw new RuntimeError(409, "Worker 投递不接受重复准入");
-					workerInput = { deliveryId: delivery.deliveryId, messageId: message.messageId };
-					workerMessage = message;
-				}
-				const canonicalTurnId = optionalCanonicalTurnId(body);
-				const retry = session.kind === "root" ? retryTurnReceipt(session, requestId, canonicalTurnId) : undefined;
-				if (retry) return retry;
-				assertAction(session, "submit");
-				if (
-					body.systemPrompt !== undefined &&
-					(typeof body.systemPrompt !== "string" || body.systemPrompt.length > 60000)
-				)
-					throw new RuntimeError(400, "systemPrompt 需要字符串，最多 60000 字符");
-				await session.runPromise;
-				const messageIdentity = optionalMessageIdentity(body);
-				const configuration = resolveTurnConfiguration(session, body);
-				const toolAvailability = optionalToolAvailability(body.toolAvailability);
-				if (toolAvailability !== undefined) configuration.runtime = { ...configuration.runtime, toolAvailability };
-				await loadHistory(session);
-				const oldAgent = session.agent;
-				const oldSavedMessages = session.messages;
-				const oldMessages = oldAgent?.state.messages ?? oldSavedMessages;
-				const oldTurn = session.turn;
-				const oldCheckpoint = session.turnCheckpoint;
-				session.jobInterruption = undefined;
-				const oldAssistant = session.assistant;
-				const oldAssistantRevision = session.assistantRevision;
-				const oldRuntimeSource = session.runtimeSource;
-				const oldRuntime = session.runtime;
-				const oldModel = session.model;
-				const oldProvider = session.provider;
-				let selectedModel = session.modelOverride
-					? { provider: session.modelOverride.providerId, id: session.modelOverride.model }
-					: (factory.settings.current.selected ?? null);
-				if (body.model !== undefined) {
-					const value = body.model;
-					if (
-						!value ||
-						typeof value !== "object" ||
-						!("provider" in value) ||
-						!("id" in value) ||
-						typeof value.provider !== "string" ||
-						typeof value.id !== "string" ||
-						!value.provider.trim() ||
-						!value.id.trim()
-					)
-						throw new RuntimeError(400, "model 需要 provider 和 id");
-					selectedModel = { provider: value.provider, id: value.id };
-				}
-				const configurationChanged =
-					!oldAgent ||
-					configuration.runtimeSource !== oldRuntimeSource ||
-					configuration.assistantRevision !== oldAssistantRevision ||
-					JSON.stringify(configuration.runtime) !== JSON.stringify(oldRuntime) ||
-					Boolean(selectedModel && (selectedModel.id !== oldModel || selectedModel.provider !== oldProvider));
-				const agent = configurationChanged
-					? createSessionAgent(session, configuration.runtime, oldMessages, selectedModel)
-					: oldAgent;
-				session.assistant = configuration.assistant;
-				session.assistantRevision = configuration.assistantRevision;
-				session.runtimeSource = configuration.runtimeSource;
-				session.runtime = configuration.runtime;
-				session.model = agent.state.model.id;
-				session.provider = agent.state.model.provider;
-				if (configurationChanged) bindAgent(session, agent);
-				const now = Date.now();
-				const userMessage: Extract<AgentMessage, { role: "user" }> & {
-					displayContent?: string;
-					workerMessageId?: string;
-				} & UserMessageIdentity = {
-					role: "user",
-					content,
-					timestamp: now,
-					...messageIdentity,
-					...(workerMessage ? workerInputMessage(workerMessage, session.id) : {}),
-				};
-				if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
-				agent.state.messages = [...oldMessages, userMessage];
-				session.turn = {
-					id: randomUUID(),
-					...(requestId ? { requestId, rootRequestId: requestId } : {}),
-					...(canonicalTurnId !== undefined ? { canonicalTurnId, rootCanonicalTurnId: canonicalTurnId } : {}),
-					status: "running",
-				};
-				const update = historyUpdate(session, agent.state.messages);
-				const systemPrompt = factory.composeSystemPrompt(
-					configuration.runtime,
-					typeof body.systemPrompt === "string" ? body.systemPrompt : configuration.runtime.systemPrompt,
-				);
-				session.turnCheckpoint = {
-					version: 1,
-					turnId: session.turn.id,
-					inputEntryId: update.identities.get(userMessage)!,
-					systemPrompt,
-					turnSystemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
-					blockedReason: jobs.list(session.id).some((job) => job.status === "running")
-						? "存在先前尚未结束的后台任务"
-						: undefined,
-				};
-				session.updatedAt = now;
-				session.cancelRequested = false;
-				session.yieldRequested = undefined;
-				try {
-					await persist(
-						session,
-						false,
-						update,
-						[],
-						undefined,
-						workerInput ? { workerInputs: [workerInput] } : undefined,
+						throw new RuntimeError(400, "systemPrompt 需要字符串，最多 60000 字符");
+					await session.runPromise;
+					const messageIdentity = optionalMessageIdentity(body);
+					const configuration = resolveTurnConfiguration(session, body);
+					const toolAvailability = optionalToolAvailability(body.toolAvailability);
+					if (toolAvailability !== undefined)
+						configuration.runtime = { ...configuration.runtime, toolAvailability };
+					await loadHistory(session);
+					const oldAgent = session.agent;
+					const oldSavedMessages = session.messages;
+					const oldMessages = oldAgent?.state.messages ?? oldSavedMessages;
+					const oldTurn = session.turn;
+					const oldCheckpoint = session.turnCheckpoint;
+					session.jobInterruption = undefined;
+					const oldAssistant = session.assistant;
+					const oldAssistantRevision = session.assistantRevision;
+					const oldRuntimeSource = session.runtimeSource;
+					const oldRuntime = session.runtime;
+					const oldModel = session.model;
+					const oldProvider = session.provider;
+					let selectedModel = session.modelOverride
+						? { provider: session.modelOverride.providerId, id: session.modelOverride.model }
+						: (factory.settings.current.selected ?? null);
+					if (body.model !== undefined) {
+						const value = body.model;
+						if (
+							!value ||
+							typeof value !== "object" ||
+							!("provider" in value) ||
+							!("id" in value) ||
+							typeof value.provider !== "string" ||
+							typeof value.id !== "string" ||
+							!value.provider.trim() ||
+							!value.id.trim()
+						)
+							throw new RuntimeError(400, "model 需要 provider 和 id");
+						selectedModel = { provider: value.provider, id: value.id };
+					}
+					const configurationChanged =
+						!oldAgent ||
+						configuration.runtimeSource !== oldRuntimeSource ||
+						configuration.assistantRevision !== oldAssistantRevision ||
+						JSON.stringify(configuration.runtime) !== JSON.stringify(oldRuntime) ||
+						Boolean(selectedModel && (selectedModel.id !== oldModel || selectedModel.provider !== oldProvider));
+					const agent = configurationChanged
+						? createSessionAgent(session, configuration.runtime, oldMessages, selectedModel)
+						: oldAgent;
+					session.assistant = configuration.assistant;
+					session.assistantRevision = configuration.assistantRevision;
+					session.runtimeSource = configuration.runtimeSource;
+					session.runtime = configuration.runtime;
+					session.model = agent.state.model.id;
+					session.provider = agent.state.model.provider;
+					if (configurationChanged) bindAgent(session, agent);
+					const now = Date.now();
+					const userMessage: Extract<AgentMessage, { role: "user" }> & {
+						displayContent?: string;
+						workerMessageId?: string;
+					} & UserMessageIdentity = {
+						role: "user",
+						content,
+						timestamp: now,
+						...messageIdentity,
+						...(workerMessage ? workerInputMessage(workerMessage, session.id) : {}),
+					};
+					if (typeof body.displayText === "string") userMessage.displayContent = body.displayText;
+					agent.state.messages = [...oldMessages, userMessage];
+					session.turn = {
+						id: randomUUID(),
+						...(requestId ? { requestId, rootRequestId: requestId } : {}),
+						...(canonicalTurnId !== undefined ? { canonicalTurnId, rootCanonicalTurnId: canonicalTurnId } : {}),
+						status: "running",
+					};
+					const update = historyUpdate(session, agent.state.messages);
+					const systemPrompt = factory.composeSystemPrompt(
+						configuration.runtime,
+						typeof body.systemPrompt === "string" ? body.systemPrompt : configuration.runtime.systemPrompt,
 					);
-				} catch (error) {
-					agent.state.messages = oldMessages;
-					session.agent = oldAgent;
-					session.messages = oldSavedMessages;
-					session.assistant = oldAssistant;
-					session.assistantRevision = oldAssistantRevision;
-					session.runtimeSource = oldRuntimeSource;
-					session.runtime = oldRuntime;
-					session.model = oldModel;
-					session.provider = oldProvider;
-					session.turn = oldTurn;
-					session.turnCheckpoint = oldCheckpoint;
-					throw error;
-				}
-				agent.state.systemPrompt = systemPrompt;
-				await publish(session, "snapshot", projectSessionAgentEvent({ type: "message_end", message: userMessage }));
-				startRun(session);
-				return turnReceipt(session, { started: true, settled: false });
-			}, false);
+					session.turnCheckpoint = {
+						version: 1,
+						turnId: session.turn.id,
+						inputEntryId: update.identities.get(userMessage)!,
+						systemPrompt,
+						turnSystemPrompt: typeof body.systemPrompt === "string" ? body.systemPrompt : undefined,
+						blockedReason: jobs.list(session.id).some((job) => job.status === "running")
+							? "存在先前尚未结束的后台任务"
+							: undefined,
+					};
+					session.updatedAt = now;
+					session.cancelRequested = false;
+					session.yieldRequested = undefined;
+					try {
+						await persist(
+							session,
+							false,
+							update,
+							[],
+							undefined,
+							workerInput ? { workerInputs: [workerInput] } : undefined,
+						);
+					} catch (error) {
+						agent.state.messages = oldMessages;
+						session.agent = oldAgent;
+						session.messages = oldSavedMessages;
+						session.assistant = oldAssistant;
+						session.assistantRevision = oldAssistantRevision;
+						session.runtimeSource = oldRuntimeSource;
+						session.runtime = oldRuntime;
+						session.model = oldModel;
+						session.provider = oldProvider;
+						session.turn = oldTurn;
+						session.turnCheckpoint = oldCheckpoint;
+						throw error;
+					}
+					agent.state.systemPrompt = systemPrompt;
+					await publish(
+						session,
+						"snapshot",
+						projectSessionAgentEvent({ type: "message_end", message: userMessage }),
+					);
+					startRun(session);
+					return turnReceipt(session, { started: true, settled: false });
+				},
+				false,
+			);
 		},
 		deleteSession(sessionId: string) {
-			return execute(async () => {
-				const session = await requireSession(sessionId);
-				if (session.kind === "subagent") throw new RuntimeError(409, "子会话随父会话删除");
-				if (session.turn?.status === "running" || jobs.list(session.id).some((job) => job.status === "running"))
-					throw new RuntimeError(409, "请先停止当前执行及后台任务");
-				await session.runPromise;
-				const children: string[] = [];
-				let cursor: SessionCursor | undefined;
-				do {
-					const page = await store.listSessions({ limit: 200, cursor, parentSessionId: session.id });
-					for (const child of page.sessions) {
-						const loaded = sessions.get(child.id);
-						if (
-							(loaded ?? child).turn?.status === "running" ||
-							loaded?.runPromise ||
-							jobs.list(child.id).some((job) => job.status === "running")
-						)
-							throw new RuntimeError(409, "请先停止子会话执行");
-						children.push(child.id);
+			return executeSession(
+				sessionId,
+				async () => {
+					const session = await requireSession(sessionId);
+					if (session.kind === "subagent") throw new RuntimeError(409, "子会话随父会话删除");
+					if (session.turn?.status === "running" || jobs.list(session.id).some((job) => job.status === "running"))
+						throw new RuntimeError(409, "请先停止当前执行及后台任务");
+					await session.runPromise;
+					const children: string[] = [];
+					let cursor: SessionCursor | undefined;
+					do {
+						const page = await store.listSessions({ limit: 200, cursor, parentSessionId: session.id });
+						for (const child of page.sessions) {
+							const loaded = sessions.get(child.id);
+							if (
+								(loaded ?? child).turn?.status === "running" ||
+								loaded?.runPromise ||
+								jobs.list(child.id).some((job) => job.status === "running")
+							)
+								throw new RuntimeError(409, "请先停止子会话执行");
+							children.push(child.id);
+						}
+						cursor = page.nextCursor ?? undefined;
+					} while (cursor);
+					for (const id of children) {
+						await store.deleteSession(id);
+						for (const client of sessions.get(id)?.clients ?? []) closeSubscriber(client);
+						sessions.delete(id);
 					}
-					cursor = page.nextCursor ?? undefined;
-				} while (cursor);
-				for (const id of children) {
-					await store.deleteSession(id);
-					for (const client of sessions.get(id)?.clients ?? []) closeSubscriber(client);
-					sessions.delete(id);
-				}
-				await store.deleteSession(session.id);
-				for (const client of session.clients) closeSubscriber(client);
-				sessions.delete(session.id);
-				return { deleted: true };
-			}, true);
+					await store.deleteSession(session.id);
+					for (const client of session.clients) closeSubscriber(client);
+					sessions.delete(session.id);
+					return { deleted: true };
+				},
+				true,
+			);
 		},
 		subscribe(sessionId: string, next: (event: SessionEvent) => void, onClose: () => void = () => {}) {
 			return execute(async () => {
@@ -3249,8 +3257,10 @@ async function initializeRuntime(options: RuntimeOptions) {
 				try {
 					const turn = session.turn;
 					const running = session.runPromise;
+					const compacting = manualCompactions.get(sessionId)?.promise;
 					// Capture one Turn before yielding; snapshot() may observe a later Turn.
 					options?.onWait?.(turn && structuredClone(turn));
+					await compacting?.catch(() => {});
 					await running;
 					options?.onSettled?.(turn && structuredClone(turn));
 					return await snapshot(session);
@@ -3265,8 +3275,11 @@ async function initializeRuntime(options: RuntimeOptions) {
 		close() {
 			if (closePromise) return closePromise;
 			closing = true;
+			const compactions = [...manualCompactions.values()];
+			for (const compaction of compactions) compaction.controller.abort(new Error("运行时正在关闭"));
 			closePromise = (async () => {
 				await commands;
+				await Promise.allSettled(compactions.map((compaction) => compaction.promise));
 				jobs.close();
 				for (const client of globalClients) closeSubscriber(client);
 				globalClients.clear();

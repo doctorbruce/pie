@@ -200,6 +200,8 @@ export type AssignmentCreate = Omit<AssignmentRecord, "assignmentId" | "status" 
 	createdAt?: number;
 };
 
+export type AssignmentWriteOptions = { requireSession?: boolean };
+
 export type WorkerMessage = {
 	messageId: string;
 	/** Target Worker. The source identity is carried separately and is trusted from execution context. */
@@ -270,7 +272,8 @@ export interface WorkerCoordinationStore {
 	readWorkItem(workId: string): Promise<WorkItem | undefined>;
 	findAssignmentByWork(workId: string): Promise<AssignmentRecord[]>;
 	findAssignmentBySession(sessionId: string): Promise<AssignmentRecord | undefined>;
-	createAssignment(assignment: AssignmentRecord): Promise<AssignmentRecord>;
+	/** requireSession atomically verifies the existing root Session belongs to this Worker. */
+	createAssignment(assignment: AssignmentRecord, options?: AssignmentWriteOptions): Promise<AssignmentRecord>;
 	readWorkerMessage(messageId: string): Promise<WorkerMessage | undefined>;
 	createWorkerMessage(message: WorkerMessage): Promise<WorkerMessage>;
 	createWorkerDelivery(delivery: WorkerDelivery): Promise<WorkerDelivery>;
@@ -522,7 +525,10 @@ export class WorkerCoordinationService {
 		}
 	}
 
-	async createAssignment(input: AssignmentCreate | AssignmentRecord): Promise<AssignmentRecord> {
+	async createAssignment(
+		input: AssignmentCreate | AssignmentRecord,
+		options?: AssignmentWriteOptions,
+	): Promise<AssignmentRecord> {
 		coordinationObject(input);
 		const workId = requiredCoordinationText(input.workId, "workId");
 		const workerId = requiredCoordinationText(input.workerId, "workerId");
@@ -578,7 +584,7 @@ export class WorkerCoordinationService {
 			...(input.stopRequested === undefined ? {} : { stopRequested: input.stopRequested }),
 		};
 		try {
-			return await this.store.createAssignment(assignment);
+			return await this.store.createAssignment(assignment, options);
 		} catch (error) {
 			if (error instanceof CoordinationError) throw error;
 			throw new CoordinationError(503, "工作会话关联保存失败");

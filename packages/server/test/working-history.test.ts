@@ -59,7 +59,6 @@ test("checkpoint tool exposure survives factory and MCP rebuilding without resto
 			[checkpointMessage(checkpoint)],
 			() => {},
 			async () => {},
-			undefined,
 			{ current: checkpoint, update: () => assert.fail("faux must not compact") },
 		);
 		const release = await agent.prepareMcp();
@@ -272,11 +271,15 @@ test("compressed sessions release old message objects and retain disk-backed for
 	assert.equal(created.status, 201);
 	const session = (await created.json()) as SessionSnapshot;
 	async function submit(text: string) {
-		assert.equal((await post(`/sessions/${session.id}/turns`, { text })).status, 202);
+		// Keep the 600-token fixture focused on history rather than communication schemas.
+		assert.equal(
+			(await post(`/sessions/${session.id}/turns`, { text, toolAvailability: { communicate: false } })).status,
+			202,
+		);
 		for (let attempt = 0; attempt < 300; attempt++) {
 			const result = (await (await fetch(`${base}/sessions/${session.id}`)).json()) as SessionSnapshot;
 			if (result.turn?.status !== "running") {
-				assert.equal(result.turn?.status, "completed");
+				assert.equal(result.turn?.status, "completed", result.turn?.error);
 				return result;
 			}
 			await delay(10);

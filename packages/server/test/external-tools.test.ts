@@ -24,14 +24,6 @@ async function request(base: string, path: string, body?: unknown) {
 	});
 }
 
-async function put(base: string, path: string, body: unknown) {
-	return fetch(`${base}${path}`, {
-		method: "PUT",
-		headers: { "Content-Type": "application/json" },
-		body: JSON.stringify(body),
-	});
-}
-
 async function submit(
 	base: string,
 	sessionId: string,
@@ -293,76 +285,6 @@ test("external tools can pause for confirmation, resume, reject and cancel throu
 		assert.equal((await request(base, `/sessions/${session.id}/cancel`, { turnId: packet.turnId })).status, 202);
 	});
 	assert.equal(cancelled.snapshot.turn?.status, "cancelled");
-
-	assert.equal(
-		(
-			await put(base, "/host-runtimes", {
-				runtimes: [
-					{
-						assistantId: "star",
-						assistantRevision: "1",
-						runtime: {
-							systemPrompt: "父助手",
-							toolIds: [],
-							skills: [],
-							permissions: { task: "allow" },
-							subagents: [
-								{
-									id: "assistant-worker-confirm",
-									name: "确认助手",
-									description: "执行需要确认的任务",
-									assistantId: "confirm-assistant",
-								},
-							],
-						},
-					},
-					{
-						assistantId: "confirm-assistant",
-						assistantRevision: "1",
-						runtime: {
-							systemPrompt: "确认后执行",
-							toolIds: ["confirm"],
-							skills: [],
-							subagents: [],
-						},
-					},
-				],
-			})
-		).status,
-		200,
-	);
-	const parent = (await (await request(base, "/sessions", { assistantId: "star" })).json()) as SessionSnapshot;
-	let childInteractionCount = 0;
-	const delegated = await submit(
-		base,
-		parent.id,
-		`调用工具 task ${JSON.stringify({
-			description: "确认任务",
-			prompt: "调用工具 confirm {}",
-			subagent_type: "assistant-worker-confirm",
-		})}`,
-		async (packet) => {
-			if (packet.type !== "interaction.requested") return;
-			childInteractionCount++;
-			assert.equal(packet.sessionId, parent.id);
-			assert.equal(
-				(await request(base, `/sessions/${parent.id}/interactions/${packet.interaction!.id}`, { approved: true }))
-					.status,
-				202,
-			);
-		},
-	);
-	assert.equal(childInteractionCount, 1);
-	assert.equal(delegated.snapshot.turn?.status, "completed");
-	const taskResult = [...delegated.snapshot.messages]
-		.reverse()
-		.find((message) => message.role === "toolResult" && message.toolName === "task");
-	assert(taskResult?.role === "toolResult");
-	const details = taskResult.details as { childSessionId: string };
-	const child = (await (await request(base, `/sessions/${details.childSessionId}`)).json()) as SessionSnapshot;
-	assert.equal(child.parentSessionId, parent.id);
-	assert.equal(child.turn?.status, "completed");
-	assert.deepEqual(child.interactions, []);
 });
 
 test("tool loading rejects duplicate IDs and invalid modules while ignoring helper files", async (t) => {

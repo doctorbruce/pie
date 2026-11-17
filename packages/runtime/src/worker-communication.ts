@@ -43,7 +43,7 @@ export type WorkerWaitResult = {
 	receipts?: readonly { deliveryId: string; messageId: string }[];
 };
 
-/** Opt-in durable communication facts; ordinary Runtime stores need not implement them. */
+/** Durable communication facts required when a host supplies Worker communication. */
 export interface WorkerCommunicationStore {
 	registerWorkerWait(
 		context: WorkerCallContext,

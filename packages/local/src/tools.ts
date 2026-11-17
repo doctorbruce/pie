@@ -13,7 +13,7 @@ export { readText };
  * Pie Core native tools. They are registered at startup without an Astron tool directory.
  *
  * The public command surface has one `bash` id. It selects the platform shell internally
- * and shares the session's background job registry with task delegation.
+ * and uses the session's background job registry.
  */
 export function systemTools(env: NodeJS.ProcessEnv, cwd = process.cwd(), context?: ToolRuntime): AgentTool[] {
 	const runtime: ToolRuntime =

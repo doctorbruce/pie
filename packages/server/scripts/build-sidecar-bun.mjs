@@ -20,6 +20,8 @@ const targets = [
 	{ os: "win32", arch: "x64" },
 	{ os: "darwin", arch: "arm64" },
 	{ os: "darwin", arch: "x64" },
+	{ os: "linux", arch: "arm64" },
+	{ os: "linux", arch: "x64" },
 ];
 
 const { values } = parseArgs({

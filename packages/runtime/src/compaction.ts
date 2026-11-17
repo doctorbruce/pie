@@ -27,11 +27,17 @@ export type CompactionSettings = {
 	thresholdTokens?: number;
 };
 
-export type CompactionSummaryRequest = { prompt: string; maxTokens: number; images?: ImageContent[] };
+export type CompactionSummaryRequest = {
+	prompt: string;
+	maxTokens: number;
+	images?: ImageContent[];
+	reason: CompactionEvent["reason"];
+};
 export type CompactionEvent = {
 	type: "compaction.started" | "compaction.finished" | "compaction.retry";
-	reason?: "threshold" | "overflow";
+	reason?: "threshold" | "overflow" | "manual";
 	status?: "completed" | "failed" | "cancelled";
+	compaction?: ContextCompaction;
 	error?: string;
 	attempt?: number;
 	maxAttempts?: number;
@@ -52,7 +58,7 @@ type CompactionOptions = {
 	report?: (event: CompactionEvent) => unknown;
 };
 
-type RequestBudget = Pick<Context, "systemPrompt" | "tools"> & { force?: boolean };
+type RequestBudget = Pick<Context, "systemPrompt" | "tools"> & { force?: boolean; manual?: boolean };
 
 const ESTIMATED_IMAGE_CHARS = 4800;
 
@@ -205,20 +211,28 @@ export function createCompactionTransform(options: CompactionOptions) {
 				: 0,
 			requestTokens(requestMessages, budget),
 		);
-		if (settings.enabled === false || (!budget.force && tokensBefore <= threshold)) return active;
-		const reason = budget.force ? "overflow" : "threshold";
+		if (!budget.manual && (settings.enabled === false || (!budget.force && tokensBefore <= threshold))) return active;
+		const boundary = materialized ? 1 : (current?.firstKeptMessage ?? 0);
+		const latestUser = latestRealUserMessage(active);
+		const latestUserIndex = latestUser ? messages.indexOf(latestUser) : -1;
+		let firstKeptMessage = findFirstKeptMessage(messages, boundary, settings.keepRecentTokens);
+		if (budget.force && firstKeptMessage === undefined && latestUserIndex > boundary) {
+			firstKeptMessage = latestUserIndex;
+		}
+		const turnStartIndex =
+			latestUserIndex >= boundary && firstKeptMessage !== undefined && latestUserIndex < firstKeptMessage
+				? latestUserIndex
+				: undefined;
+		if (
+			budget.manual &&
+			(firstKeptMessage === undefined || firstKeptMessage - boundary <= (turnStartIndex === undefined ? 0 : 1))
+		)
+			return active;
+		const reason = budget.manual ? "manual" : budget.force ? "overflow" : "threshold";
 		await options.report?.({ type: "compaction.started", reason });
 		try {
-			const boundary = materialized ? 1 : (current?.firstKeptMessage ?? 0);
-			const latestUser = latestRealUserMessage(active);
-			const latestUserIndex = latestUser ? messages.indexOf(latestUser) : -1;
-			let firstKeptMessage = findFirstKeptMessage(messages, boundary, settings.keepRecentTokens);
-			if (budget.force && firstKeptMessage === undefined && latestUserIndex > boundary)
-				firstKeptMessage = latestUserIndex;
 			if (firstKeptMessage === undefined)
 				throw new Error("上下文超限且没有可压缩的历史；请缩短当前输入、工具输出或附件。");
-			const turnStartIndex =
-				latestUserIndex >= boundary && latestUserIndex < firstKeptMessage ? latestUserIndex : undefined;
 			const fileOps = createFileOps();
 			for (const path of current?.details?.readFiles ?? []) fileOps.read.add(path);
 			for (const path of current?.details?.modifiedFiles ?? []) fileOps.written.add(path);
@@ -266,6 +280,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 				{
 					prompt: buildSummaryPrompt(summaryMessages, current?.summary, imageSources),
 					maxTokens: Math.max(1, Math.floor(settings.reserveTokens * 0.8)),
+					reason,
 					...(images.length ? { images } : {}),
 				},
 				signal,
@@ -292,7 +307,7 @@ export function createCompactionTransform(options: CompactionOptions) {
 				throw new Error("压缩后上下文仍超出预算；当前输入、工具输出或附件过大。");
 			await options.onCompacted(next, messages, projected);
 			current = next;
-			await options.report?.({ type: "compaction.finished", reason, status: "completed" });
+			await options.report?.({ type: "compaction.finished", reason, status: "completed", compaction: next });
 			return projected;
 		} catch (error) {
 			await options.report?.({

@@ -122,11 +122,12 @@ async function start(
 		await new Promise<void>((resolve) => endpoint.close(() => resolve()));
 		await rm(directory, { recursive: true, force: true });
 	});
-	const post = (path: string, body: unknown) =>
+	// Keep compaction thresholds focused on history, excluding the default communication tool schema.
+	const post = (path: string, body: Record<string, unknown>) =>
 		fetch(base + path, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
+			body: JSON.stringify(path.endsWith("/turns") ? { ...body, toolAvailability: { communicate: false } } : body),
 		});
 	async function configureHost(threshold?: number, maxHistoryImageBytes = options.maxHistoryImageBytes) {
 		const response = await fetch(`${base}/host-runtimes`, {
@@ -201,7 +202,7 @@ async function start(
 		}
 		throw new Error("turn did not settle");
 	}
-	async function submit(body: unknown) {
+	async function submit(body: Record<string, unknown>) {
 		assert.equal((await post(`/sessions/${session.id}/turns`, body)).status, 202);
 		return settled();
 	}

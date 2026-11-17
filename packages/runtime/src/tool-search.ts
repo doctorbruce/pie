@@ -21,6 +21,26 @@ function tokenize(text: string): string[] {
 	});
 }
 
+export function discoveredToolNames(messages: AgentMessage[]): string[] {
+	const names = new Set<string>();
+	function remember(value: unknown) {
+		if (Array.isArray(value)) for (const name of value) if (typeof name === "string") names.add(name);
+	}
+	for (const message of messages) {
+		if (message.role === "assistant") {
+			remember(message.content.filter((block) => block.type === "toolCall").map((block) => block.name));
+		} else if (message.role === "toolResult" && !message.isError) {
+			remember(message.addedToolNames);
+			if (message.toolName !== "tool_search") continue;
+			try {
+				const result: unknown = JSON.parse(contentText(message.content));
+				if (result && typeof result === "object" && "loaded" in result) remember(result.loaded);
+			} catch {}
+		}
+	}
+	return [...names];
+}
+
 export function createToolSearch(
 	tools: ExternalTool[],
 	defaultDeferredIds: readonly string[] = [],
@@ -137,18 +157,7 @@ export function createToolSearch(
 			activate(names);
 		},
 		restore(messages: AgentMessage[]) {
-			for (const message of messages) {
-				if (message.role === "assistant") {
-					activate(message.content.filter((block) => block.type === "toolCall").map((block) => block.name));
-				} else if (message.role === "toolResult" && !message.isError) {
-					activate(message.addedToolNames);
-					if (message.toolName !== "tool_search") continue;
-					try {
-						const result: unknown = JSON.parse(contentText(message.content));
-						if (result && typeof result === "object" && "loaded" in result) activate(result.loaded);
-					} catch {}
-				}
-			}
+			activate(discoveredToolNames(messages));
 		},
 		expose(context: Context): Context {
 			const available = new Set(context.tools?.map((tool) => tool.name));

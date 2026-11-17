@@ -24,6 +24,10 @@
 
 ### Breaking Changes
 
+- Remove the `task` tool, its delegate factory parameter and parent-child dispatch. Use `communicate` with the target assistant ID for all assistant collaboration; root Sessions share the assistant's Worker identity and create work associations on demand. Embedded hosts supply communication services and coordination storage; no Task fallback remains. Preserve existing Task history, child Sessions and execution journals for reading.
+
+- Require lazy communication associations to read scoped Session metadata and atomically verify Session ownership when `WorkerCoordinationStore.createAssignment` receives `{ requireSession: true }`. Embedded adapters must honor the new write option; missing Session reads return 405.
+
 - Require `SessionSnapshot.execution` and include the same lightweight execution view in global events; session deltas can update it without copying history. Preserve native Turn outcomes instead of interpreting settlement as success.
 - Require `RuntimeStore.readToolExecutions` and atomic incremental journal appends through the third `saveSession` argument; Cloud adapters must persist execution facts alongside history and Turn metadata.
 
@@ -36,6 +40,8 @@
 
 ### Added
 
+- Add native manual session compaction with one-shot model selection, checkpoint persistence and lifecycle events; preserve original history, reject competing writes, and release ownership after cancellation or shutdown. Empty or minimal history is an explicit no-op.
+
 - Expose effective text/image input capabilities in provider and model catalogs so local frontends can configure custom vision models without dropping image support on save.
 
 - Add `setSessionWorkspace` to persist an idle root session's directory before subsequent direct or Worker turns. Preserve history, reset the idle Agent after saving, restore the original path on save failure, and allow same-path verification while busy.
@@ -46,11 +52,11 @@
 
 - Add independent host `workerTargets` with omission-only fallback to legacy subagents, explicit empty-target denial and send-time authorization checks; preserve valid causal replies without reverse proactive permission.
 
-- Add opt-in Worker `send_message` and `wait_message` tools in place of task, with trusted sender identities, authorized targets, causal replies, durable waits and cancellation, structured Turn yields and atomic input/history consumption between model calls.
+- Add Worker communication with trusted sender identities, authorized targets, causal replies, durable waits and cancellation, structured Turn yields and atomic input/history consumption between model calls; expose sending and waiting through `communicate`.
 
-- Add opt-in logical Workers, durable work/session/message/delivery facts and a deterministic `WorkerScheduler`; queue input per Session while different Sessions execute independently, preserve creation and dispatch identities, and accept a host product-session binding during session creation. Optional `waitForTurn` observers capture one Turn's wait and settlement boundaries independently of asynchronous snapshot reads.
+- Add logical Worker records, durable work/session/message/delivery facts and a deterministic `WorkerScheduler`; queue input per Session while different Sessions execute independently, preserve creation and dispatch identities, and accept a host product-session binding during session creation. Optional `waitForTurn` observers capture one Turn's wait and settlement boundaries independently of asynchronous snapshot reads.
 
-- Add host `cancelBackgroundJob` for directly owned local Shell/Task jobs, with cleanup acknowledgement, suppressed wakeups and access during storage failure; require instance and per-execution identities to reject stale stops when a Task reuses its job ID.
+- Add host `cancelBackgroundJob` for directly owned local Shell jobs, with cleanup acknowledgement, suppressed wakeups and access during storage failure; require instance and per-execution identities to reject stale stops.
 
 - Add `archiveSession` and persisted session `archived` state; public session lists hide archived sessions unless `includeArchived` is true. Stores exclude archived sessions before pagination when `SessionListOptions.includeArchived` is false.
 
@@ -58,7 +64,7 @@
 
 - Add opt-in remembered native `bash` and `external_directory` approvals through `InteractionReply.remember`; persist exact permission scopes in the execution session across turns and restarts without inheriting them into new, forked or related sessions.
 
-- Expose `listBackgroundJobs` with instance-scoped, directly owned Shell/Task summaries without history, output or arbitrary details; distinguish Turn settlement from background work and reject parent deletion while a child still owns active local jobs.
+- Expose `listBackgroundJobs` with instance-scoped, directly owned Shell summaries without history, output or arbitrary details; distinguish Turn settlement from background work.
 
 - Add native `skill_search` for searching or listing the current runtime's mounted skill bindings without reading files or recording skill loads; return exact IDs for `skill`, honor per-turn availability, and guide discovery before filesystem scans.
 
@@ -102,7 +108,7 @@
 
 - Provide explicit causal response instructions for incoming Worker requests and questions, including the exact sender, message ID and response kind, so models can return results instead of leaving them only in the target Session. Avoid acknowledgement loops for responses and progress messages.
 
-- Cancel local Shell/Task jobs belonging to an explicitly stopped Turn, including descendant background work after a Task returns; wait for their cleanup before Turn settlement and suppress cancellation wakeups. Preserve jobs from normally completed earlier Turns and other sessions.
+- Cancel local Shell jobs belonging to an explicitly stopped Turn; wait for their cleanup before Turn settlement and suppress cancellation wakeups. Preserve jobs from normally completed earlier Turns and other sessions, including communication peers.
 
 - Publish ordinary model retry attempts and final outcomes through `model.retry` with a stable per-call identity, independently of compaction, so hosts can show progress and stop silent waiting.
 - Retry explicit `Upstream API error: 530` gateway failures wrapped in a successful HTTP response without treating unrelated numeric text as a retryable error.

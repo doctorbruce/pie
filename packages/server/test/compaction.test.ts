@@ -19,6 +19,102 @@ function conversation(turns: number, offset = 0): AgentMessage[] {
 	return messages;
 }
 
+test("manual compaction bypasses disabled automatic compaction and retains the latest user input", async () => {
+	const messages = conversation(3);
+	const original = structuredClone(messages);
+	const events: string[] = [];
+	let record: ContextCompaction | undefined;
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		settings: { enabled: false, reserveTokens: 100, keepRecentTokens: 1 },
+		summarize: async ({ prompt }) => {
+			assert.match(prompt, /user-0/);
+			assert.match(prompt, /user-2-/);
+			return "manual checkpoint";
+		},
+		onCompacted: (next) => {
+			record = next;
+		},
+		report: (event) => events.push(`${event.type}:${event.reason}`),
+	});
+	assert.equal(await transform(messages), messages);
+	const projected = await transform(messages, undefined, { manual: true });
+	assert.equal(record?.firstKeptMessage, 5);
+	assert.equal(record?.turnStartIndex, 4);
+	assert.deepEqual(projected.slice(1), messages.slice(-2));
+	assert.deepEqual(messages, original);
+	assert.deepEqual(events, ["compaction.started:manual", "compaction.finished:manual"]);
+});
+
+test("manual compaction leaves empty or already minimal history unchanged without a model call", async () => {
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		summarize: async () => assert.fail("minimal history must not call the summary model"),
+		onCompacted: () => assert.fail("minimal history must not create a checkpoint"),
+		report: () => assert.fail("a no-op must not claim to compact history"),
+	});
+	for (const messages of [[], conversation(1)]) {
+		assert.equal(await transform(messages, undefined, { manual: true }), messages);
+	}
+});
+
+test("manual compaction summarizes a single user's completed tool history while keeping their image and a safe recent suffix", async () => {
+	const user: AgentMessage = {
+		role: "user",
+		content: [{ type: "image", data: "Y3VycmVudA==", mimeType: "image/png" }],
+		timestamp: 1,
+	};
+	const messages: AgentMessage[] = [
+		user,
+		fauxAssistantMessage([{ type: "toolCall", id: "write-1", name: "write", arguments: { path: "report.txt" } }]),
+		{
+			role: "toolResult",
+			toolCallId: "write-1",
+			toolName: "write",
+			content: [{ type: "text", text: `Saved report.txt ${"completed work ".repeat(100)}` }],
+			isError: false,
+			timestamp: 3,
+		},
+		fauxAssistantMessage([{ type: "toolCall", id: "read-2", name: "read", arguments: { path: "final.txt" } }]),
+		{
+			role: "toolResult",
+			toolCallId: "read-2",
+			toolName: "read",
+			content: [{ type: "text", text: "Recent result" }],
+			isError: false,
+			timestamp: 5,
+		},
+		fauxAssistantMessage("Final reply"),
+	];
+	const original = structuredClone(messages);
+	const records: ContextCompaction[] = [];
+	const transform = createCompactionTransform({
+		contextWindow: 10000,
+		supportsImages: true,
+		imageBudgetBytes: 1,
+		settings: { enabled: false, reserveTokens: 100, keepRecentTokens: 100 },
+		summarize: async (request) => {
+			assert.match(request.prompt, /Saved report.txt/);
+			assert(!request.prompt.includes("read-2"));
+			assert.deepEqual(
+				request.images?.map((image) => image.data),
+				["Y3VycmVudA=="],
+			);
+			return "Completed the report write";
+		},
+		onCompacted: (next) => records.push(next),
+	});
+	const projected = await transform(messages, undefined, { manual: true });
+	assert.equal(records.length, 1);
+	assert.equal(records[0].firstKeptMessage, 3);
+	assert.equal(records[0].turnStartIndex, 0);
+	assert.equal(projected[1], user);
+	assert.deepEqual(projected.slice(2), messages.slice(3));
+	assert.deepEqual(messages, original);
+	assert.equal(await transform(projected, undefined, { manual: true }), projected);
+	assert.equal(records.length, 1);
+});
+
 test("a capability reminder does not replace the actual Turn input during compaction", async () => {
 	const messages = conversation(8);
 	const input = { role: "user" as const, content: "CURRENT_USER_INPUT", timestamp: 100 };

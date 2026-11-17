@@ -4,21 +4,25 @@
 
 ### Breaking Changes
 
+- Replace the ordinary Session `task` tool and parent-child dispatch with `communicate` for all root Sessions. Local supplies the shared Worker identity and communication services, with work associations created on demand. Callers use assistant IDs and causal messages instead of `task_id/background`; existing Task history and child Sessions remain readable.
+
 - Remove the bundled Web UI, its workspace, frontend dependencies, development script and UI tests. Acceptance uses SDK, HTTP/SSE and embedding contracts. Replace `PI_WEB_ORIGIN` and its implicit development-origin allowance with explicit host configuration through `PI_SERVER_ORIGIN`; requests without Origin keep their existing behavior.
 
 - Session SSE bootstraps with the latest 50 messages and then emits revisioned deltas rather than full snapshots; hosts can consume increments and page older history through the shared Runtime helpers. Global `/events` and explicit full-session reads remain unchanged.
 
 ### Added
 
-- Expose the Worker `communicate` tool through host runtimes while preserving ordinary Session `task` and legacy history compatibility.
+- Expose `POST /sessions/:id/compact`, waiting for the shared Runtime checkpoint and completion event; return an explicit no-op for minimal history and cancel unfinished summaries when the request disconnects.
 
-- Accept host `workerWaitMode` and synchronous Worker waits while preserving asynchronous waiting and ordinary Task execution.
+- Expose the `communicate` tool through host runtimes while preserving legacy history reading.
 
-- Accept independent host `workerTargets` and explicit empty Worker Session creation through Local, with deterministic work/assignment repair on same-key retries and no model execution during creation.
+- Accept host `workerWaitMode` and synchronous Worker waits while preserving asynchronous waiting.
 
-- Enable direct Worker messaging in coordinated Sessions with persistent waiting and cancellation; keep legacy task tools exclusive to ordinary Sessions.
+- Accept independent host `workerTargets`. Ordinary root Session creation leaves work associations lazy; hosts can use `WorkerScheduler.createWorkerSession` for explicit empty-session pre-association, with deterministic work/assignment repair on same-key retries and no model execution during creation.
 
-- Register logical Workers from host assistant runtimes, persist coordination facts in Local SQLite, and expose trusted-host inbox and receipt APIs without changing ordinary chat or legacy task execution.
+- Enable direct Worker messaging in Sessions with persistent waiting and cancellation.
+
+- Register logical Workers from host assistant runtimes, persist coordination facts in Local SQLite, and expose trusted-host inbox and receipt APIs alongside ordinary chat.
 
 - Expose `GET /sessions/:id/jobs` with the same lightweight, instance-scoped local-job observations as the Runtime SDK; keep Turn settlement distinct from background and descendant completion.
 

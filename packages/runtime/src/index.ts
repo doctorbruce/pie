@@ -12,6 +12,7 @@ export {
 	type AssignmentCreate,
 	type AssignmentRecord,
 	type AssignmentStatus,
+	type AssignmentWriteOptions,
 	CoordinationError,
 	CoordinationService,
 	type CoordinationStore,

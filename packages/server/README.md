@@ -35,14 +35,15 @@
 | `POST /workers/:workerId/messages` | `{ messageId?, sourceWorkerId, sourceSessionId?, sourceTurnId?, content, kind?, workId?, targetSessionId?, replyTo?, newSession?, title?, workspacePath?, model?, mode?, productBinding? }` | `202` + `{ message, delivery }` 持久入箱收据；后台确定性关联并执行，不等待模型 |
 | `GET /worker-messages/:messageId` | 无 | 保存的原消息；不存在返回 404 |
 | `GET /worker-deliveries/:deliveryId` | 无 | 投递关联、状态和可选 acceptedTurnId/error；不自动重放 |
-| `POST /sessions` | `{ creationKey?, assistantId?, workerId?, astronSessionId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；workerId 仅供协调装配使用，须等于已注册 assistantId；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
+| `POST /sessions` | `{ creationKey?, assistantId?, astronSessionId?, title?, workspacePath?, mode?, model?: { provider, id } }` | `201` + 会话快照；根会话使用所属助手的 Worker 身份，无需选择通信模式；mode 默认 faux；同键相同参数返回原会话，冲突返回 409 |
 | `GET /session-creations?creationKey=...` | URL 编码的创建键 | `{ creationKey, sessionId, createdAt, sessionExists }`；未创建返回 404，已删除保留原记录 |
 | `PATCH /sessions/:id` | `{ title }` | 重命名空闲会话，返回快照 |
 | `POST /sessions/:id/archive` | `{ archived: boolean }` | 归档或取消归档根会话，返回含 archived 的快照；保留历史和任务执行，子会话返回 409 |
 | `PUT /sessions/:id/model-override` | `{ modelOverride: { providerId, model } \| null, initializeOnly? }` | 保存会话模型选择；null 跟随默认模型。initializeOnly 仅补入尚未初始化的历史会话，保留已存在的选择或 null |
 | `PUT /sessions/:id/workspace` | `{ workspacePath }` | 保存空闲根会话的目录，清除旧 Agent，返回轻量 SessionSummary；相同目录幂等；忙碌时不同目录返回 409 |
+| `POST /sessions/:id/compact` | `{ model?: { provider, id } }` | `200` + `{ completed: true, compacted: boolean, compaction? }`；等待手动摘要与 checkpoint 持久化完成；无可压缩历史时 compacted=false |
 | `GET /sessions/:id` | 可选 `?limit=50` | 会话快照，含消息、当前部分消息、最近一次 turn 和 execution；limit 提供有界历史页 |
-| `GET /sessions/:id/jobs` | 无 | `{ instanceId, sessionId, jobs }`；本实例、直接拥有的 Shell/Task 摘要，不读历史或输出正文 |
+| `GET /sessions/:id/jobs` | 无 | `{ instanceId, sessionId, jobs }`；本实例、直接拥有的本地 Shell 作业摘要，不读历史或输出正文 |
 | `POST /sessions/:id/jobs/:jobId/cancel` | `{ instanceId, executionId }`，取自 jobs 查询 | `202` + `{ instanceId, sessionId, accepted, durable: false, job }`；直接停止本机作业，等待清理完成，身份过期返回 409 |
 | `GET /events` | 可选重复参数 `?sessionId=A&sessionId=B` | 无参数只发送后续全局事件；指定 1–200 个会话时先发送轻量执行基线，再推送这些会话的新事件 |
 | `GET /sessions/:id/events` | 无 | SSE，第一条是最近 50 条消息与 execution 的快照，然后推送增量 |
@@ -60,9 +61,11 @@
 
 可选 `creationKey` 是宿主为一次创建意图分配的 1–256 字符键，去除首尾空白，不允许空字符。相同参数重试返回同一个会话的当前快照，即使会话已改名或原助手配置已改变；删除会话后保留键，原键重试返回 409。响应丢失可查询创建记录，不传键仍每次新建。键作用域是当前本地数据目录，不提供跨实例仲裁或自动过期清理，详见[嵌入契约](../../docs/runtime-embedding.md#幂等创建与核对)。
 
+手动压缩只接受空闲的真实模型会话，不创建普通 Turn 或消息。省略 model 时使用会话当前选择，显式 model 只用于本次摘要，不改变会话模型或 override；无效模型返回 400，执行、准备或同会话写入冲突返回 409。自动压缩关闭时仍可手动请求；沿用近期 token 窗口和工具安全切点，另保留最近真实用户及图片，单个长工具轮次也可压缩；空历史或没有旧历史时不调用模型、不发压缩完成事件。成功先持久保存 checkpoint，再发布 reason=manual 且携带本次 compaction 的压缩完成事件，最后返回响应；完整原文继续可读取和导出。HTTP 连接断开或服务关闭会取消尚未提交的摘要，等待清理后释放操作状态；已开始的存储提交会先完成，不承诺回滚已提交的结果。事件和策略见[压缩接入](../../docs/compaction-integration.md)。
+
 Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿主核对，不能直接作为模型工具开放。`202` 只证明消息和投递意图已保存；确定性关联后按 Session 串行执行，不同 Session 可以并行。Runtime 注册表与 Worker 同步分开保存，同步失败可按原配置重试核对；删除配置保留 Worker 历史并拒绝新执行。投递状态、目标选择、产品绑定与关闭顺序见[Worker 嵌入契约](../../docs/runtime-embedding.md#可选-worker-内部调度)。
 
-通过 Worker 收件入口创建的工作 Session 保存 `workerId`，模型使用 `communicate` 对等协作，不提供 `task`。主动目标来自宿主 `workerTargets`，省略时回退到 subagents；来源与调用键由 Runtime 注入，reply_to 沿可信消息链回原 Session。一次调用发送并按 `wait` 选择等待：`async` 保存等待，模型正常收尾后让出，回信在原 Turn 完整清理后启动新 Turn；`sync` 每段最多等待 30 秒，新输入可提前返回，已到达的 result/question/reply 优先与工具结果原子消费；`wait: false` 仅发送。默认 async，宿主可用 `runtime.workerWaitMode: "sync"` 改变默认。同步分段未取得回应时返回 `wait.status: waiting` 和 `reason: interval/message`，模型接纳阶段进展后可用原 `message_id` 续等；progress 不表示工作完成。仅用户明确要求时传 `wait.timeout_ms`（1–300000 毫秒），它是单次等待上限，到期返回 timed_out；大于 30 秒时先返回 interval，续等按新调用重新计时，原请求继续。分段返回不登记异步让出；禁止等待当前同一 Session，不沿通信关系取消对端。异步等待的 completed 带 `yield`，执行投影带 `waitingForMessage`，不表示业务完成。取消准确 Turn 会撤销等待，迟到回复不自动恢复执行；普通会话的 task 路径不变。持久存储与模型沟通边界见 [Worker 嵌入接入](../../docs/runtime-embedding.md#可选-worker-内部调度)。
+每个 Assistant 对应同 ID 的 Worker，所有根 Session 统一使用 `communicate` 对等协作，不提供 `task` 或普通/Worker 模式开关。创建根 Session 不预建工作项，WorkItem 与 Assignment 按协作需要建立。主动目标来自宿主 `workerTargets`，省略时回退到 subagents；来源与调用键由 Runtime 注入，reply_to 沿可信消息链回原 Session。一次调用发送并按 `wait` 选择等待：`async` 保存等待，模型正常收尾后让出，回信在原 Turn 完整清理后启动新 Turn；`sync` 每段最多等待 30 秒，新输入可提前返回，已到达的 result/question/reply 优先与工具结果原子消费；`wait: false` 仅发送。默认 async，宿主可用 `runtime.workerWaitMode: "sync"` 改变默认。同步分段未取得回应时返回 `wait.status: waiting` 和 `reason: interval/message`，模型接纳阶段进展后可用原 `message_id` 续等；progress 不表示工作完成。仅用户明确要求时传 `wait.timeout_ms`（1–300000 毫秒），它是单次等待上限，到期返回 timed_out；大于 30 秒时先返回 interval，续等按新调用重新计时，原请求继续。分段返回不登记异步让出；禁止等待当前同一 Session，不沿通信关系取消对端。异步等待的 completed 带 `yield`，执行投影带 `waitingForMessage`，不表示业务完成。取消准确 Turn 会撤销等待，迟到回复不自动恢复执行。持久存储与模型沟通边界见 [Worker 嵌入接入](../../docs/runtime-embedding.md#可选-worker-内部调度)。
 
 `turns` 和 `steer` 的可选 `images` 使用 `[{ type: "image", mimeType: "image/png", data: "原图的 Base64" }]`。至少提供非空 text 或图片；图片解码后总大小最多 20 MiB，无效格式返回 400，超限返回 413。图片从首次模型调用起进入用户多模态内容；displayText 只替换展示文字，不删除图片，历史导出、内联图片导入和服务重启保留图片。纯文本请求保持原有消息格式。
 
@@ -74,9 +77,9 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 
 `SteerReceipt` 另含 `queued/applied/durable` 与 `admission`。新受理时 `queued: true, started/applied: false, durable: false`，`turn.canonicalTurnId/requestId` 仍属旧执行者；消费输入后原子保存 owner、历史和 applied，发布 `turn.applied`。`Turn.steerAdmissions` 保存有序受理记录的 `status: queued|applied|settled`、`applied`、身份、前驱、时间与 `stopReason`，重试可查询对应事实。取消或结算可能早于 HTTP 回执；未消费的受理也逐条 `steer.settled`，不能 guided 旧 owner。排队后保存失败的 503 是未知结果，须读取 admission 核实，不能自动重发。重启丢失队列会结算 interrupted，不重放。命中原始 submit 身份的 steer 重试 `applied: true, queued: false`，不包含 admission。`CancellationReceipt` 的 `cancellationRequested/durable` 不代表外部副作用已撤销。`execution.actions` 与四个入口共用新操作决策；在途取消复用操作，终态取消 `accepted: false`，恢复可用只允许预检；宿主权限另行叠加。
 
-`turn.settled` 和 SDK `waitForTurn` 不表示所有后台工作或用户目标完成。正常完成保留后台作业；显式取消活跃 Turn 会停止本轮所属 Shell/Task 及子任务遗留 Shell，并在清理后结算，不唤醒模型。先前正常结束 Turn 的作业可由宿主停止接口或模型 `job_kill` 停止，取消已结算 Turn 是无操作。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/executionId/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表也登记前台 task 和近期终态，不汇总后代或外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。活跃子作业会阻止父删除。
+`turn.settled` 和 SDK `waitForTurn` 不表示所有后台工作或用户目标完成。正常完成保留后台作业；显式取消活跃 Turn 会停止本轮所属 Shell，并在清理后结算，不唤醒模型，也不停止通信对端。先前正常结束 Turn 的作业可由宿主停止接口或模型 `job_kill` 停止，取消已结算 Turn 是无操作。`GET /sessions/:id/jobs` 与 SDK `listBackgroundJobs` 同源，每项含 `id/executionId/ownerSessionId/type/title/status/startedAt/finishedAt?/error?`，状态为 running/completed/failed/cancelled；标题/错误分别限 512/2048 字符，不带 output/details，但可能包含命令摘要。此表保留近期终态，不把助手通信登记成内存 Job，不查询外部持久任务，不消费通知，不参与会话 revision 的同版本承诺。重启返回新 instanceId 和空表，不能据此确认旧副作用停止。
 
-宿主停止作业必须提交查询所得的 instanceId 和 executionId；Task 续跑可能复用 jobId，新的 executionId 会让旧停止请求返回 409。该入口绕过普通命令队列，存储故障后仍可停止本机作业；完成前不返回，不触发模型通知或修改已结束 Turn。已终态重复停止 `accepted: false`。它只控制直接归属的当前作业：停止运行中 Task 会等待子执行清理，已完成 Task 遗留的子会话 Shell 则需按实际 owner 单独停止；不代表停止整个助手、工作项或外部持久任务。
+宿主停止作业必须提交查询所得的 instanceId 和 executionId，执行身份过期返回 409。该入口绕过普通命令队列，存储故障后仍可停止本机作业；完成前不返回，不触发模型通知或修改已结束 Turn。已终态重复停止 `accepted: false`。它只控制直接归属的当前作业，不代表停止整个助手、通信对端、工作项或外部持久任务。
 
 存储故障时新操作以 `storage_unavailable` 拒绝。`bestEffort: true` 仅对当前活跃根 Turn 尽力停止本实例 Agent / MCP 和所属本地作业、清空输入和交互，回执 `durable: false`；不持久化取消意图、不调用外部持久执行器取消，也不承诺最终保存为 cancelled。存储正常时仍走普通持久取消。
 
@@ -84,13 +87,13 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 
 助手名称和会话标题最多 100 个字符且不允许空白；systemPrompt 为最多 16000 字符的字符串，可为空。toolIds 从 `GET /tools` 返回的工具中选择，最多 128 项、无重复，可为空；内置工具为 `read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`job_output`、`job_kill`。未安装扩展时默认助手的 toolIds 为空；安装 DeepSeek 网页搜索扩展时默认加入 `deepseek-web-search`。pluginIds 为已安装插件 ID 的无重复列表。有 Skill 绑定时自动提供 `skill_search` 和 `skill`。subagentIds 为其他本地助手 ID 的无重复列表；被引用的助手不能删除。
 
-这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 或旧 `task` 时自动向 Agent 加入 `job_output/job_kill`。`skill_search/skill` 按 Skill 绑定加入，普通会话的 `task` 按 Subagent 绑定加入；协调 Worker 会话改为 `communicate`，这些原生工具不属于可配置 toolIds。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
+这些内置工具属于 Pie Core：代码随 Core 发行，独立启动时直接注册，不依赖 `PI_TOOLS_DIR` 或 Astron 同步。注册只表示工具存在于目录中；每个 Assistant 仍通过 `toolIds` 控制可见和可执行范围。命令工具只暴露 `bash`，Windows 内部使用 PowerShell；启用 `bash` 时自动向 Agent 加入 `job_output/job_kill`。`skill_search/skill` 按 Skill 绑定加入，助手协作统一提供 `communicate`；这些原生工具不属于可配置 toolIds。Astron 的业务工具继续通过 `PI_TOOLS_DIR` 加载。
 
 会话摘要和快照包含 `assistantId`、已应用的 `assistantRevision`、`runtimeSource`（`local` 或 `host`）及完整 `runtime`。本地会话还返回 `assistant`，宿主会话不伪造本地 Assistant 对象，因此该字段可以省略。Fork 会话额外保存 `forkedFromSessionId`；它与 Subagent 使用的 `parentSessionId` 无关，删除源会话不会删除 Fork。宿主启动后通过 `PUT /host-runtimes` 注册全部 Assistant，配置变化时重新提交权威快照；Session 和 Turn 不接受内联 runtime。完整配置在 Turn 准入时应用，保留已有消息并按需重建 Agent。运行中 Skill 绑定在当前工具批次结束、下一次模型调用前单独刷新，保留 Turn 与 Agent；当前集合以 `runtime.skills` 为准，`assistantRevision` 仍代表准入时完整应用的版本。
 
-宿主 runtime 可带 `subagents`。每项只包含模型可见的 `id/name/description`、目标 `assistantId` 和可选 `model`；目标 runtime 和版本从同一注册表解析，不在父 runtime 中重复嵌套。存在绑定时，父 Agent 自动获得 `task({ description, prompt, subagent_type, task_id?, background? })` 工具；`task` 不属于可配置 toolIds，也不出现在 `GET /tools`。省略 `task_id` 时创建持久子会话；传入当前父会话已有的子 Session ID 时继续原任务。`background=true` 会立即返回 job ID，完成后向父 Agent 注入通知；`job_output` 可增量读取，`job_kill` 可停止任务。子会话用目标提示词、工具和 Skill 运行同一个 Agent loop，不继承父历史或目标 Assistant 的其他会话历史，不再拥有 task，且 HTTP 侧只读。取消父活跃 Turn 会停止本轮前台、后台 Task 及其遗留 Shell；正常完成保留后台工作。子工具的确认请求通过父会话交互接口答复。删除父会话会一并删除子会话。
+宿主通过 `workerTargets` 指定可联系助手；省略该字段时从 `subagents` 取目标 `assistantId/name/description`，显式空数组禁止主动目标。`communicate.to` 使用目标 assistantId，不使用旧 Subagent 调用 ID。请求默认沿唯一工作关联复用目标独立根 Session；`new_session: true` 创建新会话，`session_id` 继续已知目标会话，`reply_to` 沿原消息关系回信。目标使用自身配置和历史，权限交互也属于实际执行会话，不继承来源权限、模型或目录。
 
-独立本地模式通过 Assistant 接口设置 `subagentIds`，Core 将其转为内部 runtime 结构，调用 ID 为 `assistant-worker-{assistantId}`。目标 Assistant 修改后，已有父会话下一次提交会解析其最新提示词、工具和 Skill。该入口用于独立开发和测试；接入 Astron 后由宿主注册引用关系。
+独立本地模式通过 Assistant 接口设置 `subagentIds` 作为协作目标；模型同样使用 `communicate` 和目标 assistantId。`task`、`task_id/background` 和父子派发已移除，不保留执行兼容；旧 Task 消息、子会话和账本仍可读取，默认列表隐藏旧子会话，`includeSubagents=true` 可查询。不改写或删除历史数据。嵌入宿主须提供通信服务与协调存储，缺少服务时不回退 Task。
 
 模型系统提示词按“本轮 `systemPrompt` → 助手 `runtime.systemPrompt`”拼接，不用本轮规则覆盖助手角色。省略或传空白的本轮规则时保留助手提示词；与助手提示词完全相同的内容不重复添加。现有技能简介与宿主可选 `runtime.capabilityCatalog` 合并为隐藏 user 消息，首次或清单变化才追加完整替换清单，未变化沿用历史，删空明确发布空清单，压缩丢失清单后重新提供；不改历史前缀或 system。
 
@@ -102,7 +105,7 @@ Worker 收件接口仅供可信宿主使用：来源身份和授权范围由宿�
 npm run serve -- --tools-dir E:/Projects/pie/examples/tools
 ```
 
-也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill_search、skill、task、send_message、wait_message 或 tool_search 冲突会报错。
+也可设置 `PI_TOOLS_DIR`。目录加载与 Skill 插件导入分别工作，无需 plugin.json。每个工具文件默认导出一个同步函数，接收 ToolContext 并返回原生 AgentTool。文件名是工具 ID，只允许 1–64 个字母、数字、下划线或连字符，必须等于返回对象的 name。支持 `.ts/.js/.mjs`，不递归扫描，跳过 `_` 前缀和 `.d.ts`。同名文件、内置 ID、skill_search、skill、communicate、task、send_message、wait_message 或 tool_search 冲突会报错；退役工具名仍保留。
 
 例如保存为 `hello.ts`：
 
@@ -185,7 +188,7 @@ Copy-Item examples/tools/deepseek-web-fetch.ts .pie/tools/deepseek-web-fetch.ts
 
 ### 工具按需曝光
 
-移植 Pi v1.1.0 的 `exposure + tool_search` 行为，不引入上游 Harness、CLI 或 Code Mode。外部业务工具默认 `exposure: "deferred"`；可在工厂返回对象上显式设置 `exposure: "default"`，通过 `@pie/runtime/tools` 的 `ExternalTool` 类型声明该字段。原生基础工具、skill_search、skill 和 task 保持直接曝光。只在会话有延迟工具时自动加入 `tool_search({ query, limit? })`，它不属于可配置 toolIds，也不出现在 `GET /tools`。
+移植 Pi v1.1.0 的 `exposure + tool_search` 行为，不引入上游 Harness、CLI 或 Code Mode。外部业务工具默认 `exposure: "deferred"`；可在工厂返回对象上显式设置 `exposure: "default"`，通过 `@pie/runtime/tools` 的 `ExternalTool` 类型声明该字段。原生基础工具、skill_search、skill 和 communicate 保持直接曝光。只在会话有延迟工具时自动加入 `tool_search({ query, limit? })`，它不属于可配置 toolIds，也不出现在 `GET /tools`。
 
 首轮模型请求不包含延迟工具的完整描述和参数 schema。工具仍在执行注册表中，搜索只扫描当前 runtime 允许且尚未曝光的工具，以 BM25 对 ID、label、描述和 schema 关键词排序，支持英文词和中文二元词组。limit 默认 5，允许 1–20；没有命中不会加载其他工具。搜索不执行业务操作，命中的完整 schema 从下一次模型请求开始发送。同会话已曝光工具继续保留，不影响其他会话。
 
@@ -291,8 +294,8 @@ Astron 已在自己的 `astronverse-agent/adapters/pie/` 实现工具发行目�
 - `agent.event`：原版 Agent 事件，携带 session/turn 标识；不要把内部 `turn_end`（一轮模型响应）当成用户提交完成。
 - `model.retry`：普通模型请求重试，`event` 含稳定的 `retryId`、`status: started/completed/failed`、`attempt` 和错误 `message`；仅 started 带 Unix 毫秒时间 `next`。同次调用保持 ID，不同调用使用新 ID；关闭压缩仍通知，会话与全局流均携带发布时的 Turn 身份。重试终态先于 Turn 结算；取消等待时重试为 failed，Turn 仍为 cancelled。
 - `activity.updated`：携带持久技能记录 activity，同一个 id 从 running 更新至最终状态；snapshot.activities 保存历史。
-- `compaction.updated`：模型上下文达到预算后生成新摘要；snapshot.compaction 保存摘要边界、压缩次数和压缩前后的估算 token 数。
-- `compaction.started` / `compaction.retry` / `compaction.finished`：自动压缩的开始、退避重试和结束；结束状态为 completed、failed 或 cancelled，全局 SSE 也提供这些生命周期事件。
+- `compaction.updated`：自动或手动生成的新摘要；snapshot.compaction 保存摘要边界、压缩次数和压缩前后的估算 token 数。
+- `compaction.started` / `compaction.retry` / `compaction.finished`：压缩的开始、退避重试和结束；reason 区分 threshold、overflow 和 manual。结束状态为 completed、failed 或 cancelled；completed 事件携带本次 compaction，全局 SSE 也提供这些生命周期事件。
 - `interaction.requested / interaction.resolved`：携带确认请求及其结束；execution 同步反映是否仍有待回答交互。
 - `turn.applied`：Steer 用户消息已消费并保存，顶层 `steerAdmission` 标明本条应用事实，Turn 归属此时才切换。
 - `steer.settled`：顶层 `steerAdmission` 给出受理的结束原因；`applied: false` 表示尚未进入执行，不结算旧 owner 为 guided。
@@ -312,10 +315,10 @@ Worker `communicate` 已保存消息、仍在等待时，`execution.activeTools[
 
 这是便于二次开发的首版服务。Astron adapter 已映射当前所需的 Core contract 子集；未声明的能力仍应明确失败。
 
-- 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、MCP、确认型工具交互和前台/后台单层 Subagent；不支持递归派发。MCP 配置、权限与生命周期见 [MCP 接入说明](../../docs/mcp-integration.md)。
+- 助手、宿主 runtime 注册表、完整会话消息和上下文摘要保存在 `PI_DATA_DIR/agent.sqlite`（默认 `.pie/`），插件包在 `PI_DATA_DIR/plugins/<id>`。支持按助手挂载 Plugin、按需加载 Skill、自动上下文压缩、MCP、确认型工具交互和 `communicate` 助手协作；不再提供父子 Task 派发。MCP 配置、权限与生命周期见 [MCP 接入说明](../../docs/mcp-integration.md)。
 - Plugin 解释根 skills、apps/apa 的嵌套 skills、enabled/path 及来源身份；本地管理层转换为 runtime，Agent 组装与技能工具不解析插件清单。ZIP 请先解压；不自动安装环境，不执行 MCP/RPA，不处理市场或云端同步。系统工具没有沙箱，`read/edit/write` 可访问宿主文件，`bash` 使用系统账户执行命令，`grep/find` 需要 `rg`。可用 `PI_SHELL`（或平台默认的 `PI_BASH`/`PI_POWERSHELL`）、`PI_BASH_TIMEOUT_MS`、`PI_BASH_YIELD_MS` 和 `PI_RG` 配置可执行文件与超时。详细限制及示例见 [Agent 开发文档](../../docs/agent-development.md#plugin-与-skill)。
 - 事件的 `event` 字段保留 Pi 原始格式。Astron adapter 将其转换为 `CoreEvent`；其他宿主也应在 adapter 边界转换，不要将 Pi 原始结构传入产品服务。
-- 自动压缩在 checkpoint 与原文事务提交后替换 Agent、执行 loop 和 Session 的工作历史，保留摘要、必要的当前输入和近期消息，解除冷正文引用；完整原文仍在 SQLite，摘要不成为原始消息节点。请求前计算系统提示、工具 schema 和消息预算，阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片保留。摘要失败、取消、提交失败或压缩后仍超预算时不裁剪工作历史，明确结束本轮。配置使用独立的 `PI_DATA_DIR/settings.json`，手动压缩/slash 入口后续再做。上游来源、Amio 对比和配置见 [自动压缩接入说明](../../docs/compaction-integration.md)，正文回收见 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
+- 自动和手动压缩在 checkpoint 与原文事务提交后替换 Agent、执行 loop 和 Session 的工作历史，保留摘要、必要的当前输入和近期消息，解除冷正文引用；完整原文仍在 SQLite，摘要不成为原始消息节点。请求前计算系统提示、工具 schema 和消息预算，自动阈值不超过模型窗口的 90% 且预留输出空间；同一模型生成结构化摘要并合并旧 checkpoint。超限错误在未转发内容时至多压缩重试一次，当前图片保留。摘要失败、取消、提交失败或压缩后仍超预算时不裁剪工作历史。独立配置使用 `PI_DATA_DIR/settings.json`，手动 HTTP 入口复用同一策略，slash 由宿主解析。上游来源、Amio 对比和配置见 [压缩接入说明](../../docs/compaction-integration.md)，正文回收见 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
 - 会话元信息保存在 `sessions`，消息以 `session_entries` 树节点唯一持久化；新增节点和叶子状态在同一事务中写入，不再整段保存 `messages`。旧 payload 在首次启动时逐会话事务迁移，保留节点 ID、分支和导入原文。启动及列表只读元信息，执行时按 checkpoint 节点边界读取工作窗口；内存树只留叶子，消息身份通过弱引用索引关联存储。完整快照、导出、fork 和树导航临时从数据库读取原文，不回填已裁剪的工作窗口。存储层提供按父指针读取的 seq 游标分页，HTTP 可请求有界快照，SSE 使用有界启动快照和后续增量；闲置 Agent 可按 Runtime 保留策略卸载；独占 SQLite 锁阻止同目录启动第二个服务。不要用此进程承载不同用户的生产会话。实现与验证见 [历史存储 SPEC](../../docs/specs/history-storage.md) 和 [第二阶段 SPEC](../../docs/specs/compaction-working-history.md)。
 - 模型配置为进程共享，Agent 保留创建时解析的模型调用配置。Assistant/runtime 版本变化或服务重启会重建 Agent，并用会话保存的 provider/model 选择重新解析当前端点和凭据；模型不可用时历史仍可读，提交报错。目录和 health 表示本地配置状态，不代表远端凭据有效；创建会话和保存配置均不调用模型。
 - 输入和执行 checkpoint 在返回 `202` 前原子落盘；完整消息在 message_end 落盘，流式片段不逐 token 保存。默认崩溃遗留的 running 标记为 failed，显式恢复模式按上述安全边界分类；未匹配工具调用补入结果未知的错误，不自动重放，不保证工具副作用恰好一次。

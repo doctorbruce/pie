@@ -256,11 +256,7 @@ export async function createLocalRuntime(options: {
 				return result;
 			}, true),
 		createSession: (...args: Parameters<PieRuntime["createSession"]>) =>
-			execute(async () => {
-				if (args[0].workerId === undefined) return runtime.createSession(...args);
-				const created = await scheduler.createWorkerSession(args[0]);
-				return runtime.getSession(created.id);
-			}, true),
+			execute(() => runtime.createSession(...args), true),
 		getSessionCreation: (...args: Parameters<PieRuntime["getSessionCreation"]>) =>
 			execute(() => runtime.getSessionCreation(...args), false),
 		getSession: (...args: Parameters<PieRuntime["getSession"]>) => execute(() => runtime.getSession(...args), false),
@@ -290,6 +286,10 @@ export async function createLocalRuntime(options: {
 			execute(() => runtime.renameSession(...args), true),
 		archiveSession: (...args: Parameters<PieRuntime["archiveSession"]>) =>
 			execute(() => runtime.archiveSession(...args), true),
+		compactSession: (...args: Parameters<PieRuntime["compactSession"]>) => {
+			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭", "runtime_closing"));
+			return runtime.compactSession(...args);
+		},
 		cancelTurn: (...args: Parameters<PieRuntime["cancelTurn"]>) => {
 			if (closing) return Promise.reject(new RuntimeError(503, "运行时正在关闭", "runtime_closing"));
 			return runtime.cancelTurn(...args);

@@ -40,11 +40,13 @@ packages/ai：模型目录、协议适配、流式响应和凭据解析
 
 例如，写作助手下的“周报”和“方案”两个会话使用同一份助手定义，各自有独立的消息历史和 Agent 实例。同一会话同时只能执行一个 Turn，重复提交返回 `409`；不同会话在同一 Node 进程中异步并发，不是一会话一进程或一线程。
 
-Assistant 是角色配置，Pi 的 `new Agent()` 是运行对象。宿主可以把其他 Assistant 作为 Subagent 绑定交给当前 Session；模型通过普通 `task` 工具派发，服务再为目标角色创建新的 Session 和 Agent。
+Assistant 是角色配置和长期 Worker 身份，Pi 的 `new Agent()` 是会话的运行对象。一个助手拥有多个独立根 Session，模型通过 `communicate` 向获准助手发送请求、追问、进度或结果；协作不创建父子调用关系。
 
-SuperAgent 的可选 `WorkerScheduler` 将 `/host-runtimes` 中每个 assistant 映射为同 ID 的逻辑 Worker；Worker 收件、工作项、Session 关联和投递收据保存到 Local SQLite。同一 Worker 的不同根 Session 可以并行，同 Session 串行；确定性关联不额外调用模型。Worker Session 保存 `workerId === assistantId`，注入 `communicate` 并移除 `task`；普通 Session 继续原路径。Local 助手创建、更新、删除时同步创建、刷新、删除同 ID 的逻辑 Worker；运行时启动也会为已有本地助手补齐 Worker。这个同步只建立身份和配置，不创建 Worker Session 或启动模型；Worker Session 仍按具体工作懒创建。宿主可独立配置 `runtime.workerTargets: [{ assistantId, name, description }]` 作为主动通信目录；仅省略该字段时回退到 `subagents`，显式 `[]` 禁止主动目标。注册时校验目标存在于同一宿主注册表，发送时再核验最新授权；撤销立即阻止后续发送，新增目标不会自动进入在途 Turn 已装配的目录。有效 `reply_to` 按双方 Worker 和 Session 的消息因果链返回准确的来源 Session，不要求反向主动授权。来源身份由 Runtime 生成，目录、模型和产品绑定按目标选择，不继承来源历史和审批记忆。
+`WorkerScheduler` 将每个 Assistant 映射为同 ID 的逻辑 Worker；Worker 收件、工作项、Session 关联和投递收据保存到 Local SQLite。同一 Worker 的不同根 Session 可以并行，同 Session 串行；确定性关联不额外调用模型。所有根 Session 统一使用所属助手的通信身份和 `communicate`，不保留普通/Worker 模式开关，也不提供 `task`。Local 助手创建、更新、删除时同步创建、刷新、删除同 ID 的逻辑 Worker；运行时启动也会为已有本地助手补齐 Worker。这个同步只建立身份和配置，不预建 Session 或启动模型。宿主可独立配置 `runtime.workerTargets: [{ assistantId, name, description }]` 作为主动通信目录；仅省略该字段时回退到 `subagents`，显式 `[]` 禁止主动目标。注册时校验目标存在于同一宿主注册表，发送时再核验最新授权；撤销立即阻止后续发送，新增目标不会自动进入在途 Turn 已装配的目录。有效 `reply_to` 按双方 Worker 和 Session 的消息因果链返回准确的来源 Session，不要求反向主动授权。来源身份由 Runtime 生成，目录、模型和产品绑定按目标选择，不继承来源历史和审批记忆。
 
-Local 宿主支持显式 `createSession({ assistantId, workerId: assistantId, ... })`：调度器创建空 Session，并补齐确定性 WorkItem 与 Assignment，不提交 Turn 或启动模型。创建记录、工作项和关联分步持久化；带同一 `creationKey` 和相同参数重试会复用 Session 并补齐部分关联，不是跨步骤原子创建。嵌入宿主直接使用共享 Runtime 时需自行调用调度器的 `createWorkerSession` 完成该关联。
+创建根 Session 只需提供 `assistantId`，无需选择通信模式；WorkItem 与 Assignment 按协作需要建立，不为普通聊天预建工作项。Local 自动装配调度和持久通信。嵌入宿主沿用相同会话身份语义，并提供通信服务与协调存储；缺少通信服务时不能调用助手通信，不会回退 `task`。Session、工作项和关联分步保存，不承诺跨步骤原子创建；重试沿用稳定创建键与关联身份。
+
+首次关联须读取同一授权域的 Session，并在存储写入关联时原子复核其仍存在且属于目标助手的根会话；已停止的关联不能被重试复活。懒关联不复制模型覆盖，后续来信遵循该 Session 当前模型选择。嵌入宿主的 `readSession` 与 `createAssignment(..., { requireSession: true })` 契约见[嵌入接入](runtime-embedding.md#可选-worker-内部调度)。
 
 `communicate` 同时支持同步与异步等待；宿主通过 `runtime.workerWaitMode` 选择缺省值，省略时仍为 `async`。`sync` 每段保持当前 Turn 的工具等待，期间不发起模型请求；每段最长 30 秒，或在新输入到达时提前返回 `wait.status: waiting` 及 `reason: interval/message`，交回模型处理进展并以原 `message_id` 续等。有效 `question/reply/result` 优先经工具结果交回模型，保持既有原子消费；`progress` 不代表等待 ready 或工作完成，新输入仍在下一模型调用前与历史同事务接纳。只有用户明确要求时才传 `wait.timeout_ms`（1–300000），它是单次等待上限：到期返回 `timed_out`，超过 30 秒先返回 interval，续等按新调用重新计时。分段返回不让出、不取消对端，也不隐式登记异步等待。同步不接受目标为当前 Session 的请求；已受理目标 Turn 的明确失败记录在已消费投递的 error 字段，优先返回已就绪回应，否则报告该失败。
 
@@ -69,7 +71,7 @@ Local 宿主支持显式 `createSession({ assistantId, workerId: assistantId, ..
 
 Skill 刷新复用 `prepareNextTurnWithContext`，同时更新技能简介、`skill_search` 和实际 `skill` 工具，支持首次挂载、更新和移除；不重建 Agent、不改变 Turn ID、不重放工具。技能简介与可选宿主 `capabilityCatalog` 合并为隐藏 user 消息，首次或清单变化才追加完整清单，明确替代历史版本；删空发布空清单，压缩丢失清单后重新提供。清单不进入 system，不改历史前缀。保留本轮动态系统上下文、工具禁用设置、已加载的延迟工具和 MCP 连接，先保存 runtime 与消息再继续模型请求。宿主安装工具须在返回前完成资产准备、助手挂载和 `PUT /host-runtimes` 发布；只下载文件不会改变可用绑定。`assistantRevision` 仍代表准入时完整应用的版本，当前 Skill 集合以 Session 的 `runtime.skills` 为准。
 
-助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供常驻的 `skill_search` 和 `skill`，本轮 `toolAvailability` 可禁用。启用原生 `bash` 或存在 `task` 时，`job_output/job_kill` 自动加入 Agent。当前提供确认型交互、工作区边界检查和 MCP，尚无进程沙箱。MCP 通过宿主 runtime 注册，配置、权限与生命周期见 [MCP 接入说明](mcp-integration.md)。
+助手支持提示词、注册工具和插件挂载。`toolIds` 的过滤实际作用于模型可见的工具列表及 loop 可执行的工具集合；有 Skill 绑定时额外提供常驻的 `skill_search` 和 `skill`，本轮 `toolAvailability` 可禁用。启用原生 `bash` 时，`job_output/job_kill` 自动加入 Agent。当前提供确认型交互、工作区边界检查和 MCP，尚无进程沙箱。MCP 通过宿主 runtime 注册，配置、权限与生命周期见 [MCP 接入说明](mcp-integration.md)。
 
 ## Plugin 与 Skill
 
@@ -103,15 +105,15 @@ Pie 只把 Plugin 看作 Skill 包，不建立 APA、App 领域对象。例如�
 
 `skill` 仅接受当前会话已挂载的 Skill ID；挂载即授权，加载时不再重复确认。结果保留 Plugin 来源、内容哈希、Skill 目录和最多 10 个抽样文件。Core 注册十个独立工具：`read`、`bash`、`edit`、`write`、`grep`、`find`、`ls`、`webfetch`、`job_output`、`job_kill`。命令只暴露一个 `bash` ID，实际 Shell 由平台和配置决定。
 
-这十个工具、按绑定出现的 `skill_search`、`skill` 和 `task`，以及受协调 Session 的 `communicate` 都是 Pie 原生工具。它们随 Core 代码发行，独立启动就会注册，不经过 Astron 的工具安装器。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。`tool_search` 搜索按需曝光的工具，`skill_search` 搜索已挂载的技能，两者不互相替代。
+这十个工具、按绑定出现的 `skill_search`、`skill` 和助手通信工具 `communicate` 都是 Pie 原生工具。它们随 Core 代码发行，不经过 Astron 的工具安装器；嵌入宿主须为通信提供对应服务。`PI_TOOLS_DIR` 只加载记忆、邮件、知识库等宿主业务工具；Assistant 的 `toolIds` 再从已注册目录中选择本会话实际可用的工具。`tool_search` 搜索按需曝光的工具，`skill_search` 搜索已挂载的技能，两者不互相替代。
 
 `webfetch` 适配 Amio/OpenCode 的抓取和格式转换逻辑，不引入其 Effect 运行框架。它接受 HTTP(S) URL，支持 `text/markdown/html`，默认 Markdown；网络请求及响应读取默认超时 30 秒、最大 120 秒，响应上限 5 MiB。抓取前通过 `context.ask()` 请求 `webfetch` 权限，Turn 取消会中断传输和响应读取。模型结果最多预览 2000 行或 50 KiB，完整长结果保存到临时文件供 `read` 续读。图片和其他二进制文件仍与 Amio 一样拒绝。源码及新增转换依赖的许可随 Sidecar 的 `.LICENSES.txt` 发行。
 
 内置工具在创建 Agent 时按 Session 注入 `ToolRuntime`，其中包含 `sessionId`、工作区、确认回调、后台作业表和完成通知；`packages/agent` 与 agent loop 不感知这些服务。`read` 对齐 Amio v1 的文件读取边界：文本按行流式读取，默认最多 2000 行/50 KiB，单行最多 2000 字符并返回正确的续读 offset；前 4 KiB 用于图片/PDF/二进制识别，缺失路径会返回同目录候选。它也支持目录、图片和 PDF 文本分页，PDF 一次最多 20 页；PDF.js worker 随单文件 sidecar 打包。`edit/write` 返回统一 diff、诊断和 `outputs[{path, artifactRole}]`，供 Astron 生成文件卡片。当前诊断器覆盖 JS、TS、JSON 的语法诊断；尚未迁移 Amio 的多语言 LSP 进程管理器。
 
-`bash` 的参数对齐 Amio v1：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 影响，Turn 正常结束后继续运行；显式取消活跃 Turn 会停止该 Turn 创建的 Shell/Task 及子任务遗留的 Shell，清理完成后才结算。先前已结束 Turn 的作业仍由 `job_kill` 停止，不随新 Turn 取消。`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。完成通知作为 synthetic 用户内容进入模型和 follow-up 队列，但从产品快照和会话导出中隐藏，不表示用户主动发送。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
+`bash` 的参数对齐 Amio v1：`timeout` 和 `yieldMs` 都使用毫秒；默认前台超时 120 秒，运行 15 秒仍未完成会自动转为后台，`yieldMs: 0` 立即转后台。后台命令不再受前台 timeout 影响，Turn 正常结束后继续运行；显式取消活跃 Turn 会停止该 Turn 创建的 Shell，清理完成后才结算，不沿助手通信关系取消对端。先前已结束 Turn 的作业仍由 `job_kill` 停止，不随新 Turn 取消。`job_output` 增量读取，每次最多等待 300 秒，完成后自动通知 Agent。完成通知作为 synthetic 用户内容进入模型和 follow-up 队列，但从产品快照和会话导出中隐藏，不表示用户主动发送。命令输出保留尾部，截断或转后台时写入临时完整输出文件；声明的 `outputs` 只在退出码为 0 且文件存在时返回。工作区外路径和所有命令通过 `context.ask()` 请求 `external_directory` / `bash` 权限，宿主 runtime 的 `permissions` 可设为 `allow`。Windows 默认用 PowerShell，其他平台默认用 Bash/Sh；可用 `PI_SHELL` 覆盖，也保留 `PI_BASH`、`PI_POWERSHELL` 平台配置。`grep/find` 通过 `rg` 执行并遵守 `.gitignore`；可用 `PI_RG` 指定可执行文件。
 
-显式调用 `job_kill` 停止后台 Shell 或 Subagent 时，取消结果只通过当前工具调用返回，不再额外发送 synthetic 取消通知唤醒模型。工具最多等待 5 秒；若任务稍后才结束，同样保持静默，最终状态和已有输出仍可通过 `job_output` 查询。Turn 取消同样抑制所属作业的完成通知，避免停止后重新唤醒模型；正常完成和失败的通知保持。范围与验收见 [后台作业取消 SPEC](specs/background-job-cancellation.md)。
+显式调用 `job_kill` 停止后台 Shell 时，取消结果只通过当前工具调用返回，不再额外发送 synthetic 取消通知唤醒模型。工具最多等待 5 秒；若任务稍后才结束，同样保持静默，最终状态和已有输出仍可通过 `job_output` 查询。Turn 取消同样抑制所属作业的完成通知，避免停止后重新唤醒模型；正常完成和失败的通知保持。范围与验收见 [后台作业取消 SPEC](specs/background-job-cancellation.md)。
 
 `job_output/job_kill` 已向模型交付任务终态时，Runtime 确认该结果并撤销同一 Job 尚未消费的通知；迟到的完成回调也不再重复唤醒。返回 `running` 不确认终态，任务仍会正常通知完成。当前排队的未读完成通知一次性进入下一轮模型请求，避免逐条续跑；内部关联使用 Job ID，不解析通知正文。
 
@@ -150,7 +152,7 @@ POST /sessions/:id/steer { turnId, text, displayText? }
 
 这里先保存用户消息，再用原版 `Agent.continue()` 从已有消息开始循环，确保 `202` 之前输入已落盘。内部 `turn_end` 是一轮模型响应结束；外部 `turn.settled` 才代表整次用户提交已结束。循环在模型不再发起工具调用时结束，不设轮数上限。
 
-`waitForTurn` 等待当前取得的执行 Promise；正常完成不等待后台作业，显式取消则等待本轮所属 Shell/Task 及子任务作业清理。不等待其他 Turn 的作业、后续通知启动的 Turn 或外部持久任务。宿主用 SDK `listBackgroundJobs(sessionId)` 或 `GET /sessions/:id/jobs` 单独观察本实例、直接拥有的 Shell/Task 元信息；这不读历史、不汇总后代、不查询持久外部任务。空表、Turn completed 和用户目标完成是不同事实；重启后的新 instanceId 也不证明旧进程副作用停止。父删除会拒绝仍有活跃子作业的情况。
+`waitForTurn` 等待当前取得的执行 Promise；正常完成不等待后台作业，显式取消则等待本轮所属 Shell 作业清理，不沿通信关系停止对端。不等待其他 Turn 的作业、后续通知启动的 Turn 或外部持久任务。宿主用 SDK `listBackgroundJobs(sessionId)` 或 `GET /sessions/:id/jobs` 单独观察本实例、直接拥有的 Shell 元信息；这不读历史、不汇总助手通信或查询持久外部任务。空表、Turn completed 和用户目标完成是不同事实；重启后的新 instanceId 也不证明旧进程副作用停止。
 
 宿主可订阅 `GET /sessions/:id/events`，新连接收到最近 50 条消息的快照，后续按 revision 合并增量。宿主订阅全局 `GET /events`，只接收后续事件并按 `sessionId` 映射；这个流不传完整 Session 快照或 assistant partial。全局每个包都携带与会话流同源的 `execution`，包含模型、工具、交互和取消变化；即使某条 Agent 事件没有公开内容增量，也保留状态包。`interaction.requested / interaction.resolved` 都会传递；`snapshot / turn.settled` 另带最小 `turn / execution` 快照。`instanceId` 标识服务进程；`revision` 在这个进程的会话内递增。客户端只在相同进程和会话下比较 revision，实例变化或版本缺口时重新读取快照。
 
@@ -187,28 +189,27 @@ Fork 采用 Pi 上游 `/fork` 的交互语义：宿主从历史用户消息中�
 
 当前存储仍是线性 `messages[]`，因此这里只恢复“新会话分叉”，没有引入上游 JSONL 的 entry ID、同文件 `/tree` 导航、标签或分支摘要。`messageIndex` 必须指向空闲根 Session 中的用户消息；压缩摘要不直接复制，新分支保留完整原始前缀，并在达到预算时自行生成摘要。
 
-## Subagent：保持 Pi loop 的最小实现
+## 助手协作：统一使用 communicate
 
-问题是 Astron 的星小妙需要调用其他 Assistant，但 Pie 不应因此再造一套执行内核。当前解法把 Subagent 保持为普通工具调用：`packages/agent` 不感知父子关系，父 Agent 和子 Agent 都运行原来的 `Agent.continue() → agent loop → tools`。
+助手协作曾由 `task` 创建父子 Session。现在每个 Assistant 都是长期 Worker，各自在独立根 Session 中执行原来的 `Agent.continue() → agent loop → tools`，请求和结果通过持久消息往返。
 
 ```text
 Astron 当前 Assistant 配置
-  → host runtime 注册表中的父 Assistant 只保存 Subagent assistantId 引用
-  → Pie 在父 Turn 准入时解析目标 Assistant 当前 runtime
-  → 父 Session.runtime.subagents
-  → 父 Agent 获得 task AgentTool
-  → task(subagent_type, prompt, description, task_id?, background?)
-  → 新建持久子 Session，或用 task_id 继续已有子 Session
-  → 用目标 Assistant runtime 创建普通 Agent
+  → host runtime 注册 workerTargets（省略时从 subagents 取通信目标）
+  → 根 Session 获得 communicate AgentTool
+  → communicate({ to: assistantId, content, wait? })
+  → 保存消息和投递收据，按工作关联选择目标助手的独立根 Session
+  → 用目标 Assistant runtime 创建 Agent
   → Agent.continue()
-  → 最终文本作为 task 结果回到父 loop
+  → communicate({ to: 来源助手, kind: "result", reply_to: 原消息ID, content })
+  → 来源 Session 接收结果并继续
 ```
 
-内部 `SubagentBinding` 包含稳定的调用 ID、名称、说明、目标 `assistantId/assistantRevision`、目标提示词/工具/Skill 配置和可选模型。宿主协议中的 Subagent 只注册 `assistantId` 引用，Pie 从同一注册表补齐目标版本和 runtime，避免每个父 Assistant 重复嵌套目标配置。Astron 决定哪些 Assistant 可调用；Pie 不发现产品 Assistant，也不从本地助手表猜产品权限。独立本地模式则通过 Assistant 接口的 `subagentIds` 显式选择目标，由 Core 生成 `assistant-worker-{assistantId}` 绑定。若绑定未指定模型，真实模式继承父会话模型选择。
+`communicate.to` 使用目标 `assistantId`。宿主通过 `workerTargets` 提供允许主动联系的助手；省略时复用 `subagents` 的目标身份、名称和说明。独立本地模式通过 Assistant 的 `subagentIds` 选择协作目标。目标使用自己的提示词、工具、Skill、模型与目录，不继承来源历史或授权。
 
-未传 `task_id` 时创建新子 Session，不复制父消息；传入当前父 Session 拥有、且 Subagent 类型匹配的 `task_id` 时，在原子 Session 消息后追加新用户消息并继续同一个 Agent。子 Session 保存 `parentSessionId/parentToolCallId/subagentType`，完整子事件仍属于子 Session；父 Session 的 task 结果 details 带 `childSessionId/targetAssistantId/subagentType`，后台模式再带 `background/jobId`。默认会话列表隐藏子会话，`includeSubagents=true` 可查询，快照可直接读取。
+请求默认复用唯一的工作关联；`new_session: true` 明确创建独立目标会话，`session_id` 指向已知目标会话，`reply_to` 沿可信因果链回原会话。`wait: false` 只发送，默认按宿主配置同步或异步等待。普通模型正文只保留在目标 Session，目标必须显式发送 `result/reply/progress` 才会形成回信。
 
-子 Session 的 HTTP 修改、直接续聊和单独取消被拒绝；取消父活跃 Turn 会停止本轮的前台、后台 Task 及其 Shell，即使 Task 已返回而 Shell 仍在运行。父 Turn 正常完成不触发这些取消。子工具调用 `context.ask()` 时，请求发布到父 Session，用户仍从父会话答复。子 runtime 强制没有 subagents，因此仍只有一层调用。`background=true` 立即返回，子 Session 在后台继续；完成或失败后，Server 向父 Agent 的 follow-up 队列注入带 task ID 的合成消息，父 Agent 正在运行时由当前 loop 消费，已空闲时启动一个新 Turn。后台作业也可由 `job_output/job_kill` 查询或取消。
+不再提供 `task`、`task_id` 或 `background` 父子派发。旧 Task 工具记录、`parentSessionId/parentToolCallId/subagentType` 和子会话仍可查询，默认列表继续隐藏旧子会话，`includeSubagents=true` 可读取；不改写或删除历史数据。旧子会话只读，继续协作须创建根会话。新的协作 Session 是独立根会话，权限交互属于实际执行会话，取消来源 Turn 不停止对端。
 
 ## 持久化和中断恢复
 
@@ -234,7 +235,7 @@ Runtime 启动不再装载全部会话元信息：指定会话通过 `RuntimeSto
 
 服务崩溃后，默认仍将遗留 `running` 修复为 `failed`。显式设置 `PI_TURN_RECOVERY=manual` 后，SQLite 使用共享判定：输入或完整工具结果已提交且有有效执行 checkpoint 时标为 `interrupted`，经 `resumeTurn` / HTTP 恢复原 Turn；已提交最终 Assistant 时仅补齐终态。恢复优先通过 `RuntimeStore.readTurnPath` 读取当前 Turn 后缀，只有无效 checkpoint 或生成未知工具结果时才回读完整路径。原输入、Turn/request ID、已应用配置和本轮实际 prompt 保留，不应用下一轮助手更新；取消意图也在返回前持久化。当前 Astron 宿主尚未接入恢复入口，因此不改变本地默认策略。
 
-对于已经保存调用、但没有保存结果且未关联外部任务的工具，仍补入“执行结果未知”的错误结果；不会重放工具，也不会自动再次调用模型。宿主显式注入 `DurableJobExecutor` 后，工具可通过 `context.runJob` 保存任务关联，新实例查询原任务的持久状态与结果，再继续原 Turn；不恢复异步函数的代码现场。原内存 Job、Subagent 和尚未持久化的 Steer/follow-up 队列仍不支持接管。完整消息保留，未提交流式片段可能丢失，详见 [Turn 恢复 SPEC](specs/turn-recovery.md) 与 [外部任务 SPEC](specs/durable-jobs.md)。
+对于已经保存调用、但没有保存结果且未关联外部任务的工具，仍补入“执行结果未知”的错误结果；不会重放工具，也不会自动再次调用模型。宿主显式注入 `DurableJobExecutor` 后，工具可通过 `context.runJob` 保存任务关联，新实例查询原任务的持久状态与结果，再继续原 Turn；不恢复异步函数的代码现场。原内存 Job、旧 Task 和尚未持久化的 Steer/follow-up 队列仍不支持接管，Worker 消息也不承诺重启自动续跑。完整消息保留，未提交流式片段可能丢失，详见 [Turn 恢复 SPEC](specs/turn-recovery.md) 与 [外部任务 SPEC](specs/durable-jobs.md)。
 
 未完成的技能记录转为 `unknown` 并保留当时的来源绑定。如果加载结束记录已落盘、原工具输出尚未落盘，保留已知的技能记录，并提示原工具输出未保存。进程崩溃后不保证其子进程已经停止，也不把未收到结果当作执行失败的证据。
 
@@ -346,7 +347,7 @@ Astron 提供适配后的工具文件
   → content 交给模型，details 随工具事件及最终消息返回并保存
 ```
 
-每个 `.ts/.js/.mjs` 文件默认导出一个同步创建函数，返回一个 `AgentTool`；文件名（不含扩展名）就是工具 ID，必须与 tool.name 一致。只扫描目录第一层，跳过 `_` 开头的辅助文件及 `.d.ts`；重复 ID、覆盖内置工具或保留名称 `skill_search/skill/task/tool_search` 会报错。默认目录不存在时视为没有外部工具；显式指定不存在的目录会阻止启动。
+每个 `.ts/.js/.mjs` 文件默认导出一个同步创建函数，返回一个 `AgentTool`；文件名（不含扩展名）就是工具 ID，必须与 tool.name 一致。只扫描目录第一层，跳过 `_` 开头的辅助文件及 `.d.ts`；重复 ID、覆盖内置工具或保留名称 `skill_search/skill/communicate/task/send_message/wait_message/tool_search` 会报错。退役工具名仍保留，不能用外部工具恢复旧入口。默认目录不存在时视为没有外部工具；显式指定不存在的目录会阻止启动。
 
 工具代码是宿主提供的可信代码，与 Core 同进程执行。加载模块会执行顶层代码；创建函数只应组装工具，不应发起业务请求或启动后台任务。`Type` 由 Pie 提供，类型导入会被 Node 擦除，示例复制到仓库外仍可运行。其他运行依赖按工具文件位置通过 Node 解析，由宿主准备。加载采用 Node 原生同步模块机制，TS 仅支持可擦除语法，模块及依赖不能有顶层 await。
 
@@ -384,7 +385,7 @@ Pie 用 Node Single Executable Application 生成 `pie-agent(.exe)`。Cowork 发
 | --- | --- |
 | `packages/runtime/src/protocol.ts` | HTTP/SSE 类型和公开概念 |
 | `packages/server/src/server.ts` | 本地宿主装配与 HTTP / SSE 映射，不承载另一套 Loop |
-| `packages/runtime/src/runtime.ts` | 父子会话、task 派发、并发准入、事件发布和结算 |
+| `packages/runtime/src/runtime.ts` | 会话、可信助手通信、并发准入、事件发布和结算 |
 | `packages/runtime/src/capabilities.ts`、`runtime-store.ts` | 模型、工具、Skill / MCP、请求记录与异步会话存储契约 |
 | `packages/local/src/runtime.ts`、`agent.ts` | 本地能力装配与助手 / Plugin 管理 |
 | `packages/local/src/store.ts` | SQLite、消息落盘与中断恢复 |

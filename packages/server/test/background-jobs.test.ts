@@ -155,48 +155,6 @@ test("SDK separates Turn settlement from directly owned background work without 
 	await assert.rejects(runtime.listBackgroundJobs(session.id), /会话不存在/);
 });
 
-test("a child background job prevents deleting its otherwise settled parent", async (context) => {
-	const { runtime, controls } = await fixture(context);
-	await runtime.registerHostRuntimes([
-		definition,
-		{
-			assistantId: "parent-fixture",
-			assistantRevision: "1",
-			runtime: {
-				systemPrompt: "",
-				toolIds: [],
-				skills: [],
-				permissions: { task: "allow" },
-				subagents: [{ id: "worker", name: "Worker", description: "Run work", assistantId: definition.assistantId }],
-			},
-		},
-	]);
-	const parent = await runtime.createSession({ assistantId: "parent-fixture" });
-	await runtime.submitTurn(parent.id, {
-		text: `调用工具 task ${JSON.stringify({ description: "Spawn child work", prompt: "调用工具 start_job {}", subagent_type: "worker" })}`,
-	});
-	assert.equal((await runtime.waitForTurn(parent.id)).turn?.status, "completed");
-	const child = (await runtime.listSessions({ includeSubagents: true })).sessions.find(
-		(session) => session.kind === "subagent",
-	);
-	assert(child);
-	assert.equal(child.turn?.status, "completed");
-	await assert.rejects(runtime.deleteSession(parent.id), /子会话/);
-	const rootJobs = await runtime.listBackgroundJobs(parent.id);
-	assert(rootJobs.jobs.every((job) => job.ownerSessionId === parent.id));
-	assert(rootJobs.jobs.every((job) => job.status === "completed"));
-	const childJobs = await runtime.listBackgroundJobs(child.id);
-	assert.equal(childJobs.jobs.length, 1);
-	assert.equal(childJobs.jobs[0].status, "running");
-	controls.get(childJobs.jobs[0].id)!.cancel();
-	for (let attempt = 0; attempt < 20; attempt++) {
-		if ((await runtime.listBackgroundJobs(child.id)).jobs[0].status !== "running") break;
-		await new Promise<void>((resolve) => setImmediate(resolve));
-	}
-	assert.equal((await runtime.listBackgroundJobs(child.id)).jobs[0].status, "cancelled");
-	assert.deepEqual(await runtime.deleteSession(parent.id), { deleted: true });
-});
-
 test("host job stop bypasses blocked history and waits for cleanup without blocking other controls", async (context) => {
 	let releaseCleanup = () => {};
 	let releaseRead = () => {};

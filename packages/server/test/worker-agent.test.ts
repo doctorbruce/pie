@@ -20,7 +20,6 @@ function fixture(
 	const models = createModels();
 	models.setProvider(faux.provider);
 	const model = faux.getModel();
-	let delegated = 0;
 	const factory = createAgentFactory({
 		models: { current: { models, selected: { provider: model.provider, id: model.id } } },
 		recordModelRequest: () => async () => undefined,
@@ -58,19 +57,12 @@ function fixture(
 		[],
 		undefined,
 		undefined,
-		async () => {
-			delegated++;
-			return {
-				content: [{ type: "text", text: "legacy task complete" }],
-				details: { childSessionId: "child", targetAssistantId: "legacy-assistant", subagentType: "legacy-task-id" },
-			};
-		},
 		undefined,
 		undefined,
 		undefined,
 		communication,
 	);
-	return { agent, faux, factory, delegated: () => delegated };
+	return { agent, faux, factory };
 }
 
 function savedReceipt(): WorkerEnqueueResult {
@@ -343,20 +335,16 @@ test("tool availability can disable communicate without restoring task", () => {
 	assert.deepEqual(agent.state.tools, []);
 });
 
-test("ordinary Sessions retain the task tool and delegate through the existing path", async () => {
-	const { agent, faux, delegated } = fixture();
-	assert.deepEqual(
-		agent.state.tools.map((tool) => tool.name),
-		["task"],
-	);
+test("sessions without communication never restore task from subagent bindings", async () => {
+	const { agent, faux } = fixture();
+	assert.deepEqual(agent.state.tools, []);
 	faux.setResponses([
 		fauxAssistantMessage(
 			[fauxToolCall("task", { description: "Review", prompt: "review", subagent_type: "legacy-task-id" })],
 			{ stopReason: "toolUse" },
 		),
-		fauxAssistantMessage("done"),
+		fauxAssistantMessage("unsupported tool rejected"),
 	]);
-	await agent.prompt("Delegate through the legacy path");
-	assert.equal(delegated(), 1);
-	assert.equal(results(agent.state.messages)[0]?.isError, false);
+	await agent.prompt("Attempt a removed task call");
+	assert.equal(results(agent.state.messages)[0]?.isError, true);
 });

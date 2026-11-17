@@ -202,7 +202,7 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 		assert.deepEqual(requests[after].messages.slice(0, requests[before].messages.length), requests[before].messages);
 	};
 	await submit(base, session.id, "你好");
-	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
+	assert.deepEqual(toolNames(), ["communicate", "read", "security-bash", "tool_search"]);
 	assert.deepEqual(
 		searchDescription()
 			.split("\n")
@@ -243,7 +243,7 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 			(message) => message.role === "toolResult" && message.toolName === "tool_search" && message.isError,
 		),
 	);
-	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
+	assert.deepEqual(toolNames(), ["communicate", "read", "security-bash", "tool_search"]);
 
 	responses.push(
 		{ name: "tool_search", args: { query: "发送邮件", limit: 1 } },
@@ -252,8 +252,14 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 	);
 	const searchStart = requests.length;
 	let snapshot = await submit(base, session.id, "请发送邮件");
-	assert.deepEqual(toolNames(searchStart), ["read", "security-bash", "tool_search"]);
-	assert.deepEqual(toolNames(searchStart + 1), ["mail-operation", "read", "security-bash", "tool_search"]);
+	assert.deepEqual(toolNames(searchStart), ["communicate", "read", "security-bash", "tool_search"]);
+	assert.deepEqual(toolNames(searchStart + 1), [
+		"communicate",
+		"mail-operation",
+		"read",
+		"security-bash",
+		"tool_search",
+	]);
 	assert.match(searchDescription(searchStart), /- mail-operation:/);
 	assert.doesNotMatch(searchDescription(searchStart + 1), /- mail-operation:/);
 	assertAppendOnly(searchStart, searchStart + 1);
@@ -295,7 +301,7 @@ test("real provider requests stack MCP guidance in tool results without rewritin
 
 	const isolated = (await request(base, "/sessions", { assistantId: "host", mode: "real" })) as SessionSnapshot;
 	await submit(base, isolated.id, "你好");
-	assert.deepEqual(toolNames(), ["read", "security-bash", "tool_search"]);
+	assert.deepEqual(toolNames(), ["communicate", "read", "security-bash", "tool_search"]);
 	assert.match(searchDescription(), /- mail-operation:/);
 	responses.push(
 		{ name: "tool_search", args: { query: "mail-operation", limit: 1 } },

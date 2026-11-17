@@ -32,7 +32,6 @@ function definitions(workerTargets: WorkerTarget[] | undefined): HostRuntimeDefi
 				systemPrompt: "Coordinate independently",
 				toolIds: ["gate"],
 				skills: [],
-				permissions: { task: "allow" },
 				subagents: [{ id: "legacy-task", ...legacy }],
 				...(workerTargets !== undefined ? { workerTargets } : {}),
 			},
@@ -105,7 +104,7 @@ async function fixture(t: TestContext) {
 			return models.streamSimple(faux.getModel(), context, options);
 		};
 		agents.set(args[1], agent);
-		if (args[11]) communications.set(args[1], args[11]);
+		if (args[10]) communications.set(args[1], args[10]);
 		return agent;
 	};
 	const runtime = await createLocalRuntime({
@@ -189,7 +188,7 @@ test(
 );
 
 test(
-	"Worker-only targets permit model sends without widening ordinary task bindings",
+	"all root Sessions use the authorized communication targets without task bindings",
 	{ timeout: 15000 },
 	async (t) => {
 		const f = await fixture(t);
@@ -219,30 +218,33 @@ test(
 			true,
 		);
 
-		const ordinary = await f.runtime.createSession({ assistantId: "a", mode: "faux" });
-		const tools = f.agents.get(ordinary.id)!.state.tools;
-		assert(!tools.some((tool) => tool.name === "communicate"));
-		assert.match(tools.find((tool) => tool.name === "task")!.description, /legacy-task/);
-		assert.doesNotMatch(tools.find((tool) => tool.name === "task")!.description, /Worker review only/);
+		const session = await f.runtime.createSession({ assistantId: "a", mode: "faux" });
+		const tools = f.agents.get(session.id)!.state.tools;
+		assert.equal(session.workerId, "a");
+		assert(!tools.some((tool) => tool.name === "task"));
+		assert.match(tools.find((tool) => tool.name === "communicate")!.description, /Worker review only/);
+		assert.deepEqual(f.communications.get(session.id)?.targets, [reviewer]);
 		const denied = result(
-			await invoke(f.runtime, ordinary.id, "task", {
-				subagent_type: "b",
-				description: "Forbidden",
-				prompt: "Review",
+			await invoke(f.runtime, session.id, "communicate", {
+				to: "c",
+				content: "Forbidden",
 			}),
-			"task",
+			"communicate",
 		);
 		assert.equal(denied.isError, true);
 		const allowed = result(
-			await invoke(f.runtime, ordinary.id, "task", {
-				subagent_type: "legacy-task",
-				description: "Allowed",
-				prompt: "Review",
+			await invoke(f.runtime, session.id, "communicate", {
+				to: "b",
+				content: "Allowed",
+				new_session: true,
+				wait: false,
 			}),
-			"task",
+			"communicate",
 		);
 		assert.equal(allowed.isError, false, JSON.stringify(allowed));
-		assert.equal((allowed.details as { targetAssistantId: string }).targetAssistantId, "c");
+		const ordinaryReceipt = (allowed.details as { sent: WorkerEnqueueResult }).sent;
+		assert.equal(ordinaryReceipt.message.workerId, "b");
+		await f.runtime.waitWorkerDelivery(ordinaryReceipt.delivery.deliveryId);
 
 		await f.runtime.registerHostRuntimes(definitions(undefined));
 		const fallback = await f.runtime.createSession({ assistantId: "a", workerId: "a", mode: "faux" });
